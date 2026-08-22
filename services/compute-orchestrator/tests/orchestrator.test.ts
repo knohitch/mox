@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { FakeComputeProvider, HetznerProvider } from "@mox/compute-providers";
 import { ComputeOrchestrator } from "../src/service.js";
-import { InMemoryOrchestratorStore, sha256Hex } from "../src/store.js";
+import { InMemoryOrchestratorStore } from "../src/store.js";
+
+const NODE_ENROLLMENT_SECRET = "test-only-mox-node-enrollment-secret-32-bytes-minimum";
 
 function jsonRes(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 async function orchestrator(): Promise<{ orch: ComputeOrchestrator; fake: FakeComputeProvider }> {
-  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+    retryBaseMs: 1,
+    nodeEnrollmentSecret: NODE_ENROLLMENT_SECRET,
+  });
   const fake = new FakeComputeProvider();
   orch.registerProvider(fake);
   await orch.registerProviderAccount({
@@ -52,7 +57,6 @@ describe("compute orchestrator", () => {
     expect(second.created).toBe(false);
     expect(second.order.id).toBe(first.order.id);
     await orch.reconcile();
-    // Even after reconciliation the provider saw exactly one provision call.
     expect(fake.provisionCalls.filter((c) => c.idempotencyKey === `${first.order.id}:provision`)).toHaveLength(1);
     const order = await orch.getOrder(first.order.id);
     expect(order.state).toBe("running");
@@ -68,11 +72,9 @@ describe("compute orchestrator", () => {
       hostname: "ws-org-2",
       idempotencyKey: "k",
     });
-    // First tick hits the simulated timeout.
     let result = await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     expect(result.failed).toBe(1);
     expect((await orch.getOrder(order.id)).state).toBe("provisioning");
-    // Second tick (after backoff) succeeds — no duplicate purchase.
     result = await orch.reconcile(new Date(Date.now() + 120_000).toISOString());
     expect(result.succeeded).toBe(1);
     expect(fake.provisionCalls).toHaveLength(2);
@@ -81,7 +83,6 @@ describe("compute orchestrator", () => {
 
   it("abandons operations after max attempts and marks the order error", async () => {
     const { orch, fake } = await orchestrator();
-    // Every provision throws a non-retryable quota error.
     fake.setProvisionScript({ failAfter: -1, failureMessage: "quota exhausted" });
     const { order } = await orch.orderServer({
       orgId: "org-3",
@@ -98,9 +99,6 @@ describe("compute orchestrator", () => {
 
   it("handles provider success arriving after a local timeout", async () => {
     const { orch, fake } = await orchestrator();
-    // Simulate local timeout: first call throws retryable timeout, but the
-    // provider actually created the instance. The retry must converge via
-    // the same idempotency key rather than buying a second VPS.
     fake.setProvisionScript({ failFirstAttemptThenSucceed: true });
     const { order } = await orch.orderServer({
       orgId: "org-4",
@@ -113,6 +111,24 @@ describe("compute orchestrator", () => {
     await orch.reconcile(new Date(Date.now() + 120_000).toISOString());
     expect(fake.instances.size).toBeGreaterThanOrEqual(beforeCount);
     expect((await orch.getOrder(order.id)).providerInstanceId).toBeTruthy();
+  });
+
+  it("reuses the same signed enrollment grant across a provider retry", async () => {
+    const { orch, fake } = await orchestrator();
+    fake.setProvisionScript({ failFirstAttemptThenSucceed: true });
+    const { order } = await orch.orderServer({
+      orgId: "org-retry-token",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-token",
+      idempotencyKey: "token-retry",
+    });
+    const firstAt = new Date(Date.now() + 60_000).toISOString();
+    await orch.reconcile(firstAt);
+    const first = await orch.issueNodeEnrollment(order.id, { now: firstAt });
+    const secondAt = new Date(Date.now() + 120_000).toISOString();
+    await orch.reconcile(secondAt);
+    const second = await orch.issueNodeEnrollment(order.id, { now: secondAt });
+    expect(second.token).toBe(first.token);
   });
 
   it("resizes through the provider and updates desired SKU", async () => {
@@ -148,7 +164,6 @@ describe("compute orchestrator", () => {
     await orch.reconcile();
     const canceled = await orch.getOrder(order.id);
     expect(canceled.state).toBe("retention");
-    // Provider-side instance is gone even though Mox Node never answered.
     expect(fake.instances.has(instanceId)).toBe(false);
 
     const destroyed = await orch.runRetentionSweep(new Date(Date.parse(canceled.retentionUntil!) + 1000).toISOString());
@@ -156,41 +171,75 @@ describe("compute orchestrator", () => {
     expect((await orch.getOrder(order.id)).state).toBe("destroyed");
   });
 
-  it("enrolls nodes, accepts heartbeats, and flags lost nodes", async () => {
+  it("derives node ownership only from a signed one-time server grant", async () => {
     const { orch } = await orchestrator();
-    const node = await orch.enrollNode({
+    const { order } = await orch.orderServer({
       orgId: "org-7",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-7",
+      idempotencyKey: "k7",
+    });
+    const enrollment = await orch.issueNodeEnrollment(order.id, { now: "2026-03-01T00:00:00.000Z" });
+    const { node, agentToken } = await orch.enrollNode({
       nodeId: "node-a",
-      enrollToken: "one-time-token",
+      enrollToken: enrollment.token,
       version: "0.1.0",
       capabilities: ["docker", "logs"],
-      now: "2026-03-01T00:00:00.000Z",
+      now: "2026-03-01T00:00:01.000Z",
     });
     expect(node.status).toBe("active");
-    expect(node.enrollTokenHash).toBe(sha256Hex("one-time-token"));
+    expect(node.orgId).toBe("org-7");
+    expect(node.orderId).toBe(order.id);
+    expect(node.agentTokenHash).toBeTruthy();
+    expect(node.agentTokenHash).not.toBe(agentToken);
 
-    await orch.heartbeat("node-a", { cpu: 12, memPct: 40 }, undefined, "2026-03-01T00:30:00.000Z");
+    await orch.heartbeat("node-a", agentToken, { cpu: 12, memPct: 40 }, undefined, "2026-03-01T00:30:00.000Z");
     const lost = await orch.sweepLostNodes("2026-03-01T00:36:00.000Z");
     expect(lost).toEqual(["node-a"]);
 
-    // A late heartbeat brings it back.
-    await orch.heartbeat("node-a", { cpu: 9 }, undefined, "2026-03-01T00:37:00.000Z");
+    await orch.heartbeat("node-a", agentToken, { cpu: 9 }, undefined, "2026-03-01T00:37:00.000Z");
     expect((await orch.store.getNode("node-a"))?.status).toBe("active");
   });
 
-  it("rejects enrollment token mismatch for an existing node id", async () => {
+  it("rejects arbitrary, forged, reused and wrong node bearer tokens", async () => {
     const { orch } = await orchestrator();
-    await orch.enrollNode({ orgId: "org-8", nodeId: "node-b", enrollToken: "tok-1" });
     await expect(
-      orch.enrollNode({ orgId: "org-8", nodeId: "node-b", enrollToken: "tok-evil" }),
-    ).rejects.toThrow(/different token/);
+      orch.enrollNode({ nodeId: "node-evil", enrollToken: "attacker-chosen-token" }),
+    ).rejects.toThrow(/malformed|invalid/);
+
+    const { order } = await orch.orderServer({
+      orgId: "org-8",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-8",
+      idempotencyKey: "k8",
+    });
+    const grant = await orch.issueNodeEnrollment(order.id);
+    const enrolled = await orch.enrollNode({ nodeId: "node-b", enrollToken: grant.token });
+    await expect(orch.enrollNode({ nodeId: "node-b", enrollToken: grant.token })).rejects.toThrow(/consumed/);
+    await expect(orch.heartbeat("node-b", "wrong-bearer", { cpu: 1 })).rejects.toThrow(/bearer token/);
+    await expect(orch.heartbeat("node-b", enrolled.agentToken, { cpu: 1 })).resolves.toBeUndefined();
   });
 
   it("refuses candidates that are not commercially approved (Hetzner verify)", async () => {
-    const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+    const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+      retryBaseMs: 1,
+      nodeEnrollmentSecret: NODE_ENROLLMENT_SECRET,
+    });
     const hetzner = new HetznerProvider(
       { apiToken: "tok" },
-      { commercialStatus: "verify", fetchImpl: async () => jsonRes(201, { server: { id: 1, name: "h", status: "initializing", server_type: { name: "cpx41" }, datacenter: { location: { name: "fsn1" } } } }) },
+      {
+        commercialStatus: "verify",
+        fetchImpl: async () =>
+          jsonRes(201, {
+            server: {
+              id: 1,
+              name: "h",
+              status: "initializing",
+              server_type: { name: "cpx41" },
+              datacenter: { location: { name: "fsn1" } },
+            },
+          }),
+      },
     );
     orch.registerProvider(hetzner);
     await orch.configureComputeClass({
@@ -201,15 +250,17 @@ describe("compute orchestrator", () => {
       skuMap: [{ providerName: "hetzner", regionCode: "fsn1", providerSku: "cpx41" }],
       active: true,
     });
-    // Ordering is accepted (desired state) but reconciliation refuses to
-    // route traffic to a verify-gated provider.
-    const { order } = await orch.orderServer({ orgId: "org-9", computeClassCode: "COMPUTE_LARGE", hostname: "h", idempotencyKey: "k9" });
+    const { order } = await orch.orderServer({
+      orgId: "org-9",
+      computeClassCode: "COMPUTE_LARGE",
+      hostname: "h",
+      idempotencyKey: "k9",
+    });
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     const failedOrder = await orch.getOrder(order.id);
     expect(failedOrder.state).toBe("error");
     expect(failedOrder.lastError).toContain("not commercially approved");
 
-    // Once approved on an account + provider gate, selection succeeds.
     await orch.registerProviderAccount({
       providerName: "hetzner",
       accountLabel: "eu-central",
@@ -218,7 +269,12 @@ describe("compute orchestrator", () => {
       enabled: true,
     });
     (hetzner as unknown as { commercialStatus: string }).commercialStatus = "approved";
-    const second = await orch.orderServer({ orgId: "org-9", computeClassCode: "COMPUTE_LARGE", hostname: "h2", idempotencyKey: "k9b" });
+    const second = await orch.orderServer({
+      orgId: "org-9",
+      computeClassCode: "COMPUTE_LARGE",
+      hostname: "h2",
+      idempotencyKey: "k9b",
+    });
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     expect((await orch.getOrder(second.order.id)).state).toBe("running");
   });
@@ -238,7 +294,6 @@ describe("compute orchestrator", () => {
     const serialized = JSON.stringify(stored);
     expect(serialized).not.toContain("AAAATEST");
     expect(serialized).not.toMatch(/password/i);
-    // SSH public key itself lives in the key store, referenced by id.
     expect(await orch.store.getSshKey(key.id)).toBeTruthy();
     void fake;
   });
