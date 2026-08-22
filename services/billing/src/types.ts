@@ -1,12 +1,10 @@
-/**
- * Billing domain types (Prompt 08). Money is always @mox/money values:
- * integer minor units plus ISO-4217 currency. No floats anywhere.
- */
+/** Billing domain types. Money is integer minor units plus ISO currency. */
 
 import type { Money } from "@mox/money";
 
 export type PlanTier = "plus" | "pro" | "max" | "enterprise";
 export type PlanVersionStatus = "draft" | "active" | "retired";
+export type PlanEntitlementValue = boolean | number | string;
 
 export interface Product {
   id: string;
@@ -15,7 +13,6 @@ export interface Product {
   displayName: string;
 }
 
-/** Immutable once active; changes ship as a new version, never in place. */
 export interface PlanVersion {
   id: string;
   productId: string;
@@ -40,7 +37,6 @@ export interface PriceBook {
   productId: string;
   pricingRegionCode: string;
   mode: PriceBookMode;
-  /** For fx_derived books: base amount + rate used to derive local price. */
   baseCurrency?: string;
   baseAmountMinor?: bigint | number;
   fxRate?: number;
@@ -59,7 +55,6 @@ export interface PriceVersion {
 export interface AddonDefinition {
   code: string;
   displayName: string;
-  /** Consumables (AI credits) vs persistent resources (extra VPS). */
   consumable: boolean;
   unit: string;
 }
@@ -89,6 +84,8 @@ export interface Subscription {
   planVersionId: string;
   priceVersionId: string;
   state: SubscriptionState;
+  /** Explicit gateway identity. Never infer this from providerRef formatting. */
+  providerName?: string;
   providerRef?: string;
   currentPeriodStart?: string;
   currentPeriodEnd?: string;
@@ -100,6 +97,7 @@ export interface Subscription {
   canceledAt?: string;
   suspendedAt?: string;
   deletedAt?: string;
+  renewalLeaseUntil?: string;
   createdAt: string;
 }
 
@@ -112,17 +110,18 @@ export interface CheckoutSession {
   priceVersionId: string;
   state: CheckoutSessionState;
   providerName: string;
-  /** Provider-side checkout reference returned by provider.createCheckout. */
   providerRef?: string;
   redirectUrl?: string;
   expiresAt?: string;
+  applyLeaseUntil?: string;
   createdAt: string;
 }
 
 export interface BillingCustomer {
   orgId: string;
   providerName: string;
-  providerCustomerId: string;
+  /** Only set when the real gateway returns a customer id. */
+  providerCustomerId?: string;
   billingRegion: string;
   defaultDisplayCurrency?: string;
   createdAt: string;
