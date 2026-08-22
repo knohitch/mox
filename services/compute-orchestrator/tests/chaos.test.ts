@@ -1,7 +1,6 @@
 /**
- * Compute chaos suite (Prompt 14): provider failures, lost workers and
- * offline nodes must never create duplicate VPS purchases or corrupt
- * desired-state.
+ * Compute chaos suite: provider failures, lost workers and concurrent
+ * reconcilers must never create duplicate VPS purchases or corrupt state.
  */
 
 import { describe, expect, it } from "vitest";
@@ -9,8 +8,13 @@ import { FakeComputeProvider } from "@mox/compute-providers";
 import { ComputeOrchestrator } from "../src/service.js";
 import { InMemoryOrchestratorStore } from "../src/store.js";
 
+const NODE_ENROLLMENT_SECRET = "test-only-mox-node-enrollment-secret-32-bytes-minimum";
+
 async function orchestratorWith(script: Parameters<FakeComputeProvider["setProvisionScript"]>[0]) {
-  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+    retryBaseMs: 1,
+    nodeEnrollmentSecret: NODE_ENROLLMENT_SECRET,
+  });
   const fake = new FakeComputeProvider();
   fake.setProvisionScript(script);
   orch.registerProvider(fake);
@@ -33,7 +37,7 @@ async function orchestratorWith(script: Parameters<FakeComputeProvider["setProvi
 }
 
 describe("compute chaos", () => {
-  it("provider timeout AFTER a successful VPS order converges to exactly one server", async () => {
+  it("provider timeout after a successful VPS order converges to exactly one server", async () => {
     const { orch, fake } = await orchestratorWith({ failFirstAttemptThenSucceed: true });
     const { order } = await orch.orderServer({
       orgId: "org-c1",
@@ -42,7 +46,6 @@ describe("compute chaos", () => {
       idempotencyKey: "timeout-after-success",
     });
 
-    // Tick 1: local timeout. Tick 2+3: duplicate worker replays.
     const t1 = new Date(Date.now() + 60_000).toISOString();
     await orch.reconcile(t1);
     await Promise.all([
@@ -51,8 +54,7 @@ describe("compute chaos", () => {
       orch.reconcile(new Date(Date.now() + 180_000).toISOString()),
     ]);
 
-    // Exactly one real VPS exists despite retries/replays.
-    expect(fake.provisionCalls.filter((c) => c.idempotencyKey === `${order.id}:provision`)).toHaveLength(2); // 1 fail + 1 success
+    expect(fake.provisionCalls.filter((c) => c.idempotencyKey === `${order.id}:provision`)).toHaveLength(2);
     expect(fake.instances.size).toBe(1);
     expect((await orch.getOrder(order.id)).state).toBe("running");
   });
@@ -81,15 +83,13 @@ describe("compute chaos", () => {
       hostname: "ws-dup-workers",
       idempotencyKey: "dup-worker",
     });
-    // Two schedulers race the same due operation.
     const now = new Date(Date.now() + 60_000).toISOString();
     await Promise.all([orch.reconcile(now), orch.reconcile(now), orch.reconcile(now)]);
-    // The op is claimed by one; others find nothing due or the op already succeeded.
     expect(fake.instances.size).toBeLessThanOrEqual(1);
     expect(fake.provisionCalls.length).toBeLessThanOrEqual(1);
   });
 
-  it("cancel during a provisioning outage still destroys nothing twice", async () => {
+  it("cancel during provisioning then replay is idempotent", async () => {
     const { orch } = await orchestratorWith({});
     const { order } = await orch.orderServer({
       orgId: "org-c4",
@@ -99,7 +99,6 @@ describe("compute chaos", () => {
     });
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     await orch.cancelOrder(order.id);
-    // Cancel op runs once; replaying reconciliation must not error.
     await orch.reconcile(new Date(Date.now() + 90_000).toISOString());
     await orch.reconcile(new Date(Date.now() + 120_000).toISOString());
     expect((await orch.getOrder(order.id)).state).toBe("retention");
