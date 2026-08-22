@@ -1,4 +1,5 @@
 import {
+  boolean,
   index,
   integer,
   jsonb,
@@ -137,7 +138,7 @@ export const systemModelProviders = pgTable(
     displayName: text("display_name").notNull(),
     kind: providerKind("kind").notNull().default("api"),
     capabilities: jsonb("capabilities").notNull().default([]),
-    enabled: text("enabled").notNull().default("true"),
+    enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -154,7 +155,7 @@ export const systemModels = pgTable(
     slug: text("slug").notNull(),
     displayName: text("display_name").notNull(),
     contextWindow: integer("context_window"),
-    enabled: text("enabled").notNull().default("true"),
+    enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
