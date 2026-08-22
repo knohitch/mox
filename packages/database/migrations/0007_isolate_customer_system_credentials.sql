@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS "system_model_providers" (
   "display_name" text NOT NULL,
   "kind" "provider_kind" DEFAULT 'api' NOT NULL,
   "capabilities" jsonb DEFAULT '[]'::jsonb NOT NULL,
-  "enabled" text DEFAULT 'true' NOT NULL,
+  "enabled" boolean DEFAULT true NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS "system_models" (
   "slug" text NOT NULL,
   "display_name" text NOT NULL,
   "context_window" integer,
-  "enabled" text DEFAULT 'true' NOT NULL,
+  "enabled" boolean DEFAULT true NOT NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL,
   "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT "system_models_provider_id_system_model_providers_id_fk"
