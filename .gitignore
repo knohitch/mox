@@ -1,0 +1,10 @@
+node_modules
+dist
+*.tsbuildinfo
+
+# Imported upstream source trees (vendored; not part of the Mox git history
+# until the consolidation plan decides otherwise — see
+# docs/consolidation/PROVENANCE.md). Never delete these directories.
+OpenBot-main/
+OpenMausBot-main/
+deepseek-harness-master/

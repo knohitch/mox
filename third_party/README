@@ -1,0 +1,6 @@
+# third_party/
+
+Vendored third-party code with preserved licenses and notices (see
+`docs/consolidation/PROVENANCE.md`). Intentionally empty in Prompt 01. Any
+vendored code must arrive with its license text and, for Apache-2.0, its
+NOTICE file, recorded in PROVENANCE.md before the first commit that uses it.

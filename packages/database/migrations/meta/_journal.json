@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1787324433713,
+      "tag": "0000_sticky_thor_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1787344546328,
+      "tag": "0001_youthful_iceman",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787349452446,
+      "tag": "0002_kind_archangel",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787351063703,
+      "tag": "0003_low_prowler",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787352520429,
+      "tag": "0004_reflective_kinsey_walden",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787355997413,
+      "tag": "0005_redundant_human_cannonball",
+      "breakpoints": true
+    }
+  ]
+}

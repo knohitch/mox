@@ -1,0 +1,23 @@
+{
+  "name": "mox-monorepo",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter @mox/* run build",
+    "typecheck": "pnpm -r --filter @mox/* run typecheck",
+    "lint": "oxlint packages apps services runtime infra",
+    "test": "vitest run",
+    "scan:authority": "node scripts/authority-scan.mjs",
+    "baseline:checks": "scripts\\baseline-checks.cmd"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "oxlint": "^1.78.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.8"
+  }
+}

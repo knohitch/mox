@@ -1,0 +1,6 @@
+# infra/
+
+Mox-owned infrastructure definitions (deployment, desired-state reconcilers,
+server provisioning). Intentionally empty in Prompt 01. The customer VPS is
+untrusted (Architecture Rule 3); all external side effects must be idempotent
+and audited via `DesiredState`/`OperationRecord`.
