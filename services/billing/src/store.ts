@@ -1,8 +1,4 @@
-/**
- * Billing persistence contract plus an in-memory implementation for tests
- * and local development. A Drizzle/Postgres store maps 1:1 onto
- * packages/database schema/billing.ts tables.
- */
+/** Billing persistence contract plus an in-memory test implementation. */
 
 import { randomUUID } from "node:crypto";
 import type {
@@ -10,6 +6,7 @@ import type {
   BillingCustomer,
   CheckoutSession,
   Invoice,
+  PlanEntitlementValue,
   PriceBook,
   PriceVersion,
   PricingRegion,
@@ -32,6 +29,8 @@ export interface BillingStore {
   getPlanVersion(id: string): Promise<PlanVersion | undefined>;
   listPlanVersions(productId: string): Promise<PlanVersion[]>;
   updatePlanVersion(version: PlanVersion): Promise<void>;
+  replacePlanEntitlementValues(planVersionId: string, values: Record<string, PlanEntitlementValue>): Promise<void>;
+  getPlanEntitlementValues(planVersionId: string): Promise<Record<string, PlanEntitlementValue>>;
 
   definePricingRegion(region: PricingRegion): Promise<PricingRegion>;
   getPricingRegion(code: string): Promise<PricingRegion | undefined>;
@@ -56,9 +55,15 @@ export interface BillingStore {
   createSubscription(subscription: Subscription): Promise<Subscription>;
   getSubscription(id: string): Promise<Subscription | undefined>;
   getActiveSubscriptionForOrg(orgId: string): Promise<Subscription | undefined>;
-  findSubscriptionByProviderRef(providerRef: string): Promise<Subscription | undefined>;
+  findSubscriptionByProviderRef(providerName: string, providerRef: string): Promise<Subscription | undefined>;
   updateSubscription(subscription: Subscription): Promise<void>;
   listSubscriptionsInState(states: string[]): Promise<Subscription[]>;
+  /** Atomically lease a subscription renewal to one worker. */
+  claimSubscriptionRenewal(
+    subscriptionId: string,
+    nowIso: string,
+    leaseUntilIso: string,
+  ): Promise<Subscription | undefined>;
 
   addItem(item: SubscriptionItem): Promise<SubscriptionItem>;
   listItems(subscriptionId: string): Promise<SubscriptionItem[]>;
@@ -69,8 +74,15 @@ export interface BillingStore {
   // Checkout
   createCheckoutSession(session: CheckoutSession): Promise<CheckoutSession>;
   getCheckoutSession(id: string): Promise<CheckoutSession | undefined>;
+  findCheckoutSessionByProviderRef(providerName: string, providerRef: string): Promise<CheckoutSession | undefined>;
   findCheckoutSessionsByOrg(orgId: string): Promise<CheckoutSession[]>;
   updateCheckoutSession(session: CheckoutSession): Promise<void>;
+  /** Atomically lease webhook application to one worker. */
+  claimCheckoutApplication(
+    sessionId: string,
+    nowIso: string,
+    leaseUntilIso: string,
+  ): Promise<CheckoutSession | undefined>;
 
   // Invoices
   createInvoice(invoice: Invoice): Promise<Invoice>;
@@ -85,9 +97,12 @@ export interface BillingStore {
   updateWebhook(record: WebhookRecord): Promise<void>;
 }
 
+const LIVE_SUBSCRIPTION_STATES = new Set(["trial", "active", "past_due", "grace_period", "suspended"]);
+
 export class InMemoryBillingStore implements BillingStore {
   private readonly products = new Map<string, Product>();
   private readonly planVersions = new Map<string, PlanVersion>();
+  private readonly planEntitlementValues = new Map<string, Record<string, PlanEntitlementValue>>();
   private readonly pricingRegions = new Map<string, PricingRegion>();
   private readonly priceBooks = new Map<string, PriceBook>();
   private readonly priceVersions = new Map<string, PriceVersion>();
@@ -102,7 +117,7 @@ export class InMemoryBillingStore implements BillingStore {
   private readonly webhooks = new Map<string, WebhookRecord>();
 
   async createProduct(product: Product): Promise<Product> {
-    this.products.set(product.id, product);
+    this.products.set(product.id, { ...product });
     return product;
   }
 
@@ -120,7 +135,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async createPlanVersion(version: PlanVersion): Promise<PlanVersion> {
-    this.planVersions.set(version.id, version);
+    this.planVersions.set(version.id, { ...version });
     return version;
   }
 
@@ -129,16 +144,28 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async listPlanVersions(productId: string): Promise<PlanVersion[]> {
-    const rows = [...this.planVersions.values()].filter((v) => v.productId === productId);
-    return rows.sort((a, b) => a.version - b.version);
+    return [...this.planVersions.values()]
+      .filter((v) => v.productId === productId)
+      .sort((a, b) => a.version - b.version);
   }
 
   async updatePlanVersion(version: PlanVersion): Promise<void> {
-    this.planVersions.set(version.id, version);
+    this.planVersions.set(version.id, { ...version });
+  }
+
+  async replacePlanEntitlementValues(
+    planVersionId: string,
+    values: Record<string, PlanEntitlementValue>,
+  ): Promise<void> {
+    this.planEntitlementValues.set(planVersionId, { ...values });
+  }
+
+  async getPlanEntitlementValues(planVersionId: string): Promise<Record<string, PlanEntitlementValue>> {
+    return { ...(this.planEntitlementValues.get(planVersionId) ?? {}) };
   }
 
   async definePricingRegion(region: PricingRegion): Promise<PricingRegion> {
-    this.pricingRegions.set(region.code, region);
+    this.pricingRegions.set(region.code, { ...region });
     return region;
   }
 
@@ -151,7 +178,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async upsertPriceBook(book: PriceBook): Promise<PriceBook> {
-    this.priceBooks.set(book.id, book);
+    this.priceBooks.set(book.id, { ...book });
     return book;
   }
 
@@ -171,7 +198,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async createPriceVersion(version: PriceVersion): Promise<PriceVersion> {
-    this.priceVersions.set(version.id, version);
+    this.priceVersions.set(version.id, { ...version });
     return version;
   }
 
@@ -180,12 +207,13 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async listPriceVersions(priceBookId: string): Promise<PriceVersion[]> {
-    const rows = [...this.priceVersions.values()].filter((v) => v.priceBookId === priceBookId);
-    return rows.sort((a, b) => a.version - b.version || a.effectiveFrom.localeCompare(b.effectiveFrom));
+    return [...this.priceVersions.values()]
+      .filter((v) => v.priceBookId === priceBookId)
+      .sort((a, b) => a.version - b.version || a.effectiveFrom.localeCompare(b.effectiveFrom));
   }
 
   async defineAddon(addon: AddonDefinition): Promise<AddonDefinition> {
-    this.addons.set(addon.code, addon);
+    this.addons.set(addon.code, { ...addon });
     return addon;
   }
 
@@ -194,7 +222,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async upsertBillingCustomer(customer: BillingCustomer): Promise<BillingCustomer> {
-    this.billingCustomers.set(`${customer.orgId}:${customer.providerName}`, customer);
+    this.billingCustomers.set(`${customer.orgId}:${customer.providerName}`, { ...customer });
     return customer;
   }
 
@@ -203,7 +231,13 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async createSubscription(subscription: Subscription): Promise<Subscription> {
-    this.subscriptions.set(subscription.id, subscription);
+    if (LIVE_SUBSCRIPTION_STATES.has(subscription.state)) {
+      const existing = await this.getActiveSubscriptionForOrg(subscription.orgId);
+      if (existing && existing.id !== subscription.id) {
+        throw new Error(`organization ${subscription.orgId} already has a live subscription`);
+      }
+    }
+    this.subscriptions.set(subscription.id, { ...subscription });
     return subscription;
   }
 
@@ -212,29 +246,43 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async getActiveSubscriptionForOrg(orgId: string): Promise<Subscription | undefined> {
-    const live = ["trial", "active", "past_due", "grace_period", "suspended"];
     for (const sub of this.subscriptions.values()) {
-      if (sub.orgId === orgId && live.includes(sub.state)) return sub;
+      if (sub.orgId === orgId && LIVE_SUBSCRIPTION_STATES.has(sub.state)) return sub;
     }
     return undefined;
   }
 
-  async findSubscriptionByProviderRef(providerRef: string): Promise<Subscription | undefined> {
-    for (const sub of this.subscriptions.values()) if (sub.providerRef === providerRef) return sub;
+  async findSubscriptionByProviderRef(providerName: string, providerRef: string): Promise<Subscription | undefined> {
+    for (const sub of this.subscriptions.values()) {
+      if (sub.providerName === providerName && sub.providerRef === providerRef) return sub;
+    }
     return undefined;
   }
 
   async updateSubscription(subscription: Subscription): Promise<void> {
-    this.subscriptions.set(subscription.id, subscription);
+    this.subscriptions.set(subscription.id, { ...subscription });
   }
 
   async listSubscriptionsInState(states: string[]): Promise<Subscription[]> {
     return [...this.subscriptions.values()].filter((s) => states.includes(s.state));
   }
 
+  async claimSubscriptionRenewal(
+    subscriptionId: string,
+    nowIso: string,
+    leaseUntilIso: string,
+  ): Promise<Subscription | undefined> {
+    const sub = this.subscriptions.get(subscriptionId);
+    if (!sub) return undefined;
+    if (sub.renewalLeaseUntil && sub.renewalLeaseUntil > nowIso) return undefined;
+    const claimed = { ...sub, renewalLeaseUntil: leaseUntilIso };
+    this.subscriptions.set(subscriptionId, claimed);
+    return claimed;
+  }
+
   async addItem(item: SubscriptionItem): Promise<SubscriptionItem> {
     const list = this.items.get(item.subscriptionId) ?? [];
-    list.push(item);
+    list.push({ ...item });
     this.items.set(item.subscriptionId, list);
     return item;
   }
@@ -243,7 +291,6 @@ export class InMemoryBillingStore implements BillingStore {
     return [...(this.items.get(subscriptionId) ?? [])];
   }
 
-  /** Returns false when an identical idempotency key already applied. */
   async recordTransition(transition: SubscriptionTransition): Promise<boolean> {
     if (transition.idempotencyKey) {
       const key = `${transition.subscriptionId}:${transition.idempotencyKey}`;
@@ -251,7 +298,7 @@ export class InMemoryBillingStore implements BillingStore {
       this.transitionKeys.add(key);
     }
     const list = this.transitions.get(transition.subscriptionId) ?? [];
-    list.push(transition);
+    list.push({ ...transition });
     this.transitions.set(transition.subscriptionId, list);
     return true;
   }
@@ -261,7 +308,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async createCheckoutSession(session: CheckoutSession): Promise<CheckoutSession> {
-    this.checkoutSessions.set(session.id, session);
+    this.checkoutSessions.set(session.id, { ...session });
     return session;
   }
 
@@ -269,16 +316,36 @@ export class InMemoryBillingStore implements BillingStore {
     return this.checkoutSessions.get(id);
   }
 
+  async findCheckoutSessionByProviderRef(providerName: string, providerRef: string): Promise<CheckoutSession | undefined> {
+    for (const session of this.checkoutSessions.values()) {
+      if (session.providerName === providerName && session.providerRef === providerRef) return session;
+    }
+    return undefined;
+  }
+
   async findCheckoutSessionsByOrg(orgId: string): Promise<CheckoutSession[]> {
     return [...this.checkoutSessions.values()].filter((s) => s.orgId === orgId);
   }
 
   async updateCheckoutSession(session: CheckoutSession): Promise<void> {
-    this.checkoutSessions.set(session.id, session);
+    this.checkoutSessions.set(session.id, { ...session });
+  }
+
+  async claimCheckoutApplication(
+    sessionId: string,
+    nowIso: string,
+    leaseUntilIso: string,
+  ): Promise<CheckoutSession | undefined> {
+    const session = this.checkoutSessions.get(sessionId);
+    if (!session || session.state === "completed" || session.state === "expired") return undefined;
+    if (session.applyLeaseUntil && session.applyLeaseUntil > nowIso) return undefined;
+    const claimed = { ...session, applyLeaseUntil: leaseUntilIso };
+    this.checkoutSessions.set(sessionId, claimed);
+    return claimed;
   }
 
   async createInvoice(invoice: Invoice): Promise<Invoice> {
-    this.invoices.set(invoice.id, invoice);
+    this.invoices.set(invoice.id, { ...invoice });
     return invoice;
   }
 
@@ -292,11 +359,7 @@ export class InMemoryBillingStore implements BillingStore {
     attempt: number,
   ): Promise<Invoice | undefined> {
     for (const invoice of this.invoices.values()) {
-      if (
-        invoice.subscriptionId === subscriptionId &&
-        invoice.periodStart === periodStart &&
-        invoice.attempt === attempt
-      ) {
+      if (invoice.subscriptionId === subscriptionId && invoice.periodStart === periodStart && invoice.attempt === attempt) {
         return invoice;
       }
     }
@@ -304,7 +367,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async updateInvoice(invoice: Invoice): Promise<void> {
-    this.invoices.set(invoice.id, invoice);
+    this.invoices.set(invoice.id, { ...invoice });
   }
 
   async listInvoices(subscriptionId: string): Promise<Invoice[]> {
@@ -313,11 +376,10 @@ export class InMemoryBillingStore implements BillingStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  /** Returns false when this (provider, externalEventId) was already seen. */
   async recordWebhook(record: WebhookRecord): Promise<boolean> {
     const key = `${record.providerName}:${record.externalEventId}`;
     if (this.webhooks.has(key)) return false;
-    this.webhooks.set(key, record);
+    this.webhooks.set(key, { ...record });
     return true;
   }
 
@@ -326,7 +388,7 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async updateWebhook(record: WebhookRecord): Promise<void> {
-    this.webhooks.set(`${record.providerName}:${record.externalEventId}`, record);
+    this.webhooks.set(`${record.providerName}:${record.externalEventId}`, { ...record });
   }
 }
 
