@@ -1,12 +1,10 @@
-/**
- * Compute orchestrator persistence contract + in-memory implementation.
- * Mirrors packages/database schema/compute.ts for Postgres deployment.
- */
+/** Compute orchestrator persistence contract + in-memory reference implementation. */
 
 import { createHash, randomUUID } from "node:crypto";
 import type {
   ComputeClass,
   MoxNodeRecord,
+  NodeEnrollmentRecord,
   OperationKind,
   ProviderAccountRecord,
   ServerOperation,
@@ -42,6 +40,19 @@ export interface OrchestratorStore {
   getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined>;
   updateOperation(op: ServerOperation): Promise<void>;
   dueOperations(nowIso: string): Promise<ServerOperation[]>;
+  /** Atomically claim queued/failed work or an expired running lease. */
+  claimOperation(operationId: string, nowIso: string, leaseUntilIso: string): Promise<ServerOperation | undefined>;
+
+  // One-time node enrollment grants
+  createNodeEnrollment(record: NodeEnrollmentRecord): Promise<NodeEnrollmentRecord>;
+  getActiveNodeEnrollmentForOrder(orderId: string, nowIso: string): Promise<NodeEnrollmentRecord | undefined>;
+  consumeNodeEnrollment(input: {
+    tokenId: string;
+    tokenHash: string;
+    nodeId: string;
+    nowIso: string;
+  }): Promise<NodeEnrollmentRecord | undefined>;
+  revokeNodeEnrollmentsForOrder(orderId: string, nowIso: string): Promise<number>;
 
   // Nodes
   upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord>;
@@ -58,12 +69,13 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   private readonly orders = new Map<string, ServerOrder>();
   private readonly idemIndex = new Map<string, string>();
   private readonly operations = new Map<string, ServerOperation>();
-  private readonly opIndex = new Set<string>();
+  private readonly opIndex = new Map<string, string>();
+  private readonly enrollments = new Map<string, NodeEnrollmentRecord>();
   private readonly nodes = new Map<string, MoxNodeRecord>();
   private readonly nonces = new Set<string>();
 
   async upsertComputeClass(cls: ComputeClass): Promise<void> {
-    this.classes.set(cls.code, cls);
+    this.classes.set(cls.code, { ...cls, skuMap: [...cls.skuMap] });
   }
 
   async getComputeClass(code: string): Promise<ComputeClass | undefined> {
@@ -75,7 +87,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   }
 
   async upsertProviderAccount(account: ProviderAccountRecord): Promise<void> {
-    this.accounts.set(`${account.providerName}:${account.accountLabel}`, account);
+    this.accounts.set(`${account.providerName}:${account.accountLabel}`, { ...account });
   }
 
   async listProviderAccounts(providerName?: string): Promise<ProviderAccountRecord[]> {
@@ -84,7 +96,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   }
 
   async addSshKey(key: SshKeyRecord): Promise<SshKeyRecord> {
-    this.sshKeys.set(key.id, key);
+    this.sshKeys.set(key.id, { ...key });
     return key;
   }
 
@@ -100,7 +112,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   async insertOrder(order: ServerOrder): Promise<boolean> {
     const key = `${order.orgId}:${order.idempotencyKey}`;
     if (this.idemIndex.has(key)) return false;
-    this.orders.set(order.id, order);
+    this.orders.set(order.id, { ...order });
     this.idemIndex.set(key, order.id);
     return true;
   }
@@ -115,8 +127,9 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   }
 
   async updateOrder(order: ServerOrder): Promise<void> {
-    order.updatedAt = new Date().toISOString();
-    this.orders.set(order.id, order);
+    const updated = { ...order, updatedAt: new Date().toISOString() };
+    Object.assign(order, updated);
+    this.orders.set(order.id, updated);
   }
 
   async listOrdersInState(states: string[]): Promise<ServerOrder[]> {
@@ -131,40 +144,101 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
 
   async upsertOperation(op: ServerOperation): Promise<void> {
     const key = `${op.orderId}:${op.kind}:${op.idempotencyKey}`;
-    if (!this.opIndex.has(key)) {
-      this.opIndex.add(key);
-      this.operations.set(op.id, op);
-    } else {
-      await this.updateOperation(op);
+    const existingId = this.opIndex.get(key);
+    if (!existingId) {
+      this.opIndex.set(key, op.id);
+      this.operations.set(op.id, { ...op });
+      return;
     }
+    this.operations.set(existingId, { ...op, id: existingId });
   }
 
   async getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined> {
-    for (const op of this.operations.values()) {
-      if (op.orderId === orderId && op.kind === kind && op.idempotencyKey === idempotencyKey) return op;
-    }
-    return undefined;
+    const id = this.opIndex.get(`${orderId}:${kind}:${idempotencyKey}`);
+    return id ? this.operations.get(id) : undefined;
   }
 
   async updateOperation(op: ServerOperation): Promise<void> {
-    op.updatedAt = new Date().toISOString();
-    this.operations.set(op.id, op);
+    const updated = { ...op, updatedAt: new Date().toISOString() };
+    Object.assign(op, updated);
+    this.operations.set(op.id, updated);
   }
 
   async dueOperations(nowIso: string): Promise<ServerOperation[]> {
     const now = Date.parse(nowIso);
     return [...this.operations.values()]
-      .filter(
-        (op) =>
-          (op.state === "queued" || op.state === "failed") &&
-          Date.parse(op.nextAttemptAt) <= now &&
-          op.attempts < op.maxAttempts,
-      )
+      .filter((op) => {
+        if (op.attempts >= op.maxAttempts) return false;
+        if ((op.state === "queued" || op.state === "failed") && Date.parse(op.nextAttemptAt) <= now) return true;
+        return op.state === "running" && !!op.leaseUntil && Date.parse(op.leaseUntil) <= now;
+      })
       .sort((a, b) => a.nextAttemptAt.localeCompare(b.nextAttemptAt));
   }
 
+  async claimOperation(operationId: string, nowIso: string, leaseUntilIso: string): Promise<ServerOperation | undefined> {
+    const op = this.operations.get(operationId);
+    if (!op || op.attempts >= op.maxAttempts) return undefined;
+    const now = Date.parse(nowIso);
+    const claimable =
+      ((op.state === "queued" || op.state === "failed") && Date.parse(op.nextAttemptAt) <= now) ||
+      (op.state === "running" && !!op.leaseUntil && Date.parse(op.leaseUntil) <= now);
+    if (!claimable) return undefined;
+    const claimed: ServerOperation = { ...op, state: "running", leaseUntil: leaseUntilIso, updatedAt: nowIso };
+    this.operations.set(operationId, claimed);
+    return claimed;
+  }
+
+  async createNodeEnrollment(record: NodeEnrollmentRecord): Promise<NodeEnrollmentRecord> {
+    if (this.enrollments.has(record.tokenId)) throw new Error(`enrollment token id exists: ${record.tokenId}`);
+    this.enrollments.set(record.tokenId, { ...record });
+    return record;
+  }
+
+  async getActiveNodeEnrollmentForOrder(orderId: string, nowIso: string): Promise<NodeEnrollmentRecord | undefined> {
+    return [...this.enrollments.values()]
+      .filter(
+        (r) =>
+          r.orderId === orderId &&
+          !r.consumedAt &&
+          !r.revokedAt &&
+          Date.parse(r.expiresAt) > Date.parse(nowIso),
+      )
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  }
+
+  async consumeNodeEnrollment(input: {
+    tokenId: string;
+    tokenHash: string;
+    nodeId: string;
+    nowIso: string;
+  }): Promise<NodeEnrollmentRecord | undefined> {
+    const row = this.enrollments.get(input.tokenId);
+    if (
+      !row ||
+      row.tokenHash !== input.tokenHash ||
+      row.consumedAt ||
+      row.revokedAt ||
+      Date.parse(row.expiresAt) <= Date.parse(input.nowIso)
+    ) {
+      return undefined;
+    }
+    const consumed = { ...row, consumedAt: input.nowIso, consumedByNodeId: input.nodeId };
+    this.enrollments.set(row.tokenId, consumed);
+    return consumed;
+  }
+
+  async revokeNodeEnrollmentsForOrder(orderId: string, nowIso: string): Promise<number> {
+    let count = 0;
+    for (const [tokenId, row] of this.enrollments) {
+      if (row.orderId !== orderId || row.consumedAt || row.revokedAt) continue;
+      this.enrollments.set(tokenId, { ...row, revokedAt: nowIso });
+      count += 1;
+    }
+    return count;
+  }
+
   async upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord> {
-    this.nodes.set(node.nodeId, node);
+    this.nodes.set(node.nodeId, { ...node, capabilities: [...node.capabilities] });
     return node;
   }
 
@@ -173,7 +247,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   }
 
   async updateNode(node: MoxNodeRecord): Promise<void> {
-    this.nodes.set(node.nodeId, node);
+    this.nodes.set(node.nodeId, { ...node, capabilities: [...node.capabilities] });
   }
 
   async listNodes(): Promise<MoxNodeRecord[]> {
