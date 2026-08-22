@@ -1,19 +1,16 @@
 /**
- * Compute orchestrator (Prompt 09): Mox-owned desired-state workflow for
- * dedicated VPS provisioning. HTTP requests only observe state; a durable
- * reconciliation loop drives providers with idempotent, retryable ops.
+ * Mox compute orchestration authority.
  *
- * Rules enforced here:
- * - Double-click ordering is safe: (org, idempotencyKey) dedupe.
- * - Hetzner-class providers need commercialStatus "approved" to serve traffic.
- * - Mox Node is untrusted: enrollment/heartbeat are advisory; ownership,
- *   entitlement and billing truth never depend on it.
- * - Provider-side lifecycle works even when the node is offline.
+ * Provider side effects are driven from durable desired state. Mox Node is
+ * customer-controlled and untrusted: it can report telemetry and execute
+ * authenticated commands, but it cannot choose its organization, order,
+ * entitlements or billing state.
  */
 
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ComputeProvider } from "@mox/compute-providers";
-import type { HealthReport } from "@mox/contracts";
 import { ProviderError } from "@mox/compute-providers";
+import type { HealthReport } from "@mox/contracts";
 import type { ProviderHealthScorer } from "@mox/provider-health";
 import { buildMoxNodeCloudInit } from "./cloudinit.js";
 import {
@@ -26,6 +23,7 @@ import type {
   ComputeClass,
   ComputeClassSkuCandidate,
   MoxNodeRecord,
+  NodeEnrollmentRecord,
   OperationKind,
   ProviderAccountRecord,
   ServerOperation,
@@ -37,15 +35,28 @@ export class OrchestratorError extends Error {}
 export class NotFoundError extends OrchestratorError {}
 export class NotApprovedError extends OrchestratorError {}
 export class TerminalFailureError extends OrchestratorError {}
+export class NodeAuthenticationError extends OrchestratorError {}
 
 export interface OrchestratorOptions {
-  /** Backoff base for operation retries. */
+  /** Backoff base for provider-operation retries. */
   retryBaseMs?: number;
   maxAttempts?: number;
+  /** Recover a provider operation after a worker dies while holding it. */
+  operationLeaseMs?: number;
   /** Heartbeat staleness threshold for marking nodes lost. */
   heartbeatLostMs?: number;
   /** Retention window before destroyed cleanup. */
   retentionDays?: number;
+  /** Lifetime of a first-boot/re-enrollment grant. */
+  nodeEnrollmentTtlMs?: number;
+  /**
+   * Mox-owned secret used only to sign node enrollment grants. It must come
+   * from the system secret boundary (KMS/vault/env injection), never from a
+   * customer credential record. Provision/enrollment fail closed without it.
+   */
+  nodeEnrollmentSecret?: string;
+  /** Public/control-plane origin inserted into cloud-init. */
+  controlPlaneUrl?: string;
   /** Optional health registry; when present, selection ranks by health. */
   healthScorer?: ProviderHealthScorer;
 }
@@ -57,22 +68,36 @@ interface ReconcileResult {
   abandoned: number;
 }
 
+export interface NodeEnrollmentResult {
+  node: MoxNodeRecord;
+  /** Returned once to Mox Node; only its hash is persisted. */
+  agentToken: string;
+}
+
 export class ComputeOrchestrator {
   readonly store: OrchestratorStore;
   private readonly providers = new Map<string, ComputeProvider>();
   private readonly healthScorer?: ProviderHealthScorer;
   private readonly retryBaseMs: number;
   private readonly defaultMaxAttempts: number;
+  private readonly operationLeaseMs: number;
   private readonly heartbeatLostMs: number;
   private readonly retentionDays: number;
+  private readonly nodeEnrollmentTtlMs: number;
+  private readonly nodeEnrollmentSecret?: string;
+  private readonly controlPlaneUrl: string;
 
   constructor(store: OrchestratorStore = new InMemoryOrchestratorStore(), options: OrchestratorOptions = {}) {
     this.store = store;
     this.healthScorer = options.healthScorer;
     this.retryBaseMs = options.retryBaseMs ?? 1000;
     this.defaultMaxAttempts = options.maxAttempts ?? 5;
+    this.operationLeaseMs = options.operationLeaseMs ?? 2 * 60_000;
     this.heartbeatLostMs = options.heartbeatLostMs ?? 5 * 60_000;
     this.retentionDays = options.retentionDays ?? 14;
+    this.nodeEnrollmentTtlMs = options.nodeEnrollmentTtlMs ?? 24 * 60 * 60_000;
+    this.nodeEnrollmentSecret = options.nodeEnrollmentSecret;
+    this.controlPlaneUrl = options.controlPlaneUrl ?? "https://control-plane.mox.internal";
   }
 
   // ---- Registration ----------------------------------------------------------
@@ -97,12 +122,12 @@ export class ComputeOrchestrator {
     return full;
   }
 
-  /**
-   * Rotate an account's credential reference (blast-radius control).
-   * Rotation is metadata here: the vault swap happens in @mox/credentials;
-   * this records which credential ref the account now uses.
-   */
-  async rotateProviderAccountCredential(input: { providerName: string; accountLabel: string; newCredentialRefId: string; actor: string }): Promise<ProviderAccountRecord> {
+  async rotateProviderAccountCredential(input: {
+    providerName: string;
+    accountLabel: string;
+    newCredentialRefId: string;
+    actor: string;
+  }): Promise<ProviderAccountRecord> {
     const accounts = await this.store.listProviderAccounts(input.providerName);
     const account = accounts.find((a) => a.accountLabel === input.accountLabel);
     if (!account) throw new NotFoundError(`provider account ${input.providerName}/${input.accountLabel}`);
@@ -122,13 +147,6 @@ export class ComputeOrchestrator {
     await this.store.upsertProviderAccount({ ...account, enabled: false, disabledReason: input.reason });
   }
 
-  /**
-   * Pick the best SKU candidate whose provider is configured AND
-   * commercially approved AND has an enabled account. When a health scorer
-   * is registered, candidates are ranked by health score and offline
-   * providers are skipped — but health NEVER overrides commercial approval,
-   * entitlement or region compatibility: those gate eligibility first.
-   */
   private async selectCandidate(
     candidates: ComputeClassSkuCandidate[],
   ): Promise<{ candidate: ComputeClassSkuCandidate; account?: ProviderAccountRecord }> {
@@ -136,7 +154,6 @@ export class ComputeOrchestrator {
     for (const candidate of candidates) {
       const provider = this.providers.get(candidate.providerName);
       if (!provider || !provider.configured) continue;
-      // Commercial gate: verify/disabled providers take no production traffic.
       if (provider.commercialStatus === "verify" || provider.commercialStatus === "disabled") continue;
       const accounts = (await this.store.listProviderAccounts(candidate.providerName)).filter((a) => a.enabled);
       const account =
@@ -149,26 +166,28 @@ export class ComputeOrchestrator {
       );
     }
 
-    if (!this.healthScorer || eligible.length === 1) {
-      return eligible[0]!;
-    }
-    // Health-aware ranking among already-eligible providers only.
-    const ranked = await this.healthScorer.rank(
-      eligible.map((e) => e.candidate.providerName),
-    );
+    if (!this.healthScorer || eligible.length === 1) return eligible[0]!;
+    const ranked = await this.healthScorer.rank(eligible.map((e) => e.candidate.providerName));
     for (const rankedEntry of ranked) {
-      if (rankedEntry.record.state === "offline") continue; // fail closed on offline providers
-      const match = eligible.find((e) => e.candidate.providerName === rankedEntry.providerName)!;
-      return match;
+      if (rankedEntry.record.state === "offline") continue;
+      const match = eligible.find((e) => e.candidate.providerName === rankedEntry.providerName);
+      if (match) return match;
     }
     throw new NotApprovedError("all eligible compute providers are currently offline per health scoring");
   }
 
-  // ---- SSH keys ----------------------------------------------------------------
+  // ---- SSH keys --------------------------------------------------------------
 
   async addSshKey(orgId: string, label: string, publicKey: string): Promise<SshKeyRecord> {
     const fingerprint = `SHA256:${sha256Hex(publicKey).slice(0, 43)}`;
-    return this.store.addSshKey({ id: newId(), orgId, label, publicKey, fingerprint, createdAt: new Date().toISOString() });
+    return this.store.addSshKey({
+      id: newId(),
+      orgId,
+      label,
+      publicKey,
+      fingerprint,
+      createdAt: new Date().toISOString(),
+    });
   }
 
   async listSshKeys(orgId: string): Promise<SshKeyRecord[]> {
@@ -177,11 +196,6 @@ export class ComputeOrchestrator {
 
   // ---- Ordering --------------------------------------------------------------
 
-  /**
-   * Order a dedicated VPS. Idempotent per (org, idempotencyKey): a
-   * double-click returns the same order instead of buying two servers.
-   * Returns the order immediately in requested/provisioning state.
-   */
   async orderServer(input: {
     orgId: string;
     computeClassCode: string;
@@ -213,7 +227,8 @@ export class ComputeOrchestrator {
     const inserted = await this.store.insertOrder(order);
     if (!inserted) {
       const raced = await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey);
-      return { order: raced!, created: false };
+      if (!raced) throw new OrchestratorError("order dedupe raced but canonical order was not found");
+      return { order: raced, created: false };
     }
     await this.enqueue(order.id, "provision", `${order.id}:provision`);
     order.state = "provisioning";
@@ -249,10 +264,6 @@ export class ComputeOrchestrator {
     return this.enqueue(orderId, "reboot", `${orderId}:reboot`);
   }
 
-  /**
-   * Cancel + destroy through the PROVIDER API — works even when the
-   * customer's Mox Node is offline or disabled.
-   */
   async cancelOrder(orderId: string): Promise<void> {
     const order = await this.getOrder(orderId);
     if (["canceled", "destroyed"].includes(order.state)) return;
@@ -262,7 +273,7 @@ export class ComputeOrchestrator {
     await this.enqueue(order.id, "cancel", `${order.id}:cancel`);
   }
 
-  // ---- Durable operations ------------------------------------------------------
+  // ---- Durable operations ----------------------------------------------------
 
   private async enqueue(
     orderId: string,
@@ -270,6 +281,7 @@ export class ComputeOrchestrator {
     idempotencyKey: string,
     payloadHint?: Record<string, string>,
   ): Promise<ServerOperation> {
+    const now = new Date().toISOString();
     const op: ServerOperation = {
       id: newId(),
       orderId,
@@ -278,45 +290,50 @@ export class ComputeOrchestrator {
       idempotencyKey: payloadHint ? `${idempotencyKey}:${payloadHint.sku}` : idempotencyKey,
       attempts: 0,
       maxAttempts: this.defaultMaxAttempts,
-      nextAttemptAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      nextAttemptAt: now,
+      createdAt: now,
+      updatedAt: now,
     };
     await this.store.upsertOperation(op);
     return op;
   }
 
   /**
-   * Reconciliation tick: process all due operations once. In production this
-   * runs from a durable queue worker; tests call it directly. Concurrent
-   * workers never double-execute an operation (in-flight claim).
+   * Process due work using a store-level atomic lease. The in-process set is
+   * only an optimization; correctness across replicas comes from
+   * claimOperation(). Expired running leases are reclaimable after crashes.
    */
   private readonly inFlightOps = new Set<string>();
 
   async reconcile(now?: string): Promise<ReconcileResult> {
     const at = now ?? new Date().toISOString();
+    let processed = 0;
     let succeeded = 0;
     let failed = 0;
     let abandoned = 0;
     const due = await this.store.dueOperations(at);
-    for (const op of due) {
-      // Skip operations claimed, finished or exhausted since the snapshot.
-      if (this.inFlightOps.has(op.id)) continue;
-      if (op.state === "running" || op.state === "succeeded" || op.state === "abandoned") continue;
-      if (op.attempts >= op.maxAttempts) continue;
+
+    for (const snapshot of due) {
+      if (this.inFlightOps.has(snapshot.id)) continue;
+      const leaseUntil = new Date(Date.parse(at) + this.operationLeaseMs).toISOString();
+      const op = await this.store.claimOperation(snapshot.id, at, leaseUntil);
+      if (!op) continue;
+      processed += 1;
       this.inFlightOps.add(op.id);
       try {
         await this.executeOperation(op, at);
         op.state = "succeeded";
+        op.leaseUntil = undefined;
         await this.store.updateOperation(op);
         succeeded += 1;
       } catch (error) {
         op.attempts += 1;
+        op.leaseUntil = undefined;
         op.lastError = error instanceof Error ? error.message : String(error);
         const retryable =
           error instanceof ProviderError
             ? error.retryable
-            : error instanceof OrchestratorError || error instanceof NotFoundError || error instanceof NotApprovedError
+            : error instanceof OrchestratorError
               ? false
               : true;
         if (!retryable || op.attempts >= op.maxAttempts) {
@@ -341,7 +358,7 @@ export class ComputeOrchestrator {
         this.inFlightOps.delete(op.id);
       }
     }
-    return { processed: due.length, succeeded, failed, abandoned };
+    return { processed, succeeded, failed, abandoned };
   }
 
   private async executeOperation(op: ServerOperation, at: string): Promise<void> {
@@ -355,10 +372,10 @@ export class ComputeOrchestrator {
         const { candidate, account } = await this.selectCandidate(cls.skuMap);
         const provider = this.provider(candidate.providerName);
         const sshKey = order.sshKeyId ? await this.store.getSshKey(order.sshKeyId) : undefined;
-        const enrollToken = newId(); // one-time; exchanged by node over TLS
+        const enrollment = await this.issueNodeEnrollment(order.id, { now: at });
         const cloudInit = buildMoxNodeCloudInit({
-          controlPlaneUrl: "https://control-plane.mox.internal",
-          enrollToken,
+          controlPlaneUrl: this.controlPlaneUrl,
+          enrollToken: enrollment.token,
           orgId: order.orgId,
           orderId: order.id,
         });
@@ -400,7 +417,6 @@ export class ComputeOrchestrator {
           });
           throw error;
         }
-        void at;
         break;
       }
       case "resize": {
@@ -421,9 +437,7 @@ export class ComputeOrchestrator {
       }
       case "cancel": {
         const provider = this.requireProviderForOrder(order);
-        if (order.providerInstanceId) {
-          await provider.cancel(order.providerInstanceId);
-        }
+        if (order.providerInstanceId) await provider.cancel(order.providerInstanceId);
         order.state = "retention";
         order.retentionUntil = new Date(Date.parse(at) + this.retentionDays * 24 * 3600 * 1000).toISOString();
         await this.store.updateOrder(order);
@@ -433,9 +447,12 @@ export class ComputeOrchestrator {
       case "stop":
       case "reinstall": {
         const provider = this.requireProviderForOrder(order);
-        const method = op.kind === "start" ? provider.start(order.providerInstanceId!)
-          : op.kind === "stop" ? provider.stop(order.providerInstanceId!)
-          : provider.reinstall(order.providerInstanceId!, "", "");
+        const method =
+          op.kind === "start"
+            ? provider.start(order.providerInstanceId!)
+            : op.kind === "stop"
+              ? provider.stop(order.providerInstanceId!)
+              : provider.reinstall(order.providerInstanceId!, "", "");
         const operation = await method;
         op.providerOperationId = operation.providerOperationId;
         if (op.kind === "start") order.state = "running";
@@ -453,7 +470,6 @@ export class ComputeOrchestrator {
     return this.provider(order.providerName);
   }
 
-  /** Retention sweep: retention → destroyed. */
   async runRetentionSweep(now?: string): Promise<number> {
     const at = now ?? new Date().toISOString();
     let destroyed = 0;
@@ -468,7 +484,7 @@ export class ComputeOrchestrator {
     return destroyed;
   }
 
-  // ---- Provider health ---------------------------------------------------------
+  // ---- Provider health -------------------------------------------------------
 
   async providerHealth(): Promise<Array<{ name: string; report: HealthReport }>> {
     const reports: Array<{ name: string; report: HealthReport }> = [];
@@ -483,50 +499,118 @@ export class ComputeOrchestrator {
     return reports;
   }
 
-  // ---- Mox Node (untrusted) -----------------------------------------------------
+  // ---- Mox Node enrollment/authentication -----------------------------------
 
   /**
-   * Enroll a node. The one-time enroll token must match its stored hash.
-   * Nodes can never grant themselves entitlements; this only records an
-   * advisory agent presence for the given org/order.
+   * Return an existing unconsumed grant for provider retries, or create one.
+   * The token is reconstructible from tokenId + the Mox-owned signing secret,
+   * so the raw token never has to be stored in PostgreSQL.
+   */
+  async issueNodeEnrollment(
+    orderId: string,
+    options: { rotate?: boolean; now?: string } = {},
+  ): Promise<{ token: string; expiresAt: string; grant: NodeEnrollmentRecord }> {
+    const secret = this.requireEnrollmentSecret();
+    const order = await this.getOrder(orderId);
+    if (["canceled", "retention", "destroyed"].includes(order.state)) {
+      throw new OrchestratorError(`cannot issue node enrollment for order in state ${order.state}`);
+    }
+    const now = options.now ?? new Date().toISOString();
+    if (options.rotate) await this.store.revokeNodeEnrollmentsForOrder(order.id, now);
+
+    const existing = options.rotate
+      ? undefined
+      : await this.store.getActiveNodeEnrollmentForOrder(order.id, now);
+    if (existing) {
+      return { token: this.signEnrollmentToken(existing.tokenId, secret), expiresAt: existing.expiresAt, grant: existing };
+    }
+
+    const tokenId = newId();
+    const token = this.signEnrollmentToken(tokenId, secret);
+    const grant: NodeEnrollmentRecord = {
+      id: newId(),
+      tokenId,
+      tokenHash: sha256Hex(token),
+      orgId: order.orgId,
+      orderId: order.id,
+      expiresAt: new Date(Date.parse(now) + this.nodeEnrollmentTtlMs).toISOString(),
+      createdAt: now,
+    };
+    await this.store.createNodeEnrollment(grant);
+    return { token, expiresAt: grant.expiresAt, grant };
+  }
+
+  /**
+   * First enrollment is accepted only when a server-issued, signed, unexpired
+   * and unconsumed grant can be atomically consumed. orgId/orderId are derived
+   * from that grant; the node is never allowed to supply them.
    */
   async enrollNode(input: {
-    orgId: string;
-    orderId?: string;
     nodeId: string;
     enrollToken: string;
     version?: string;
     capabilities?: string[];
     now?: string;
-  }): Promise<MoxNodeRecord> {
-    const existing = await this.store.getNode(input.nodeId);
-    if (existing) {
-      if (existing.enrollTokenHash === sha256Hex(input.enrollToken)) {
-        existing.lastHeartbeatAt = input.now ?? new Date().toISOString();
-        await this.store.updateNode(existing);
-        return existing;
-      }
-      throw new OrchestratorError("node id already enrolled with a different token");
-    }
-    const record: MoxNodeRecord = {
-      id: newId(),
-      orgId: input.orgId,
-      orderId: input.orderId,
+  }): Promise<NodeEnrollmentResult> {
+    const now = input.now ?? new Date().toISOString();
+    const tokenId = this.verifyEnrollmentToken(input.enrollToken);
+    const grant = await this.store.consumeNodeEnrollment({
+      tokenId,
+      tokenHash: sha256Hex(input.enrollToken),
       nodeId: input.nodeId,
-      enrollTokenHash: sha256Hex(input.enrollToken),
-      version: input.version,
-      capabilities: input.capabilities ?? [],
-      enrolledAt: input.now ?? new Date().toISOString(),
-      lastHeartbeatAt: input.now ?? new Date().toISOString(),
+      nowIso: now,
+    });
+    if (!grant) throw new NodeAuthenticationError("invalid, expired, revoked, or already-consumed node enrollment token");
+
+    const order = await this.getOrder(grant.orderId);
+    if (order.orgId !== grant.orgId) throw new NodeAuthenticationError("node enrollment grant ownership mismatch");
+    if (["canceled", "retention", "destroyed"].includes(order.state)) {
+      throw new NodeAuthenticationError(`node enrollment rejected for order in state ${order.state}`);
+    }
+
+    const existing = await this.store.getNode(input.nodeId);
+    if (existing && (existing.orgId !== grant.orgId || existing.orderId !== grant.orderId)) {
+      throw new NodeAuthenticationError("node id is already bound to a different Mox server");
+    }
+
+    const agentToken = randomBytes(32).toString("base64url");
+    const record: MoxNodeRecord = {
+      id: existing?.id ?? newId(),
+      orgId: grant.orgId,
+      orderId: grant.orderId,
+      nodeId: input.nodeId,
+      enrollTokenHash: grant.tokenHash,
+      agentTokenHash: sha256Hex(agentToken),
+      version: input.version ?? existing?.version,
+      capabilities: input.capabilities ?? existing?.capabilities ?? [],
+      metrics: existing?.metrics,
+      enrolledAt: existing?.enrolledAt ?? now,
+      lastHeartbeatAt: now,
       status: "active",
     };
-    return this.store.upsertNode(record);
+    const node = await this.store.upsertNode(record);
+    return { node, agentToken };
   }
 
-  /** Heartbeats update advisory telemetry only. */
-  async heartbeat(nodeId: string, metrics: Record<string, number | string>, version?: string, now?: string): Promise<void> {
+  /** Rotate a node bearer token without changing its server/org binding. */
+  async rotateNodeAgentToken(nodeId: string): Promise<string> {
     const node = await this.store.getNode(nodeId);
     if (!node) throw new NotFoundError(`unknown node ${nodeId}`);
+    const agentToken = randomBytes(32).toString("base64url");
+    node.agentTokenHash = sha256Hex(agentToken);
+    await this.store.updateNode(node);
+    return agentToken;
+  }
+
+  /** Heartbeats require the bearer token issued during enrollment/rotation. */
+  async heartbeat(
+    nodeId: string,
+    agentToken: string,
+    metrics: Record<string, number | string>,
+    version?: string,
+    now?: string,
+  ): Promise<void> {
+    const node = await this.authenticateNode(nodeId, agentToken);
     node.metrics = metrics;
     node.lastHeartbeatAt = now ?? new Date().toISOString();
     if (version) node.version = version;
@@ -534,7 +618,17 @@ export class ComputeOrchestrator {
     await this.store.updateNode(node);
   }
 
-  /** Marks nodes lost whose heartbeat exceeded the staleness threshold. */
+  async authenticateNode(nodeId: string, agentToken: string): Promise<MoxNodeRecord> {
+    const node = await this.store.getNode(nodeId);
+    if (!node?.agentTokenHash) throw new NodeAuthenticationError("unknown or unauthenticated node");
+    const provided = Buffer.from(sha256Hex(agentToken));
+    const expected = Buffer.from(node.agentTokenHash);
+    if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+      throw new NodeAuthenticationError("invalid node bearer token");
+    }
+    return node;
+  }
+
   async sweepLostNodes(now?: string): Promise<string[]> {
     const at = now ?? new Date().toISOString();
     const lost: string[] = [];
@@ -546,5 +640,33 @@ export class ComputeOrchestrator {
       }
     }
     return lost;
+  }
+
+  private requireEnrollmentSecret(): string {
+    if (!this.nodeEnrollmentSecret || this.nodeEnrollmentSecret.length < 32) {
+      throw new OrchestratorError("Mox node enrollment signing secret is not configured or is too short");
+    }
+    return this.nodeEnrollmentSecret;
+  }
+
+  private signEnrollmentToken(tokenId: string, secret: string): string {
+    const signature = createHmac("sha256", secret).update(`mox-node-enrollment:v1:${tokenId}`).digest("base64url");
+    return `${tokenId}.${signature}`;
+  }
+
+  private verifyEnrollmentToken(token: string): string {
+    const secret = this.requireEnrollmentSecret();
+    const separator = token.indexOf(".");
+    if (separator <= 0 || separator === token.length - 1) {
+      throw new NodeAuthenticationError("malformed node enrollment token");
+    }
+    const tokenId = token.slice(0, separator);
+    const expected = this.signEnrollmentToken(tokenId, secret);
+    const a = Buffer.from(expected);
+    const b = Buffer.from(token);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new NodeAuthenticationError("invalid node enrollment token signature");
+    }
+    return tokenId;
   }
 }
