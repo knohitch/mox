@@ -1,19 +1,18 @@
 /**
- * Billing service (Prompt 08): the commercial authority for subscription
- * state. Core rule: a browser redirect never grants entitlements — only
- * verified provider webhooks/reconciliation activate paid state.
+ * Mox commercial authority for subscription state. Browser redirects never
+ * grant paid state; only verified provider events/reconciliation may do so.
  */
 
 import { convert, type Money } from "@mox/money";
 import type { EntitlementService } from "@mox/entitlements";
 import {
-  BillingProvider,
+  type BillingProvider,
   digestPayload,
   UnconfiguredBillingProvider,
   WebhookVerificationError,
   type ProviderCheckoutResult,
 } from "./provider.js";
-import { InMemoryBillingStore, newId, type BillingStore } from "./store.js";
+import { newId, type BillingStore } from "./store.js";
 import type {
   AddonDefinition,
   BillingCustomer,
@@ -36,7 +35,6 @@ export class InvalidTransitionError extends BillingError {}
 export class PriceUnavailableError extends BillingError {}
 export class NotFoundError extends BillingError {}
 
-/** Explicit, auditable subscription state machine. */
 const ALLOWED_TRANSITIONS: Record<SubscriptionState, SubscriptionState[]> = {
   trial: ["active", "canceled", "suspended"],
   active: ["past_due", "canceled", "suspended"],
@@ -52,6 +50,7 @@ export interface BillingServiceOptions {
   periodDays?: number;
   graceDays?: number;
   retentionDays?: number;
+  workerLeaseMs?: number;
 }
 
 interface ResolvedPrice {
@@ -66,15 +65,15 @@ export class BillingService {
   private readonly periodDays: number;
   private readonly graceDays: number;
   private readonly retentionDays: number;
+  private readonly workerLeaseMs: number;
 
-  constructor(
-    store: BillingStore = new InMemoryBillingStore(),
-    options: BillingServiceOptions = {},
-  ) {
+  /** Production composition must inject a durable store explicitly. */
+  constructor(store: BillingStore, options: BillingServiceOptions = {}) {
     this.store = store;
     this.periodDays = options.periodDays ?? 30;
     this.graceDays = options.graceDays ?? 7;
     this.retentionDays = options.retentionDays ?? 30;
+    this.workerLeaseMs = options.workerLeaseMs ?? 2 * 60_000;
   }
 
   // ---- Providers -----------------------------------------------------------
@@ -83,9 +82,8 @@ export class BillingService {
     this.providers.set(provider.name, provider);
   }
 
-  /** Registers an explicit not-configured blocker for a gateway name. */
   registerBlockedProvider(name: string, blocker: string): void {
-    this.providers.set(name, new UnconfiguredBillingProvider(blocker));
+    this.providers.set(name, new UnconfiguredBillingProvider(blocker, name));
   }
 
   provider(name: string): BillingProvider {
@@ -110,10 +108,6 @@ export class BillingService {
     return this.store.createProduct({ id: newId(), ...input });
   }
 
-  /**
-   * Create a plan version. Draft versions may be edited via
-   * updatePlanEntitlements; activation freezes the version forever.
-   */
   async createPlanVersion(productId: string, versionNumber: number): Promise<PlanVersion> {
     const product = await this.store.getProduct(productId);
     if (!product) throw new NotFoundError(`product ${productId}`);
@@ -146,18 +140,13 @@ export class BillingService {
     return retired;
   }
 
-  /** Push plan-entitlement values into the authoritative entitlement service. */
   async syncPlanEntitlements(planVersionId: string, entitlements: EntitlementService): Promise<void> {
-    const values = await this.getPlanEntitlementValues(planVersionId);
-    await entitlements.setPlanValues(planVersionId, values);
+    await entitlements.setPlanValues(planVersionId, await this.getPlanEntitlementValues(planVersionId));
   }
 
-  async getPlanEntitlementValues(_planVersionId: string): Promise<Record<string, boolean | number | string>> {
-    // Values live with the entitlement authority; billing only forwards.
-    return this.planEntitlementValues.get(_planVersionId) ?? {};
+  async getPlanEntitlementValues(planVersionId: string): Promise<Record<string, boolean | number | string>> {
+    return this.store.getPlanEntitlementValues(planVersionId);
   }
-
-  private readonly planEntitlementValues = new Map<string, Record<string, boolean | number | string>>();
 
   async setPlanEntitlementValues(
     planVersionId: string,
@@ -168,12 +157,12 @@ export class BillingService {
     if (version.status !== "draft") {
       throw new BillingError("plan version is immutable once active; create a new version");
     }
-    this.planEntitlementValues.set(planVersionId, { ...values });
+    await this.store.replacePlanEntitlementValues(planVersionId, values);
     if (entitlements) await entitlements.setPlanValues(planVersionId, values);
   }
 
-  async definePricingRegion(region: Omit<PricingRegion, never> & { code: string }): Promise<PricingRegion> {
-    return this.store.definePricingRegion(region as PricingRegion);
+  async definePricingRegion(region: PricingRegion): Promise<PricingRegion> {
+    return this.store.definePricingRegion(region);
   }
 
   async upsertPriceBook(book: Omit<PriceBook, "id"> & { id?: string }): Promise<PriceBook> {
@@ -182,7 +171,12 @@ export class BillingService {
     return this.store.upsertPriceBook(full);
   }
 
-  async addFixedPriceVersion(priceBookId: string, amountMinor: bigint | number, currency: string, effectiveFrom?: string): Promise<PriceVersion> {
+  async addFixedPriceVersion(
+    priceBookId: string,
+    amountMinor: bigint | number,
+    currency: string,
+    effectiveFrom?: string,
+  ): Promise<PriceVersion> {
     await this.requirePriceBook(priceBookId);
     const versions = await this.store.listPriceVersions(priceBookId);
     return this.store.createPriceVersion({
@@ -196,10 +190,6 @@ export class BillingService {
     });
   }
 
-  /**
-   * Pin a derived FX price into an immutable snapshot version so that
-   * subscriptions reference stable history.
-   */
   async pinDerivedPrice(priceBookId: string): Promise<PriceVersion> {
     const book = await this.requirePriceBook(priceBookId);
     if (book.mode !== "fx_derived" || !book.baseCurrency || book.fxRate === undefined || book.baseAmountMinor === undefined) {
@@ -227,11 +217,6 @@ export class BillingService {
     return this.store.defineAddon(addon);
   }
 
-  /**
-   * Resolve the applicable price for a product in a pricing region.
-   * fixed → newest effective version; fx_derived → live derivation;
-   * disabled/missing → PriceUnavailableError.
-   */
   async resolvePrice(productId: string, pricingRegionCode: string, now?: string): Promise<ResolvedPrice> {
     const at = now ?? new Date().toISOString();
     const book = await this.store.findPriceBook(productId, pricingRegionCode);
@@ -248,7 +233,6 @@ export class BillingService {
         mode: "fixed",
       };
     }
-    // fx_derived: derive live from the base amount and stored rate.
     const region = await this.requirePricingRegion(pricingRegionCode);
     if (!book.baseCurrency || book.fxRate === undefined || book.baseAmountMinor === undefined) {
       throw new PriceUnavailableError("fx_derived price book lacks base configuration");
@@ -261,25 +245,35 @@ export class BillingService {
     return { amount: derived, mode: "fx_derived" };
   }
 
-  // ---- Checkout / webhook flow ----------------------------------------------
-
-  async ensureBillingCustomer(orgId: string, providerName: string, billingRegion = "GLOBAL"): Promise<BillingCustomer> {
-    const existing = await this.store.getBillingCustomer(orgId, providerName);
-    if (existing) return existing;
-    const customer: BillingCustomer = {
-      orgId,
-      providerName,
-      providerCustomerId: `${providerName}:cus_${orgId.slice(0, 8)}`,
-      billingRegion,
-      createdAt: new Date().toISOString(),
-    };
-    return this.store.upsertBillingCustomer(customer);
-  }
+  // ---- Checkout / webhook flow --------------------------------------------
 
   /**
-   * Creates a checkout session. IMPORTANT: the returned redirect URL is
-   * navigation only; it grants nothing until a verified webhook arrives.
+   * Create only a local billing-customer row. A provider customer id remains
+   * absent until a real gateway returns one; Mox never synthesizes it.
    */
+  async ensureBillingCustomer(
+    orgId: string,
+    providerName: string,
+    billingRegion = "GLOBAL",
+    providerCustomerId?: string,
+  ): Promise<BillingCustomer> {
+    const existing = await this.store.getBillingCustomer(orgId, providerName);
+    if (existing) {
+      if (providerCustomerId && existing.providerCustomerId !== providerCustomerId) {
+        existing.providerCustomerId = providerCustomerId;
+        return this.store.upsertBillingCustomer(existing);
+      }
+      return existing;
+    }
+    return this.store.upsertBillingCustomer({
+      orgId,
+      providerName,
+      providerCustomerId,
+      billingRegion,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
   async createCheckout(input: {
     orgId: string;
     productId: string;
@@ -290,12 +284,14 @@ export class BillingService {
     providerName: string;
   }): Promise<{ session: CheckoutSession; price: ResolvedPrice }> {
     const provider = this.requireConfiguredProvider(input.providerName);
+    const plan = await this.requirePlanVersion(input.planVersionId);
+    if (plan.productId !== input.productId) throw new BillingError("plan version does not belong to checkout product");
+    if (plan.status !== "active") throw new BillingError("checkout requires an active plan version");
     const price = await this.resolvePrice(input.productId, input.pricingRegionCode);
 
     let priceVersionId: string;
     let amount: Money;
     if (price.mode === "fx_derived") {
-      // Pin the live FX quote into an immutable snapshot for this checkout.
       const book = await this.store.findPriceBook(input.productId, input.pricingRegionCode);
       if (!book) throw new PriceUnavailableError("price book vanished");
       const versions = await this.store.listPriceVersions(book.id);
@@ -324,6 +320,7 @@ export class BillingService {
       providerName: input.providerName,
       createdAt: new Date().toISOString(),
     };
+    await this.store.createCheckoutSession(session);
 
     const result: ProviderCheckoutResult = await provider.createCheckout({
       orgId: input.orgId,
@@ -337,16 +334,11 @@ export class BillingService {
 
     session.providerRef = result.providerRef;
     session.redirectUrl = result.redirectUrl;
-    await this.store.createCheckoutSession(session);
-    this.sessionIndex.set(result.providerRef, session);
-    return { session, price: { priceVersionId, amount, mode: price?.mode ?? "fixed" } };
+    session.state = "redirected";
+    await this.store.updateCheckoutSession(session);
+    return { session, price: { priceVersionId, amount, mode: price.mode } };
   }
 
-  /**
-   * Verify + apply one inbound provider webhook. Idempotent by external
-   * event id and by business effect; out-of-order events converge because
-   * every application is guarded by current-state checks.
-   */
   async handleProviderWebhook(
     providerName: string,
     headers: Record<string, string>,
@@ -358,7 +350,6 @@ export class BillingService {
       event = await provider.verifyWebhook(headers, rawBody);
     } catch (error) {
       const reason = error instanceof WebhookVerificationError ? error.message : String(error);
-      // Keep an auditable rejection record without trusting the payload.
       await this.store.recordWebhook({
         id: newId(),
         providerName,
@@ -372,11 +363,8 @@ export class BillingService {
       return { applied: false, rejected: true, reason };
     }
 
-    // Applied events are duplicates; rejected events may be redelivered.
     const existing = await this.store.getWebhook(providerName, event.externalEventId);
-    if (existing?.status === "applied") {
-      return { applied: false, duplicate: true };
-    }
+    if (existing?.status === "applied") return { applied: false, duplicate: true };
 
     let record: WebhookRecord;
     if (!existing) {
@@ -390,9 +378,7 @@ export class BillingService {
         status: "verified",
         receivedAt: new Date().toISOString(),
       });
-      if (!fresh) {
-        return { applied: false, duplicate: true };
-      }
+      if (!fresh) return { applied: false, duplicate: true };
       record = (await this.store.getWebhook(providerName, event.externalEventId))!;
     } else {
       record = existing;
@@ -403,7 +389,7 @@ export class BillingService {
     }
 
     try {
-      await this.applyProviderEvent(event.type, event.subjectRef, event.payload);
+      await this.applyProviderEvent(providerName, event.type, event.subjectRef, event.payload);
       record.status = "applied";
       record.appliedAt = new Date().toISOString();
       await this.store.updateWebhook(record);
@@ -416,13 +402,22 @@ export class BillingService {
     }
   }
 
-  private async applyProviderEvent(type: string, subjectRef: string, payload: unknown): Promise<void> {
+  private async applyProviderEvent(
+    providerName: string,
+    type: string,
+    subjectRef: string,
+    payload: unknown,
+  ): Promise<void> {
     switch (type) {
       case "checkout.completed":
-        await this.applyCheckoutCompleted(subjectRef, payload as { orgId?: string; checkoutSessionId?: string });
+        await this.applyCheckoutCompleted(providerName, subjectRef, payload as {
+          checkoutSessionId?: string;
+          subscriptionRef?: string;
+          providerCustomerId?: string;
+        });
         break;
       case "payment.succeeded": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub = await this.store.findSubscriptionByProviderRef(providerName, subjectRef);
         if (!sub) throw new BillingError(`payment.succeeded for unknown subject ${subjectRef}`);
         await this.markLatestOpenInvoicePaid(sub.id);
         if (sub.state === "past_due" || sub.state === "grace_period" || sub.state === "suspended") {
@@ -438,7 +433,7 @@ export class BillingService {
         break;
       }
       case "payment.failed": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub = await this.store.findSubscriptionByProviderRef(providerName, subjectRef);
         if (!sub) throw new BillingError(`payment.failed for unknown subject ${subjectRef}`);
         sub.failedRenewals += 1;
         await this.store.updateSubscription(sub);
@@ -450,7 +445,7 @@ export class BillingService {
         break;
       }
       case "subscription.canceled": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub = await this.store.findSubscriptionByProviderRef(providerName, subjectRef);
         if (!sub) throw new BillingError(`subscription.canceled for unknown subject ${subjectRef}`);
         if (!["canceled", "retention", "deleted"].includes(sub.state)) {
           await this.cancelSubscription(sub.id, { actorType: "user", reason: "provider_canceled" });
@@ -463,38 +458,49 @@ export class BillingService {
   }
 
   private async applyCheckoutCompleted(
+    providerName: string,
     providerCheckoutRef: string,
-    payload: { orgId?: string; checkoutSessionId?: string },
+    payload: { checkoutSessionId?: string; subscriptionRef?: string; providerCustomerId?: string },
   ): Promise<void> {
-    // Locate the session either via embedded id or by scanning provider refs.
-    let session: CheckoutSession | undefined;
-    if (payload.checkoutSessionId) {
-      session = await this.store.getCheckoutSession(payload.checkoutSessionId);
-    }
+    let session = payload.checkoutSessionId
+      ? await this.store.getCheckoutSession(payload.checkoutSessionId)
+      : undefined;
     if (!session) {
-      // Fall back: locate the created session via its provider checkout ref.
-      session = this.sessionIndex.get(providerCheckoutRef);
+      session = await this.store.findCheckoutSessionByProviderRef(providerName, providerCheckoutRef);
     }
     if (!session) throw new BillingError(`checkout.completed for unknown session ref ${providerCheckoutRef}`);
-    if (session.state === "completed") return; // business-level dedupe
+    if (session.providerName !== providerName) throw new BillingError("checkout provider mismatch");
+    if (session.providerRef && session.providerRef !== providerCheckoutRef) {
+      throw new BillingError("checkout provider reference mismatch");
+    }
+    if (session.state === "completed") return;
 
-    // Concurrent delivery guard: only one application per session may run.
-    // Synchronous set check/mark closes the await-boundary race.
-    if (this.applyingCheckouts.has(session.id)) return;
-    this.applyingCheckouts.add(session.id);
+    const nowIso = new Date().toISOString();
+    const claimed = await this.store.claimCheckoutApplication(
+      session.id,
+      nowIso,
+      new Date(Date.parse(nowIso) + this.workerLeaseMs).toISOString(),
+    );
+    if (!claimed) {
+      const latest = await this.store.getCheckoutSession(session.id);
+      if (latest?.state === "completed") return;
+      throw new BillingError("checkout completion is already being applied by another worker");
+    }
+    session = claimed;
+
     try {
       const priceVersion = await this.requirePriceVersion(session.priceVersionId);
-      session.state = "completed";
-      await this.store.updateCheckoutSession(session);
-      await this.ensureBillingCustomer(session.orgId, session.providerName);
-
-      const now = new Date();
+      await this.ensureBillingCustomer(session.orgId, providerName, "GLOBAL", payload.providerCustomerId);
+      const recurringRef = payload.subscriptionRef ?? providerCheckoutRef;
+      const now = new Date(nowIso);
       const periodEnd = new Date(now.getTime() + this.periodDays * 24 * 3600 * 1000);
       const existingSub = await this.store.getActiveSubscriptionForOrg(session.orgId);
+
       if (existingSub) {
         existingSub.planVersionId = session.planVersionId;
         existingSub.priceVersionId = session.priceVersionId;
-        existingSub.providerRef = providerCheckoutRef;
+        existingSub.providerName = providerName;
+        existingSub.providerRef = recurringRef;
         existingSub.currentPeriodStart = now.toISOString();
         existingSub.currentPeriodEnd = periodEnd.toISOString();
         existingSub.failedRenewals = 0;
@@ -502,44 +508,48 @@ export class BillingService {
         await this.transition(existingSub.id, "active", "checkout_completed", {
           idempotencyKey: `checkout:${session.id}`,
         });
-        return;
+      } else {
+        const sub = await this.store.createSubscription({
+          id: newId(),
+          orgId: session.orgId,
+          planVersionId: session.planVersionId,
+          priceVersionId: session.priceVersionId,
+          state: "trial",
+          providerName,
+          providerRef: recurringRef,
+          failedRenewals: 0,
+          cancelAtPeriodEnd: false,
+          currentPeriodStart: now.toISOString(),
+          currentPeriodEnd: periodEnd.toISOString(),
+          createdAt: now.toISOString(),
+        });
+        await this.store.addItem({
+          id: newId(),
+          subscriptionId: sub.id,
+          kind: "base",
+          quantity: 1,
+          priceVersionId: priceVersion.id,
+        });
+        await this.transition(sub.id, "active", "checkout_completed", {
+          idempotencyKey: `checkout:${session.id}`,
+        });
       }
 
-      const sub = await this.store.createSubscription({
-        id: newId(),
-        orgId: session.orgId,
-        planVersionId: session.planVersionId,
-        priceVersionId: session.priceVersionId,
-        state: "trial",
-        providerRef: providerCheckoutRef,
-        failedRenewals: 0,
-        cancelAtPeriodEnd: false,
-        currentPeriodStart: now.toISOString(),
-        currentPeriodEnd: periodEnd.toISOString(),
-        createdAt: now.toISOString(),
-      });
-      await this.store.addItem({
-        id: newId(),
-        subscriptionId: sub.id,
-        kind: "base",
-        quantity: 1,
-        priceVersionId: priceVersion.id,
-      });
-      await this.transition(sub.id, "active", "checkout_completed", {
-        idempotencyKey: `checkout:${session.id}`,
-      });
-    } finally {
-      this.applyingCheckouts.delete(session.id);
+      session.state = "completed";
+      session.applyLeaseUntil = undefined;
+      await this.store.updateCheckoutSession(session);
+    } catch (error) {
+      const latest = await this.store.getCheckoutSession(session.id);
+      if (latest && latest.state !== "completed") {
+        latest.applyLeaseUntil = undefined;
+        await this.store.updateCheckoutSession(latest);
+      }
+      throw error;
     }
   }
 
-  private readonly applyingCheckouts = new Set<string>();
+  // ---- Lifecycle engine ----------------------------------------------------
 
-  private readonly sessionIndex = new Map<string, CheckoutSession>();
-
-  // ---- Lifecycle engine ------------------------------------------------------
-
-  /** Auditable, idempotent transition. Throws on illegal moves. */
   async transition(
     subscriptionId: string,
     toState: SubscriptionState,
@@ -552,9 +562,7 @@ export class BillingService {
     } = {},
   ): Promise<{ applied: boolean }> {
     const sub = await this.requireSubscription(subscriptionId);
-    if (sub.state === toState && !options.idempotencyKey) {
-      return { applied: false };
-    }
+    if (sub.state === toState && !options.idempotencyKey) return { applied: false };
     const allowed = ALLOWED_TRANSITIONS[sub.state] ?? [];
     if (sub.state !== toState && !allowed.includes(toState)) {
       throw new InvalidTransitionError(`${sub.state} → ${toState} is not allowed`);
@@ -585,14 +593,6 @@ export class BillingService {
     return { applied: true };
   }
 
-  /**
-   * Renewal sweep. Charges subscriptions whose period has ended:
-   * success advances the period; failure walks active→past_due→grace_period;
-   * expired grace suspends. Concurrent workers never double-process a
-   * subscription (in-flight claim closes the await-boundary race).
-   */
-  private readonly renewingSubs = new Set<string>();
-
   async runRenewals(now?: string): Promise<{ renewed: number; failed: number; suspended: number }> {
     const at = now ?? new Date().toISOString();
     let renewed = 0;
@@ -600,28 +600,36 @@ export class BillingService {
     let suspended = 0;
 
     const due = await this.store.listSubscriptionsInState(["active", "past_due", "grace_period"]);
-    for (const sub of due) {
-      if (!sub.currentPeriodEnd || sub.currentPeriodEnd > at || sub.providerRef === undefined) continue;
-      // Claim synchronously so racing workers skip in-flight subscriptions.
-      if (this.renewingSubs.has(sub.id)) continue;
-      this.renewingSubs.add(sub.id);
+    for (const candidate of due) {
+      if (!candidate.currentPeriodEnd || candidate.currentPeriodEnd > at || !candidate.providerRef || !candidate.providerName) continue;
+      const claimed = await this.store.claimSubscriptionRenewal(
+        candidate.id,
+        at,
+        new Date(Date.parse(at) + this.workerLeaseMs).toISOString(),
+      );
+      if (!claimed) continue;
       try {
-        const outcome = await this.renewOne(sub, at);
+        const outcome = await this.renewOne(claimed, at);
         renewed += outcome.renewed;
         failed += outcome.failed;
       } finally {
-        this.renewingSubs.delete(sub.id);
+        const latest = await this.store.getSubscription(candidate.id);
+        if (latest) {
+          latest.renewalLeaseUntil = undefined;
+          await this.store.updateSubscription(latest);
+        }
       }
     }
 
-    // Suspend subscriptions whose grace window lapsed without payment.
     for (const sub of await this.store.listSubscriptionsInState(["grace_period"])) {
       if (sub.graceEndsAt && sub.graceEndsAt <= at) {
-        await this.transition(sub.id, "suspended", "grace_expired_unpaid", { now: at });
-        suspended += 1;
+        const result = await this.transition(sub.id, "suspended", "grace_expired_unpaid", {
+          now: at,
+          idempotencyKey: `grace-expired:${sub.graceEndsAt}`,
+        });
+        if (result.applied) suspended += 1;
       }
     }
-
     return { renewed, failed, suspended };
   }
 
@@ -645,11 +653,10 @@ export class BillingService {
       });
     }
 
-    const providerRef = sub.providerRef;
-    if (!providerRef) return { renewed: 0, failed: 0 };
+    if (!sub.providerRef || !sub.providerName) return { renewed: 0, failed: 0 };
     const provider = this.providerForSubscription(sub);
     const charge = await provider.charge({
-      providerRef,
+      providerRef: sub.providerRef,
       amountMinor: invoice.amount.amountMinor,
       currency: invoice.amount.currency,
       idempotencyKey: `renew:${sub.id}:${periodStart}:${attempt}`,
@@ -694,7 +701,6 @@ export class BillingService {
     return { renewed: 0, failed: 1 };
   }
 
-  /** Retention sweep: expired retention windows destroy remaining data refs. */
   async runRetentionSweep(now?: string): Promise<number> {
     const at = now ?? new Date().toISOString();
     let deleted = 0;
@@ -702,11 +708,18 @@ export class BillingService {
       if (sub.canceledAt && !sub.retentionUntil) {
         sub.retentionUntil = new Date(new Date(sub.canceledAt).getTime() + this.retentionDays * 24 * 3600 * 1000).toISOString();
         await this.store.updateSubscription(sub);
-        await this.transition(sub.id, "retention", "retention_window_opened", { now: at });
+        await this.transition(sub.id, "retention", "retention_window_opened", {
+          now: at,
+          idempotencyKey: `retention:${sub.canceledAt}`,
+        });
       }
-      if (sub.retentionUntil && sub.retentionUntil <= at && sub.state === "retention") {
-        await this.transition(sub.id, "deleted", "retention_expired_purged", { now: at });
-        deleted += 1;
+      const latest = await this.store.getSubscription(sub.id);
+      if (latest?.retentionUntil && latest.retentionUntil <= at && latest.state === "retention") {
+        const result = await this.transition(latest.id, "deleted", "retention_expired_purged", {
+          now: at,
+          idempotencyKey: `retention-expired:${latest.retentionUntil}`,
+        });
+        if (result.applied) deleted += 1;
       }
     }
     return deleted;
@@ -722,10 +735,7 @@ export class BillingService {
       now: options.now,
     });
     const sub = await this.requireSubscription(subscriptionId);
-    if (sub.providerRef) {
-      const provider = this.providerForSubscription(sub);
-      await provider.cancelRemote(sub.providerRef);
-    }
+    if (sub.providerRef) await this.providerForSubscription(sub).cancelRemote(sub.providerRef);
   }
 
   async adminSuspend(subscriptionId: string, adminId: string, reason: string): Promise<void> {
@@ -754,9 +764,14 @@ export class BillingService {
     return this.store.getActiveSubscriptionForOrg(orgId);
   }
 
-  // ---- Add-ons -----------------------------------------------------------------
+  // ---- Add-ons -------------------------------------------------------------
 
-  async attachAddon(subscriptionId: string, addonCode: string, quantity: number, priceVersionId?: string): Promise<SubscriptionItem> {
+  async attachAddon(
+    subscriptionId: string,
+    addonCode: string,
+    quantity: number,
+    priceVersionId?: string,
+  ): Promise<SubscriptionItem> {
     const addon = await this.store.getAddon(addonCode);
     if (!addon) throw new NotFoundError(`addon ${addonCode}`);
     const sub = await this.requireSubscription(subscriptionId);
@@ -776,9 +791,10 @@ export class BillingService {
   // ---- Internals -----------------------------------------------------------
 
   private providerForSubscription(sub: Subscription): BillingProvider {
-    const name = sub.providerRef?.split(":")[0];
-    if (!name) throw new BillingError(`subscription ${sub.id} lacks a provider reference`);
-    return this.provider(name);
+    if (!sub.providerName || !sub.providerRef) {
+      throw new BillingError(`subscription ${sub.id} lacks explicit provider identity`);
+    }
+    return this.requireConfiguredProvider(sub.providerName);
   }
 
   private async requireSubscription(id: string): Promise<Subscription> {
