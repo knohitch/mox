@@ -13,12 +13,11 @@ import {
 import { organizations } from "./identity-users.js";
 
 /**
- * Compute orchestration domain (Prompt 09): server orders as desired-state,
- * provider operations with idempotency, SSH key management, Mox Node
- * enrollment/heartbeat and multi-provider account registry.
+ * Compute orchestration domain: server orders as desired-state, durable
+ * provider operations, SSH keys, provider accounts and Mox Node lifecycle.
  *
- * Control Plane owns all of this truth; Mox Node on the customer VPS is an
- * untrusted reporter and can never mutate ownership or entitlements.
+ * The control plane owns all authoritative state. Mox Node runs on a
+ * customer-controlled VPS and is therefore an untrusted reporter.
  */
 
 export const orderState = pgEnum("server_order_state", [
@@ -44,19 +43,16 @@ export const opState = pgEnum("server_operation_state", [
 ]);
 
 /** Admin-configured classes map plans to provider SKUs; never hard-coded. */
-export const computeClasses = pgTable(
-  "compute_classes",
-  {
-    code: text("code").primaryKey(),
-    displayName: text("display_name").notNull(),
-    minVcpu: integer("min_vcpu").notNull(),
-    minRamGb: integer("min_ram_gb").notNull(),
-    /** providerName+region+sku candidates in preference order. */
-    skuMap: jsonb("sku_map").notNull().default([]),
-    active: boolean("active").notNull().default(true),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-);
+export const computeClasses = pgTable("compute_classes", {
+  code: text("code").primaryKey(),
+  displayName: text("display_name").notNull(),
+  minVcpu: integer("min_vcpu").notNull(),
+  minRamGb: integer("min_ram_gb").notNull(),
+  /** providerName+region+sku candidates in preference order. */
+  skuMap: jsonb("sku_map").notNull().default([]),
+  active: boolean("active").notNull().default(true),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const providerAccounts = pgTable(
   "provider_accounts",
@@ -69,6 +65,8 @@ export const providerAccounts = pgTable(
     healthScore: integer("health_score").notNull().default(100),
     credentialRefId: uuid("credential_ref_id"),
     enabled: boolean("enabled").notNull().default(true),
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    disabledReason: text("disabled_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("provider_accounts_label_key").on(t.providerName, t.accountLabel)],
@@ -89,10 +87,7 @@ export const sshKeys = pgTable(
   (t) => [index("ssh_keys_org_idx").on(t.orgId)],
 );
 
-/**
- * The authoritative VPS record. IdempotencyKey makes double-click ordering
- * safe; provider fields are filled only by reconciliation workers.
- */
+/** Authoritative VPS desired-state record. */
 export const serverOrders = pgTable(
   "server_orders",
   {
@@ -133,7 +128,11 @@ export const serverOrders = pgTable(
   ],
 );
 
-/** Durable provider operation records; workers retry non-terminal ops. */
+/**
+ * Durable provider operations. leaseUntil allows multiple workers/processes to
+ * claim work atomically while making abandoned claims recoverable after a
+ * worker crash.
+ */
 export const serverOperations = pgTable(
   "server_operations",
   {
@@ -148,6 +147,7 @@ export const serverOperations = pgTable(
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -155,10 +155,41 @@ export const serverOperations = pgTable(
   (t) => [
     uniqueIndex("server_operations_order_kind_key").on(t.orderId, t.kind, t.idempotencyKey),
     index("server_operations_due_idx").on(t.state, t.nextAttemptAt),
+    index("server_operations_lease_idx").on(t.state, t.leaseUntil),
   ],
 );
 
-/** Mox Node enrollment + heartbeat reporting (untrusted, advisory). */
+/**
+ * One-time node enrollment grants. The raw token is never stored. tokenId is
+ * safe to persist; tokenHash is a defense-in-depth comparison while the
+ * signature key remains outside the database. A consumed/revoked grant can
+ * never be reused.
+ */
+export const nodeEnrollmentTokens = pgTable(
+  "node_enrollment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenId: text("token_id").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => serverOrders.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    consumedByNodeId: text("consumed_by_node_id"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("node_enrollment_tokens_token_id_key").on(t.tokenId),
+    index("node_enrollment_tokens_order_idx").on(t.orderId, t.expiresAt),
+  ],
+);
+
+/** Mox Node identity + heartbeat state (untrusted/advisory telemetry). */
 export const moxNodes = pgTable(
   "mox_nodes",
   {
@@ -168,7 +199,10 @@ export const moxNodes = pgTable(
       .references(() => organizations.id, { onDelete: "cascade" }),
     orderId: uuid("order_id").references(() => serverOrders.id, { onDelete: "set null" }),
     nodeId: text("node_id").notNull(),
+    /** Historical hash of the one-time enrollment token; never accepted again. */
     enrollTokenHash: text("enroll_token_hash").notNull(),
+    /** Hash of the currently valid node bearer token. Raw token is returned once. */
+    agentTokenHash: text("agent_token_hash"),
     version: text("version"),
     capabilities: jsonb("capabilities").notNull().default([]),
     metrics: jsonb("metrics"),
@@ -195,3 +229,9 @@ export const nodeCommands = pgTable(
   },
   (t) => [uniqueIndex("node_commands_nonce_key").on(t.nonce)],
 );
+
+/** Durable generic nonce consumption for control-plane replay guards. */
+export const nodeConsumedNonces = pgTable("node_consumed_nonces", {
+  nonce: text("nonce").primaryKey(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+});
