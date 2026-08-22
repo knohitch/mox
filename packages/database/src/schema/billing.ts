@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -14,14 +15,10 @@ import {
 import { organizations } from "./identity-users.js";
 
 /**
- * Billing/commerce domain (Prompt 08): plans, immutable plan versions,
- * entitlement definitions and values, price books/versions, currencies,
- * regions, subscriptions, add-ons, checkout sessions, payment records and
- * verified provider webhook events.
- *
- * Money is stored as bigint minor units; never floating point.
+ * Billing/commerce domain: plans, immutable plan versions, entitlement
+ * definitions/values, prices, subscriptions, checkout sessions, invoices and
+ * verified provider events. Money is always bigint minor units.
  */
-
 export const planTier = pgEnum("plan_tier", ["plus", "pro", "max", "enterprise"]);
 export const planVersionStatus = pgEnum("plan_version_status", ["draft", "active", "retired"]);
 export const subscriptionState = pgEnum("subscription_state", [
@@ -40,17 +37,13 @@ export const webhookStatus = pgEnum("webhook_status", ["received", "verified", "
 export const itemKind = pgEnum("subscription_item_kind", ["base", "addon"]);
 export const invoiceStatus = pgEnum("invoice_status", ["open", "paid", "failed", "void"]);
 
-/** Admin-editable catalog of entitlement keys; business limits stay data. */
-export const entitlementDefinitions = pgTable(
-  "entitlement_definitions",
-  {
-    key: text("key").primaryKey(),
-    valueType: text("value_type").notNull(),
-    description: text("description").notNull().default(""),
-    defaultValue: jsonb("default_value").notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-);
+export const entitlementDefinitions = pgTable("entitlement_definitions", {
+  key: text("key").primaryKey(),
+  valueType: text("value_type").notNull(),
+  description: text("description").notNull().default(""),
+  defaultValue: jsonb("default_value").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const products = pgTable(
   "products",
@@ -81,7 +74,7 @@ export const planVersions = pgTable(
   (t) => [uniqueIndex("plan_versions_product_version_key").on(t.productId, t.version)],
 );
 
-/** Per-plan-version entitlement values; admin-editable data. */
+/** Per-plan-version entitlement values; this is durable billing catalog state. */
 export const planEntitlementValues = pgTable(
   "plan_entitlement_values",
   {
@@ -102,22 +95,17 @@ export const currencies = pgTable("currencies", {
   displayName: text("display_name").notNull(),
 });
 
-/** Pricing region is the price-book scope; billing region is customer tax/legal. */
-export const pricingRegions = pgTable(
-  "pricing_regions",
-  {
-    code: text("code").primaryKey(),
-    displayName: text("display_name").notNull(),
-    chargeCurrency: text("charge_currency")
-      .notNull()
-      .references(() => currencies.code),
-    displayCurrency: text("display_currency")
-      .notNull()
-      .references(() => currencies.code),
-  },
-);
+export const pricingRegions = pgTable("pricing_regions", {
+  code: text("code").primaryKey(),
+  displayName: text("display_name").notNull(),
+  chargeCurrency: text("charge_currency")
+    .notNull()
+    .references(() => currencies.code),
+  displayCurrency: text("display_currency")
+    .notNull()
+    .references(() => currencies.code),
+});
 
-/** One price book per product+pricing region. */
 export const priceBooks = pgTable(
   "price_books",
   {
@@ -130,13 +118,14 @@ export const priceBooks = pgTable(
       .references(() => pricingRegions.code),
     mode: priceBookMode("mode").notNull().default("fixed"),
     baseCurrency: text("base_currency").references(() => currencies.code),
+    /** Required with baseCurrency/fxRate when mode is fx_derived. */
+    baseAmountMinor: bigint("base_amount_minor", { mode: "bigint" }),
     fxRate: jsonb("fx_rate"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("price_books_product_region_key").on(t.productId, t.pricingRegion)],
 );
 
-/** Immutable price versions; history never mutates in place. */
 export const priceVersions = pgTable(
   "price_versions",
   {
@@ -155,17 +144,17 @@ export const priceVersions = pgTable(
   (t) => [uniqueIndex("price_versions_book_version_key").on(t.priceBookId, t.version)],
 );
 
-/** Recurring add-on catalog; consumable credits vs persistent resources. */
-export const addonDefinitions = pgTable(
-  "addon_definitions",
-  {
-    code: text("code").primaryKey(),
-    displayName: text("display_name").notNull(),
-    consumable: boolean("consumable").notNull().default(false),
-    unit: text("unit").notNull().default("count"),
-  },
-);
+export const addonDefinitions = pgTable("addon_definitions", {
+  code: text("code").primaryKey(),
+  displayName: text("display_name").notNull(),
+  consumable: boolean("consumable").notNull().default(false),
+  unit: text("unit").notNull().default("count"),
+});
 
+/**
+ * Provider customer ids are nullable until a real gateway returns one. Mox
+ * never fabricates provider identifiers just to satisfy a local schema.
+ */
 export const billingCustomers = pgTable(
   "billing_customers",
   {
@@ -173,7 +162,7 @@ export const billingCustomers = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     providerName: text("provider_name").notNull(),
-    providerCustomerId: text("provider_customer_id").notNull(),
+    providerCustomerId: text("provider_customer_id"),
     billingRegion: text("billing_region").notNull().default("GLOBAL"),
     defaultDisplayCurrency: text("default_display_currency").references(() => currencies.code),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -195,7 +184,8 @@ export const subscriptions = pgTable(
       .notNull()
       .references(() => priceVersions.id, { onDelete: "restrict" }),
     state: subscriptionState("state").notNull().default("trial"),
-    /** Provider-side subscription reference, set only from verified webhooks. */
+    /** Explicit gateway identity; never inferred by parsing a provider ref. */
+    providerName: text("provider_name"),
     providerRef: text("provider_ref"),
     currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
@@ -207,12 +197,20 @@ export const subscriptions = pgTable(
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
     suspendedAt: timestamp("suspended_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /** Cross-process renewal worker lease. */
+    renewalLeaseUntil: timestamp("renewal_lease_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("subscriptions_org_active_key").on(t.orgId),
+    uniqueIndex("subscriptions_org_live_key")
+      .on(t.orgId)
+      .where(sql`${t.state} in ('trial','active','past_due','grace_period','suspended')`),
+    uniqueIndex("subscriptions_provider_ref_key")
+      .on(t.providerName, t.providerRef)
+      .where(sql`${t.providerName} is not null and ${t.providerRef} is not null`),
     index("subscriptions_state_idx").on(t.state),
+    index("subscriptions_renewal_lease_idx").on(t.state, t.renewalLeaseUntil),
   ],
 );
 
@@ -232,7 +230,7 @@ export const subscriptionItems = pgTable(
   (t) => [index("subscription_items_sub_idx").on(t.subscriptionId)],
 );
 
-/** One-time checkout sessions; redirect alone never grants entitlements. */
+/** One-time checkout; redirect alone never grants paid state. */
 export const checkoutSessions = pgTable(
   "checkout_sessions",
   {
@@ -248,11 +246,20 @@ export const checkoutSessions = pgTable(
       .references(() => priceVersions.id, { onDelete: "restrict" }),
     state: checkoutState("state").notNull().default("created"),
     providerName: text("provider_name").notNull(),
+    providerRef: text("provider_ref"),
     redirectUrl: text("redirect_url"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    /** Cross-process webhook application lease. */
+    applyLeaseUntil: timestamp("apply_lease_until", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("checkout_sessions_org_idx").on(t.orgId, t.state)],
+  (t) => [
+    index("checkout_sessions_org_idx").on(t.orgId, t.state),
+    uniqueIndex("checkout_sessions_provider_ref_key")
+      .on(t.providerName, t.providerRef)
+      .where(sql`${t.providerRef} is not null`),
+    index("checkout_sessions_apply_lease_idx").on(t.state, t.applyLeaseUntil),
+  ],
 );
 
 export const invoices = pgTable(
@@ -277,7 +284,6 @@ export const invoices = pgTable(
   (t) => [uniqueIndex("invoices_sub_period_attempt_key").on(t.subscriptionId, t.periodStart, t.attempt)],
 );
 
-/** Verified provider events with dedupe by (provider, external event id). */
 export const verifiedWebhookEvents = pgTable(
   "verified_webhook_events",
   {
@@ -295,7 +301,6 @@ export const verifiedWebhookEvents = pgTable(
   (t) => [uniqueIndex("verified_webhook_events_provider_external_key").on(t.providerName, t.externalEventId)],
 );
 
-/** Auditable, idempotent subscription transitions. */
 export const subscriptionTransitions = pgTable(
   "subscription_transitions",
   {
@@ -314,7 +319,6 @@ export const subscriptionTransitions = pgTable(
   (t) => [uniqueIndex("subscription_transitions_idem_key").on(t.subscriptionId, t.idempotencyKey)],
 );
 
-/** Admin-granted entitlement overrides per org (precedence above plan). */
 export const entitlementOverrides = pgTable(
   "entitlement_overrides",
   {
@@ -332,7 +336,6 @@ export const entitlementOverrides = pgTable(
   (t) => [uniqueIndex("entitlement_overrides_org_key").on(t.orgId, t.key)],
 );
 
-/** Enterprise custom contracts override plan/override layers wholesale. */
 export const customContracts = pgTable(
   "custom_contracts",
   {
