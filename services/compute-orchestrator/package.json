@@ -19,7 +19,9 @@
   "dependencies": {
     "@mox/compute-providers": "workspace:*",
     "@mox/contracts": "workspace:*",
-    "@mox/provider-health": "workspace:*"
+    "@mox/database": "workspace:*",
+    "@mox/provider-health": "workspace:*",
+    "drizzle-orm": "^0.44.5"
   },
   "devDependencies": {
     "typescript": "^5.9.2",
