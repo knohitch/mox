@@ -1,10 +1,4 @@
-/**
- * Compute orchestrator domain types (Prompt 09).
- *
- * Server orders are desired-state records. The orchestrator reconciles
- * them toward provider reality through durable, idempotent operations.
- * HTTP callers only ever observe state; they never wait on providers.
- */
+/** Compute orchestrator domain types. */
 
 export type OrderState =
   | "requested"
@@ -51,7 +45,7 @@ export interface ProviderAccountRecord {
   commercialStatus: "active" | "verify" | "approved" | "disabled";
   healthScore: number;
   enabled: boolean;
-  /** Vault reference for this account's API credentials (rotation target). */
+  /** Vault reference for this account's API credentials. */
   credentialRefId?: string;
   rotatedAt?: string;
   disabledReason?: string;
@@ -104,9 +98,25 @@ export interface ServerOperation {
   attempts: number;
   maxAttempts: number;
   nextAttemptAt: string;
+  /** Cross-process worker claim lease. */
+  leaseUntil?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** One-time, server-owned enrollment grant bound to exactly one order/org. */
+export interface NodeEnrollmentRecord {
+  id: string;
+  tokenId: string;
+  tokenHash: string;
+  orgId: string;
+  orderId: string;
+  expiresAt: string;
+  consumedAt?: string;
+  consumedByNodeId?: string;
+  revokedAt?: string;
+  createdAt: string;
 }
 
 /** Enrollment record for a Mox Node agent running on the customer VPS. */
@@ -115,7 +125,10 @@ export interface MoxNodeRecord {
   orgId: string;
   orderId?: string;
   nodeId: string;
+  /** Historical one-time enrollment token hash; never accepted for auth. */
   enrollTokenHash: string;
+  /** Current bearer token hash. Raw bearer token is never persisted. */
+  agentTokenHash?: string;
   version?: string;
   capabilities: string[];
   metrics?: Record<string, number | string>;
