@@ -5,5 +5,6 @@ export * from "./stores.js";
 export * from "./pg-stores.js";
 export * from "./compute-orchestrator-store.js";
 export * from "./credential-stores.js";
+export * from "./billing-store.js";
 export * from "./memory-service.js";
 export * from "./schema/index.js";
