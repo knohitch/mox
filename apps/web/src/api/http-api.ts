@@ -16,10 +16,10 @@ import type { AgentDeployment, AgentEvent, AgentRoom, ApprovalRequest } from "@m
 import type {
   ApiTokenMetadata,
   BrowserAuthResponse,
-  CreateApiTokenRequest,
+  CreateApiTokenResponse,
   LoginRequest,
   MeResponse,
-  ProgrammaticAuthResponse,
+  ProgrammaticLoginResponse,
   SignupRequest,
 } from "@mox/control-plane-contracts";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
@@ -173,10 +173,12 @@ export class HttpMoxApi implements MoxApi {
     });
   }
 
-  // ---- Personal access tokens (programmatic contract, Prompt 00C §B) --------------
+  // ---- Personal access tokens (programmatic contract, 00C §B / 00D §B) ------------
+  // Management is SESSION-only server-side; browsers call these with the
+  // cookie. The plaintext token appears exactly once at creation.
 
-  createApiToken(input: CreateApiTokenRequest): Promise<ProgrammaticAuthResponse> {
-    return this.call<ProgrammaticAuthResponse>("/api/auth/tokens", {
+  createApiToken(input: { name: string; scopes?: string[] }): Promise<CreateApiTokenResponse> {
+    return this.call<CreateApiTokenResponse>("/api/auth/tokens", {
       method: "POST",
       body: JSON.stringify(input),
     });
@@ -193,8 +195,8 @@ export class HttpMoxApi implements MoxApi {
   }
 
   /** Programmatic login: the ONLY password→bearer exchange (00C §B). */
-  tokenLogin(input: { email: string; password: string; name?: string; scopes?: string[] }): Promise<ProgrammaticAuthResponse> {
-    return this.call<ProgrammaticAuthResponse>("/api/auth/token-login", {
+  tokenLogin(input: { email: string; password: string; name?: string; scopes?: string[] }): Promise<ProgrammaticLoginResponse> {
+    return this.call<ProgrammaticLoginResponse>("/api/auth/token-login", {
       method: "POST",
       body: JSON.stringify(input),
     });

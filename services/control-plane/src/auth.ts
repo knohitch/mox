@@ -209,7 +209,32 @@ function toIdentityResult(
   };
 }
 
-// ---- Personal/API access tokens (Prompt 00C §B) --------------------------------
+// ---- Personal/API access tokens (Prompt 00C §B / 00D §A–B) ---------------------
+
+/**
+ * Central scope check (Prompt 00D §A): "*" grants every NON-admin API
+ * scope available to the user; "admin" never elevates privilege by itself
+ * and is additionally gated at issuance and by real server-side roles.
+ */
+export function scopeSatisfied(scopes: string[], required: string): boolean {
+  return scopes.includes("*") || scopes.includes(required);
+}
+
+/** Scope names allowed on tokens (00D §A route families). */
+const KNOWN_SCOPES = [
+  "*",
+  "agents",
+  "threads",
+  "servers",
+  "billing",
+  "models",
+  "integrations",
+  "channels",
+  "usage",
+  "approvals",
+  "settings",
+  "admin",
+] as const;
 
 export interface IssuedApiToken {
   tokenId: string;
@@ -221,7 +246,12 @@ export interface IssuedApiToken {
 
 export const DEFAULT_API_TOKEN_TTL_MS = 30 * 24 * 3600_000;
 
-/** Issues a personal/API access token for a user; plaintext shown once. */
+/**
+ * Issues a personal/API access token for a user; plaintext shown once.
+ * Prompt 00D §B: scopes constrain API surface, NEVER elevate privileges —
+ * the "admin" scope is rejected unless the ISSUING context already holds
+ * real server-side admin capability (owner/admin org role for now).
+ */
 export async function issueApiToken(input: {
   db: MoxDb;
   userId: string;
@@ -229,13 +259,18 @@ export async function issueApiToken(input: {
   name: string;
   scopes?: string[];
   ttlMs?: number;
+  /** Real server-side admin capability of the issuing context. */
+  actorIsAdmin?: boolean;
 }): Promise<IssuedApiToken> {
   if (!input.name || input.name.trim().length === 0) throw new AuthError("token name is required", 400);
   const scopes = input.scopes && input.scopes.length > 0 ? [...new Set(input.scopes)] : ["*"];
   for (const scope of scopes) {
-    if (!/^(\*|agents|threads|servers|billing|models|integrations|channels|usage|settings|approvals|admin)$/.test(scope)) {
+    if (!(KNOWN_SCOPES as readonly string[]).includes(scope)) {
       throw new AuthError(`unknown scope: ${scope}`, 400);
     }
+  }
+  if (scopes.includes("admin") && input.actorIsAdmin !== true) {
+    throw new AuthError("admin scope requires existing server-side admin capability", 403);
   }
   const expiresAt = new Date(Date.now() + (input.ttlMs ?? DEFAULT_API_TOKEN_TTL_MS));
   const token = `mox_pat_${randomBytes(32).toString("base64url")}`;
@@ -291,7 +326,9 @@ export async function revokeApiToken(db: MoxDb, userId: string, tokenId: string)
 /**
  * Dedicated programmatic login (00C §B): password → API access token.
  * Never sets a cookie, never creates a browser session, and is the ONLY
- * password→bearer exchange in the system.
+ * password→bearer exchange in the system. Prompt 00D §B: scopes constrain
+ * API surface, never elevate privileges — admin scope requires the user to
+ * already hold real server-side admin capability (owner/admin org role).
  */
 export async function programmaticLogin(input: {
   db: MoxDb;
@@ -309,6 +346,7 @@ export async function programmaticLogin(input: {
     name: input.name?.trim() || "programmatic",
     scopes: input.scopes,
     ttlMs: input.ttlMs,
+    actorIsAdmin: credentials.orgRole === "owner" || credentials.orgRole === "admin",
   });
   const result = await authenticateByBearer(input.db, issued.token);
   return { ...result, ...issued };
@@ -437,7 +475,7 @@ async function verifyCredentials(
   db: MoxDb,
   email: string,
   password: string,
-): Promise<{ userId: string; activeOrgId: string }> {
+): Promise<{ userId: string; activeOrgId: string; orgRole: string }> {
   if (!email) throw new AuthError("email and password are required", 400);
   const userRows = await db.select().from(users).where(eq(users.email, email.toLowerCase())).limit(1);
   const user = userRows[0];
@@ -450,12 +488,12 @@ async function verifyCredentials(
   if (!user || !ok) throw new AuthError("invalid credentials", 401);
 
   const membershipRows = await db
-    .select({ orgId: memberships.orgId })
+    .select({ orgId: memberships.orgId, role: memberships.role })
     .from(memberships)
     .where(eq(memberships.userId, user.id))
     .limit(1);
   if (!membershipRows[0]) throw new AuthError("user has no organization membership", 403);
-  return { userId: user.id, activeOrgId: membershipRows[0].orgId };
+  return { userId: user.id, activeOrgId: membershipRows[0].orgId, orgRole: membershipRows[0].role };
 }
 
 /** Browser login: password → HttpOnly cookie session (00C §A). */

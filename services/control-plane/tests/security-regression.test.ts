@@ -137,6 +137,21 @@ describe("web client credential handling (Prompt 00C)", () => {
   });
 });
 
+describe("PAT scope matrix (Prompt 00D §A)", () => {
+  it("* satisfies every family; explicit families satisfy themselves only", async () => {
+    const { scopeSatisfied } = await import("../src/auth.js");
+    for (const family of ["agents", "threads", "servers", "billing", "models", "integrations", "channels", "usage", "approvals", "settings"]) {
+      expect(scopeSatisfied(["*"], family)).toBe(true);
+      expect(scopeSatisfied([family], family)).toBe(true);
+      expect(scopeSatisfied(["agents"], family === "agents" ? "agents" : family)).toBe(family === "agents");
+    }
+    expect(scopeSatisfied(["agents", "servers"], "billing")).toBe(false);
+    // admin is a scope like any other at check-time; privilege gating
+    // happens at issuance and via real roles.
+    expect(scopeSatisfied(["admin"], "agents")).toBe(false);
+  });
+});
+
 describe("orchestrator store authority contract (§G)", () => {
   it("no longer pretends consumeNonce is real", () => {
     expect((InMemoryOrchestratorStore.prototype as unknown as Record<string, unknown>).consumeNonce).toBeUndefined();

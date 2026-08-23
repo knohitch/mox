@@ -441,18 +441,41 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(me.status).toBe(200);
     expect(((await me.json()) as { email: string }).email).toBe(email);
 
-    // Management endpoints list and revoke.
-    const listRes = await call("/api/auth/tokens", { headers: { authorization: `Bearer ${token}` } });
-    const listed = listRes.body as Array<{ name: string; id: string }>;
-    expect(listed.some((t) => t.name === "ci")).toBe(true);
+    // Management is SESSION-ONLY (Prompt 00D §B): the PAT cannot list,
+    // create or revoke tokens — not even its own record.
+    const patList = await call("/api/auth/tokens", { headers: { authorization: `Bearer ${token}` } });
+    expect(patList.status).toBe(403);
+    expect(JSON.stringify(patList.body)).toContain("session_only");
 
-    const revokeRes = await call(`/api/auth/tokens/${(tokenLogin.body as { tokenId: string }).tokenId}`, {
+    // Session (cookie) management works: create → exact contract shape
+    // (00D §C, test 10) → list → revoke.
+    const emailSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "token-mgmt-pass" }),
+    });
+    const sessionCookie = cookieFrom(emailSignup.headers);
+    const createRes = await call("/api/auth/tokens", {
+      method: "POST",
+      headers: { ...CSRF, cookie: sessionCookie },
+      body: JSON.stringify({ name: "from-session", scopes: ["agents"] }),
+    });
+    expect(createRes.status).toBe(200);
+    expect(Object.keys(createRes.body as object).sort()).toEqual(["expiresAt", "scopes", "token", "tokenId"]);
+
+    const listRes = await call("/api/auth/tokens", { headers: { cookie: sessionCookie } });
+    const listed = listRes.body as Array<{ name: string; id: string; token?: string }>;
+    expect(listed.some((t) => t.name === "from-session")).toBe(true);
+    for (const entry of listed) {
+      expect(Object.keys(entry)).not.toContain("token"); // metadata only
+    }
+
+    const revokeRes = await call(`/api/auth/tokens/${(createRes.body as { tokenId: string }).tokenId}`, {
       method: "DELETE",
-      headers: { ...CSRF, authorization: `Bearer ${token}` },
+      headers: { ...CSRF, cookie: sessionCookie },
     });
     expect(revokeRes.status).toBe(200);
-    const revokedMe = await fetch(`${server.base}/api/me`, { headers: { authorization: `Bearer ${token}` } });
-    expect(revokedMe.status).toBe(401);
+    void tokenLogin;
   });
 
   it("allowlisted origins get credentialed CORS; unlisted origins are denied (§C, tests 6–7)", async () => {
@@ -634,7 +657,212 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(okPoll.body).toEqual([]);
   });
 
-  it("duplicate workspace names allocate distinct slugs safely (§F, test 11)", async () => {
+  // ==== Prompt 00D — PAT scope enforcement ====================================
+
+  it("scoped PATs are enforced per route family (00D tests 1-3)", async () => {
+    const email = `${randomUUID()}@mox.test`;
+    await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "scope-enf-pass" }),
+    });
+    const tokenLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "scope-enf-pass", name: "scoped", scopes: ["agents"] }),
+    });
+    const pat = (tokenLogin.body as { token: string }).token;
+    const authHeader = { authorization: `Bearer ${pat}` };
+
+    // (1) agents family ALLOWED.
+    const agents = await call("/api/agents", { headers: authHeader });
+    expect(agents.status).toBe(200);
+
+    // (2) billing DENIED.
+    const billing = await call("/api/billing/invoices", { headers: authHeader });
+    expect(billing.status).toBe(403);
+    expect(JSON.stringify(billing.body)).toContain("scope_denied");
+
+    // (3) servers DENIED (absent scope).
+    const servers = await call("/api/servers", { headers: authHeader });
+    expect(servers.status).toBe(403);
+
+    // threads family also denied for an agents-only PAT.
+    const threads = await call("/api/events?sinceSeq=0", { headers: authHeader });
+    expect(threads.status).toBe(403);
+  });
+
+  it("billing-scope PAT reads billing but cannot touch session-only management (00D tests 4-6)", async () => {
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "billing-pat-pass" }),
+    });
+    void signup;
+    const tokenLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "billing-pat-pass", name: "finance", scopes: ["billing"] }),
+    });
+    const pat = (tokenLogin.body as { token: string }).token;
+    const authHeader = { authorization: `Bearer ${pat}` };
+
+    // (4) permitted billing reads.
+    const invoices = await call("/api/billing/invoices", { headers: authHeader });
+    expect(invoices.status).toBe(200);
+    const subscription = await call("/api/billing/subscription", { headers: authHeader });
+    expect(subscription.status).toBe(200);
+
+    // Admin surface does not exist for tokens; the closest privilege move
+    // is minting broader tokens — denied by session-only policy (5).
+    const mint = await call("/api/auth/tokens", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${pat}` },
+      body: JSON.stringify({ name: "escalate", scopes: ["*"] }),
+    });
+    expect(mint.status).toBe(403);
+    expect(JSON.stringify(mint.body)).toContain("session_only");
+
+    // (6) restricted PAT cannot manage the token inventory at all.
+    const list = await call("/api/auth/tokens", { headers: authHeader });
+    expect(list.status).toBe(403);
+    const del = await call(`/api/auth/tokens/${(tokenLogin.body as { tokenId: string }).tokenId}`, {
+      method: "DELETE",
+      headers: { ...CSRF, authorization: `Bearer ${pat}` },
+    });
+    expect(del.status).toBe(403);
+  });
+
+  it("admin scope requires real admin capability; * cannot self-escalate (00D tests 7-8)", async () => {
+    const email = `${randomUUID()}@mox.test`;
+    await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "admin-gate-pass" }),
+    });
+
+    // (7) non-admin requesting the admin scope is rejected at issuance.
+    // Signup makes this user OWNER of their own org; demote to plain
+    // member so real server-side admin capability is absent.
+    const demote = await server.services.db.execute(
+      (await import("drizzle-orm")).sql`UPDATE memberships SET role = 'member' WHERE user_id = (SELECT id FROM users WHERE email = ${email.toLowerCase()})`,
+    );
+    void demote;
+    const adminAttempt = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "admin-gate-pass", name: "na", scopes: ["admin"] }),
+    });
+    expect(adminAttempt.status).toBe(403);
+    expect(JSON.stringify(adminAttempt.body)).toMatch(/admin capability/i);
+
+    // Sanity: an actual owner/admin CAN hold the admin scope...
+    const ownerEmail = `${randomUUID()}@mox.test`;
+    await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "admin-gate-pass" }),
+    });
+    const ownerAdminLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "admin-gate-pass", name: "owneradmin", scopes: ["admin"] }),
+    });
+    expect(ownerAdminLogin.status).toBe(200);
+    // ...and admin scope never creates privilege by itself: no session-only
+    // escalation regardless.
+    const ownerMint = await call("/api/auth/tokens", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${(ownerAdminLogin.body as { token: string }).token}` },
+      body: JSON.stringify({ name: "nope", scopes: ["*"] }),
+    });
+    expect(ownerMint.status).toBe(403);
+    void ownerMint;
+
+    // (8) '*' PAT still cannot exceed the user's real capabilities:
+    //     no token minting (session-only), no foreign-org switching.
+    const starLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "admin-gate-pass", name: "star" }),
+    });
+    const star = (starLogin.body as { token: string; orgId: string }).token;
+    const mint = await call("/api/auth/tokens", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${star}` },
+      body: JSON.stringify({ name: "nope", scopes: ["*"] }),
+    });
+    expect(mint.status).toBe(403);
+    const crossOrg = await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${star}` },
+      body: JSON.stringify({ orgId: randomUUID() }),
+    });
+    expect(crossOrg.status).toBe(403);
+  });
+
+  it("revoked and expired PATs stay rejected; browser cookie flow unchanged; cross-org protection intact (00D tests 9, 11-12)", async () => {
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "lifecycle-pass" }),
+    });
+    const cookie = cookieFrom(signup.headers);
+
+    const tokenLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "lifecycle-pass", name: "shortlived", scopes: ["usage"], ttlMs: 60_000 }),
+    });
+    const { token, tokenId } = tokenLogin.body as { token: string; tokenId: string };
+
+    // (9a) revoke via SESSION channel → bearer dies.
+    const revoke = await call(`/api/auth/tokens/${tokenId}`, {
+      method: "DELETE",
+      headers: { ...CSRF, cookie },
+    });
+    expect(revoke.status).toBe(200);
+    const afterRevoke = await fetch(`${server.base}/api/usage`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(afterRevoke.status).toBe(401);
+
+    // (9b) expiry enforced independently.
+    const expiredLogin = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "lifecycle-pass", name: "expired", scopes: ["usage"], ttlMs: 60_000 }),
+    });
+    const expiredToken = (expiredLogin.body as { token: string }).token;
+    await server.services.db.execute(
+      (await import("drizzle-orm")).sql`UPDATE api_tokens SET expires_at = now() - interval '1 minute' WHERE token_hash = ${(await import("../src/auth.js")).hashToken(expiredToken)}`,
+    );
+    const afterExpiry = await fetch(`${server.base}/api/usage`, {
+      headers: { authorization: `Bearer ${expiredToken}` },
+    });
+    expect(afterExpiry.status).toBe(401);
+
+    // (11) browser cookie auth remains unchanged end-to-end.
+    const me = await call("/api/me", { headers: { cookie } });
+    expect(me.status).toBe(200);
+
+    // (12) cross-org membership protection intact for PATs.
+    const freshPat = await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "lifecycle-pass", name: "crossorg" }),
+    });
+    const foreignSwitch = await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${(freshPat.body as { token: string }).token}` },
+      body: JSON.stringify({ orgId: randomUUID() }),
+    });
+    expect(foreignSwitch.status).toBe(403);
+  });
+
+  it("duplicate workspace names allocate distinct slugs safely (00C §F, test 11)", async () => {
     const orgName = `Duplicate Workspace ${randomUUID().slice(0, 6)}`;
     const first = await call("/api/auth/signup", {
       method: "POST",

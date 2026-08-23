@@ -37,23 +37,29 @@ export interface MeResponse extends SessionIdentity {
 export type BrowserAuthResponse = MeResponse & { expiresAt: string };
 
 /**
- * POST /api/auth/token-login and POST /api/auth/tokens — the PROGRAMMATIC
- * contract (Prompt 00C §B): the only responses that carry bearer material.
- * CLI/automation clients persist these themselves; browsers never call them.
+ * POST /api/auth/token-login — the PROGRAMMATIC LOGIN contract (00C §B /
+ * 00D §C): the only password→bearer exchange. Returns identity context plus
+ * the freshly minted personal access token (shown once).
  */
-export interface ProgrammaticAuthResponse extends MeResponse {
+export interface ProgrammaticLoginResponse extends MeResponse {
   token: string;
-  tokenId?: string;
+  tokenId: string;
   scopes: string[];
   expiresAt: string;
 }
 
-/** POST /api/auth/tokens — create a personal access token. */
-export interface CreateApiTokenRequest {
-  name: string;
-  scopes?: string[];
+/**
+ * POST /api/auth/tokens — creation metadata only (00D §C). Session-auth
+ * only; the plaintext is shown exactly once and never stored server-side.
+ */
+export interface CreateApiTokenResponse {
+  token: string;
+  tokenId: string;
+  scopes: string[];
+  expiresAt: string;
 }
 
+/** GET /api/auth/tokens — metadata only, never a plaintext token. */
 export interface ApiTokenMetadata {
   id: string;
   name: string;

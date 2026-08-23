@@ -38,6 +38,7 @@ import {
   logout as logoutSession,
   programmaticLogin,
   revokeApiToken,
+  scopeSatisfied,
   serializeClearSessionCookie,
   serializeSessionCookie,
   signup as signupAccount,
@@ -57,19 +58,48 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const { services } = deps;
   const db = () => services.db;
 
-  /** Authenticated context: flattened SessionIdentity plus org memberships. */
-  const requireAuth = async (ctx: RequestContext) => {
+  /**
+   * Central auth gate (Prompt 00D §A). Browser sessions carry full
+   * permissions (subject to normal role/entitlement checks); personal API
+   * tokens MUST satisfy `requiredScope` ("*" or the explicit family) for
+   * every protected route — enforcement cannot be forgotten route-by-route
+   * because every handler funnels through here.
+   */
+  const requireAuth = async (ctx: RequestContext, requiredScope?: string) => {
     const auth = await authenticate(db(), {
       authorization: ctx.req.headers.authorization,
       cookie: ctx.req.headers.cookie,
     });
-    // CSRF defense (§B): cookie-authenticated mutations must carry the
-    // custom header, which cross-site forms cannot set.
+    // CSRF defense (§B of 00B): cookie-authenticated mutations must carry
+    // the custom header, which cross-site forms cannot set.
     const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes(ctx.req.method ?? "");
     if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
       throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
     }
-    return { ...auth.identity, userId: auth.userId, sessionId: auth.sessionId, orgs: auth.orgs };
+    if (auth.authKind === "api_token" && requiredScope && !scopeSatisfied(auth.scopes, requiredScope)) {
+      throw httpError(`token lacks required scope: ${requiredScope}`, 403, { code: "scope_denied" });
+    }
+    return {
+      ...auth.identity,
+      userId: auth.userId,
+      sessionId: auth.sessionId,
+      orgs: auth.orgs,
+      authKind: auth.authKind,
+      scopes: auth.scopes,
+    };
+  };
+
+  /** Token management is SESSION-only (Prompt 00D §B preferred policy). */
+  const requireSessionAuth = async (ctx: RequestContext) => {
+    const auth = await requireAuth(ctx);
+    if (auth.authKind !== "session") {
+      throw httpError(
+        "token management requires a browser/session credential; use /api/auth/token-login to mint new tokens",
+        403,
+        { code: "session_only" },
+      );
+    }
+    return auth;
   };
 
   /** Node-channel auth (Prompt 00C §E): durable agent token per node. */
@@ -183,17 +213,20 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return toProgrammaticAuthResponse(result);
   });
 
-  /** Personal access token management (authenticated; plaintext shown once at creation). */
+  /** Personal access token management — SESSION-ONLY (Prompt 00D §B). */
   router.post("/api/auth/tokens", async (ctx) => {
-    const auth = await requireAuth(ctx);
+    const auth = await requireSessionAuth(ctx);
     const body = ctx.body as { name?: string; scopes?: string[] } | undefined;
     if (!body?.name) throw httpError("name is required", 400);
+    // Scopes never exceed the issuing user's real capabilities: admin
+    // scope requires actual owner/admin org role (00D §B).
     const issued = await issueApiToken({
       db: db(),
       userId: auth.userId,
       activeOrgId: auth.orgId,
       name: body.name,
       scopes: body.scopes,
+      actorIsAdmin: auth.role === "owner" || auth.role === "admin",
     });
     return {
       token: issued.token,
@@ -204,7 +237,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/auth/tokens", async (ctx) => {
-    const auth = await requireAuth(ctx);
+    const auth = await requireSessionAuth(ctx);
     const tokens = await listApiTokens(db(), auth.userId);
     return tokens.map((t) => ({
       id: t.id,
@@ -218,7 +251,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.delete("/api/auth/tokens/:tokenId", async (ctx) => {
-    const auth = await requireAuth(ctx);
+    const auth = await requireSessionAuth(ctx);
     const revoked = await revokeApiToken(db(), auth.userId, ctx.params.tokenId!);
     if (!revoked) throw httpError(`api token ${ctx.params.tokenId} not found or already revoked`, 404);
     return { ok: true };
@@ -258,7 +291,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Agents ---------------------------------------------------------------
 
   router.get("/api/agents", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "agents");
     const rows = await db()
       .select()
       .from(agents)
@@ -273,7 +306,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/agents/:agentId", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "agents");
     const rows = await db()
       .select()
       .from(agents)
@@ -286,7 +319,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   /** Authoritative model change on the live draft definition. */
   router.patch("/api/agents/:agentId/model", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "agents");
     const body = ctx.body as { providerId?: string; modelId?: string } | undefined;
     if (!body?.providerId || !body?.modelId) throw httpError("providerId and modelId are required", 400);
     const rows = await db()
@@ -306,13 +339,13 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Threads & messages -----------------------------------------------------
 
   router.get("/api/agents/:agentId/threads", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const records = await services.threads.listForAgent(identity, ctx.params.agentId!);
     return records.map((r) => ({ threadId: r.threadId, title: r.title }));
   });
 
   router.post("/api/threads", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const body = ctx.body as { agentId?: string; title?: string } | undefined;
     if (!body?.agentId) throw httpError("agentId is required", 400);
     const record = await services.threads.create(identity, { agentId: body.agentId, title: body.title });
@@ -320,7 +353,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/threads/:threadId/messages", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const records = await services.messages.list(identity, ctx.params.threadId!);
     return records.map((m) => ({
       messageId: m.messageId,
@@ -338,7 +371,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
    * assistant response.
    */
   router.post("/api/threads/:threadId/messages", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const threadId = ctx.params.threadId!;
     const body = ctx.body as { text?: string } | undefined;
     if (!body?.text) throw httpError("text is required", 400);
@@ -369,7 +402,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Events (canonical) + realtime stream ------------------------------------
 
   router.get("/api/events", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const sinceSeq = Number(ctx.query.get("sinceSeq") ?? "0");
     const rows = await db()
       .select()
@@ -389,10 +422,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (ctx.query.get("token") || ctx.query.get("authorization")) {
       throw httpError("stream authentication must use cookie or Authorization header", 400, { code: "no_token_in_url" });
     }
-    const { identity } = await authenticate(db(), {
+    const auth = await authenticate(db(), {
       authorization: ctx.req.headers.authorization,
       cookie: ctx.req.headers.cookie,
     });
+    if (auth.authKind === "api_token" && !scopeSatisfied(auth.scopes, "threads")) {
+      throw httpError("token lacks required scope: threads", 403, { code: "scope_denied" });
+    }
+    const { identity } = auth;
     let lastSeq = Number(ctx.query.get("sinceSeq") ?? "0");
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -425,7 +462,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Approvals (event-sourced) ----------------------------------------------
 
   router.get("/api/approvals/open", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "approvals");
     const [requested, resolved] = await Promise.all([
       db()
         .select()
@@ -448,7 +485,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/approvals/:approvalId/resolve", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "approvals");
     const body = ctx.body as { outcome?: "approved" | "denied" } | undefined;
     if (body?.outcome !== "approved" && body?.outcome !== "denied") {
       throw httpError('outcome must be "approved" or "denied"', 400);
@@ -469,7 +506,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Rooms -----------------------------------------------------------------
 
   router.get("/api/rooms", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const rows = await db().select().from(agentRooms).where(eq(agentRooms.orgId, identity.orgId));
     return rows.map((row) => ({
       roomId: row.id,
@@ -481,7 +518,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/rooms", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "threads");
     const body = ctx.body as { title?: string; memberAgentIds?: string[] } | undefined;
     if (!body?.title) throw httpError("title is required", 400);
     const inserted = await db()
@@ -496,7 +533,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Servers (compute orchestrator authority) -------------------------------
 
   router.get("/api/servers", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "servers");
     const orders = await services.orchestrator.listOrders(identity.orgId);
     return orders.map((order) => ({
       serverId: order.providerInstanceId ?? order.id,
@@ -512,7 +549,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/servers/orders", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "servers");
     const body = ctx.body as { computeClassCode?: string; hostname?: string; sshKeyId?: string } | undefined;
     if (!body?.computeClassCode || !body?.hostname) {
       throw httpError("computeClassCode and hostname are required", 400);
@@ -530,7 +567,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Deployments ------------------------------------------------------------
 
   router.get("/api/deployments", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "servers");
     const rows = await db()
       .select()
       .from(agentDeployments)
@@ -549,7 +586,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Models / connections ------------------------------------------------------
 
   router.get("/api/models", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "models");
     const providers = await db().select().from(modelProviders).where(eq(modelProviders.orgId, identity.orgId));
     const allModels = await db().select().from(models).where(eq(models.orgId, identity.orgId));
     const connections = await db().select().from(modelConnections).where(eq(modelConnections.orgId, identity.orgId));
@@ -567,7 +604,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/model-connections/:providerSlug/test", async (ctx) => {
-    await requireAuth(ctx);
+    await requireAuth(ctx, "models");
     // A real probe requires the provider SDK credential vault; until wired
     // the API reports honestly rather than faking connectivity.
     throw httpError("provider connection probes are not configured on this deployment", 501, { code: "not_configured" });
@@ -576,7 +613,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Integrations / channels ---------------------------------------------------
 
   router.get("/api/integrations", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "integrations");
     const [providers, conns] = await Promise.all([
       db().select().from(integrationProviders).where(eq(integrationProviders.orgId, identity.orgId)),
       db().select().from(integrationConnections).where(eq(integrationConnections.orgId, identity.orgId)),
@@ -589,7 +626,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.patch("/api/integrations/:integrationId", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "integrations");
     const body = ctx.body as { connected?: boolean } | undefined;
     const rows = await db()
       .select()
@@ -620,7 +657,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/channels", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "channels");
     const [providers, conns] = await Promise.all([
       db().select().from(channelProviders).where(eq(channelProviders.orgId, identity.orgId)),
       db().select().from(channelConnections).where(eq(channelConnections.orgId, identity.orgId)),
@@ -636,7 +673,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Usage / billing -----------------------------------------------------------
 
   router.get("/api/usage", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "usage");
     const tokenRows = await db()
       .select({
         inputTokens: sql<number>`coalesce(sum(${modelUsageRefs.inputTokens}), 0)`,
@@ -656,13 +693,13 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/billing/subscription", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "billing");
     const sub = await services.billing.getActiveSubscription(identity.orgId);
     return sub ?? null;
   });
 
   router.get("/api/billing/invoices", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "billing");
     const sub = await services.billing.getActiveSubscription(identity.orgId);
     if (!sub) return [];
     const invoices = await services.billing.listInvoices(sub.id);
@@ -682,7 +719,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/billing/entitlements", async (ctx) => {
-    const identity = await requireAuth(ctx);
+    const identity = await requireAuth(ctx, "billing");
     const sub = await services.billing.getActiveSubscription(identity.orgId);
     const planVersionId = sub?.planVersionId ?? "none";
     const values = planVersionId === "none" ? {} : await services.entitlements.planValuesFor(planVersionId);
@@ -692,19 +729,19 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Computer gateway + files/logs: honest 501s until wired --------------------
 
   router.get("/api/computer/:agentId/snapshot", async (ctx) => {
-    await requireAuth(ctx);
+    await requireAuth(ctx, "servers");
     void ctx;
     throw httpError("computer gateway is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.get("/api/agents/:agentId/files", async (ctx) => {
-    await requireAuth(ctx);
+    await requireAuth(ctx, "servers");
     void ctx;
     throw httpError("workspace file access is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.get("/api/agents/:agentId/logs", async (ctx) => {
-    await requireAuth(ctx);
+    await requireAuth(ctx, "servers");
     void ctx;
     throw httpError("log streaming is not configured on this deployment", 501, { code: "not_configured" });
   });
