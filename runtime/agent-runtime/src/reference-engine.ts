@@ -6,11 +6,10 @@ import type { PermissionsPolicyEngine } from "./policy.js";
 import type { ToolRegistry } from "./tools.js";
 
 /**
- * Reference turn engine: the in-repo DSH-shape loop (model call → tool
- * requests → final message) used by tests and as the behavioral contract the
- * out-of-process DSH kernel must match. Model seam and policy engine are
- * injectable; tests supply stubs, Prompt 07's Model Gateway supplies real
- * providers.
+ * Reference turn engine: the in-repo loop (model call → tool requests → final
+ * message) used by tests and as the behavioral contract the production Mox
+ * Runtime process must match. Model seam and policy engine are injectable;
+ * tests supply stubs, Mox Model Gateway supplies real providers.
  */
 
 export interface ModelStubRequest {
@@ -26,7 +25,7 @@ export interface ModelStubResult {
   toolRequests?: Array<{ toolName: string; input: unknown }>;
 }
 
-/** The model seam: swap for DSH llm / future Model Gateway providers. */
+/** The model seam: swap for Mox Model Gateway providers. */
 export type ModelStub = (request: ModelStubRequest) => Promise<ModelStubResult>;
 
 export class ReferenceAgentEngine implements AgentEngine {

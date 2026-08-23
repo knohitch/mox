@@ -5,25 +5,54 @@
  * readable codes instead of pretending.
  */
 
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
 import {
   agentDeployments,
   agentRooms,
   agents,
+  abuseCases,
+  addonDefinitions,
+  auditEvents,
+  backups,
   billingProviderConfigs,
   channelConnections,
   channelProviders,
+  computeClasses,
+  costLedgerEntries,
+  credentialRefs,
+  currencies,
+  entitlementDefinitions,
+  featureFlags,
+  incidents,
   integrationConnections,
   integrationProviders,
+  invoices,
+  memberships,
   modelConnections,
   modelProviders,
   models,
   modelUsageRefs,
+  moxNodes,
+  notificationJobs,
+  organizations,
   platformSetup,
+  planEntitlementValues,
+  planVersions,
+  priceBooks,
+  priceVersions,
+  pricingRegions,
+  products,
+  providerAccounts,
+  providerPayments,
+  serverOperations,
+  serverOrders,
   sessionEvents,
+  subscriptions,
   usageEvents,
+  users,
+  verifiedWebhookEvents,
 } from "@mox/database";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
@@ -128,7 +157,8 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
       throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
     }
-    if (!services.config.platformAdminUserIds.includes(auth.userId)) {
+    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
+    if (!services.config.platformAdminUserIds.includes(auth.userId) && capabilities.length === 0) {
       throw httpError("platform administrator authority required", 403, { code: "role_denied" });
     }
     return { ...auth.identity, userId: auth.userId };
@@ -448,6 +478,25 @@ export function buildApiRouter(deps: ApiDeps): Router {
       authorId: identity.userId,
       text: body.text,
     });
+    if (!services.runtime) {
+      throw httpError("Mox Runtime is not configured on this deployment", 501, { code: "mox_runtime_not_configured" });
+    }
+    if (!thread.agentId) throw httpError("thread is not attached to a Mox Agent runtime", 400, { code: "thread_has_no_agent" });
+    const agentRows = await db()
+      .select()
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, thread.agentId)))
+      .limit(1);
+    const agent = agentRows[0];
+    if (!agent) throw httpError(`agent ${thread.agentId} not found`, 404);
+    const turn = await services.runtime.launch({
+      definition: agent.definition as never,
+      orgId: identity.orgId,
+      agentId: thread.agentId,
+      threadId,
+      userInput: body.text,
+      correlationId: crypto.randomUUID(),
+    });
     return {
       message: {
         messageId: message.messageId,
@@ -457,9 +506,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
         text: message.text,
         at: message.createdAt,
       },
-      turn: null,
-      note: "turn execution engine is not configured on this deployment",
-      code: "engine_not_configured",
+      turn,
     };
   });
 
@@ -688,6 +735,11 @@ export function buildApiRouter(deps: ApiDeps): Router {
     throw httpError("provider connection probes are not configured on this deployment", 501, { code: "not_configured" });
   });
 
+  router.get("/api/cli-engines", async (ctx) => {
+    await requireAuth(ctx, "models");
+    throw httpError("CLI engine connection state is not configured on this deployment", 501, { code: "not_configured" });
+  });
+
   // ---- Integrations / channels ---------------------------------------------------
 
   router.get("/api/integrations", async (ctx) => {
@@ -757,9 +809,10 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const requireAdminSession = async (ctx: RequestContext) => {
     const auth = await requireSessionAuth(ctx);
     // Prompt 01 §Provider config: provider administration is a PLATFORM
-    // authority — an explicit deployment-configured admin list, NOT merely
-    // org owner/admin. Empty list denies everyone (fail-closed).
-    if (!services.config.platformAdminUserIds.includes(auth.userId)) {
+    // authority — an explicit deployment-configured admin/capability list,
+    // NOT merely org owner/admin. Empty list denies everyone (fail-closed).
+    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
+    if (!services.config.platformAdminUserIds.includes(auth.userId) && capabilities.length === 0) {
       throw httpError("platform administrator authority required for provider configuration", 403, {
         code: "role_denied",
       });
@@ -767,10 +820,552 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return auth;
   };
 
+  type AdminCapability =
+    | "admin.read"
+    | "admin.customers.write"
+    | "admin.billing.write"
+    | "admin.compute.write"
+    | "admin.intelligence.write"
+    | "admin.notifications.write"
+    | "admin.operations.write";
+
+  const requireAdminCapability = async (ctx: RequestContext, capability: AdminCapability) => {
+    const auth = await requireAdminSession(ctx);
+    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
+    const allCapabilities = services.config.platformAdminUserIds.includes(auth.userId);
+    if (!allCapabilities && !capabilities.includes("*") && !capabilities.includes(capability)) {
+      throw httpError(`admin capability required: ${capability}`, 403, { code: "capability_denied" });
+    }
+    return auth;
+  };
+
+  const appendAdminAudit = async (
+    actor: Awaited<ReturnType<typeof requireAdminSession>>,
+    input: { action: string; resourceType: string; resourceId?: string; before?: unknown; after?: unknown },
+  ) => {
+    await db().insert(auditEvents).values({
+      orgId: actor.orgId,
+      actorType: "platform_admin",
+      actorId: actor.userId,
+      action: input.action,
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
+      result: "success",
+      before: input.before as object | undefined,
+      after: input.after as object | undefined,
+    });
+  };
+
+  const providerNames = ["paystack", "flutterwave", "stripe", "paypal"] as const;
+  const computeProviderNames = ["contabo", "hetzner"] as const;
+  const intelligenceProviderNames = [
+    "openai",
+    "anthropic",
+    "gemini",
+    "xai-grok",
+    "deepseek",
+    "qwen",
+    "glm",
+    "kimi",
+    "mimo",
+    "nvidia",
+    "openrouter",
+    "openai-compatible",
+  ] as const;
+
+  const toArray = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
+
+  const rejectSecretBearingUrl = (raw?: string | null) => {
+    if (!raw) return;
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw httpError("baseUrl must be a valid URL", 400);
+    }
+    if (parsed.username || parsed.password) throw httpError("credentials are not allowed in provider URLs", 400);
+    for (const key of parsed.searchParams.keys()) {
+      if (/secret|token|key|password/i.test(key)) {
+        throw httpError("provider URLs must not contain secret-like query parameters", 400);
+      }
+    }
+  };
+
+  // ---- Mox Admin: dashboard ---------------------------------------------------------
+
+  router.get("/api/admin/overview", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [
+      customerCount,
+      activeSubs,
+      failedInvoices,
+      activeServers,
+      failedServers,
+      agentRows,
+      incidentRows,
+      notificationRows,
+      abuseRows,
+      costs,
+      revenue,
+    ] = await Promise.all([
+      db().select({ count: sql<number>`count(*)::int` }).from(organizations),
+      db()
+        .select({ count: sql<number>`count(*)::int` })
+        .from(subscriptions)
+        .where(inArray(subscriptions.state, ["trial", "active", "grace_period"])),
+      db().select({ count: sql<number>`count(*)::int` }).from(invoices).where(eq(invoices.status, "failed")),
+      db().select({ count: sql<number>`count(*)::int` }).from(serverOrders).where(eq(serverOrders.state, "running")),
+      db().select({ count: sql<number>`count(*)::int` }).from(serverOrders).where(eq(serverOrders.state, "error")),
+      db().select().from(agents).limit(500),
+      db().select().from(incidents).where(inArray(incidents.status, ["investigating", "identified", "monitoring"])).limit(20),
+      db().select().from(notificationJobs).orderBy(desc(notificationJobs.createdAt)).limit(10),
+      db().select().from(abuseCases).where(inArray(abuseCases.status, ["open", "investigating"])).limit(20),
+      db()
+        .select({ amount: sql<string>`coalesce(sum(${costLedgerEntries.amountMinor}::numeric), 0)::text` })
+        .from(costLedgerEntries)
+        .where(eq(costLedgerEntries.kind, "cost")),
+      db()
+        .select({ amount: sql<string>`coalesce(sum(${costLedgerEntries.amountMinor}::numeric), 0)::text` })
+        .from(costLedgerEntries)
+        .where(eq(costLedgerEntries.kind, "revenue")),
+    ]);
+    const runtimeDegraded = agentRows.filter((row) => row.status === "paused" || row.status === "retired").length;
+    return {
+      metrics: {
+        customers: customerCount[0]?.count ?? 0,
+        activeSubscriptions: activeSubs[0]?.count ?? 0,
+        paymentFailures: failedInvoices[0]?.count ?? 0,
+        activeServers: activeServers[0]?.count ?? 0,
+        serverProvisioningFailures: failedServers[0]?.count ?? 0,
+        runtimeAgentHealth: { total: agentRows.length, degraded: runtimeDegraded },
+        providerIncidents: incidentRows.length,
+        notifications: notificationRows.length,
+        abuse: abuseRows.length,
+        costMargin: {
+          currency: "USD",
+          revenueMinor: revenue[0]?.amount ?? "0",
+          costMinor: costs[0]?.amount ?? "0",
+        },
+      },
+      incidents: incidentRows,
+      notifications: notificationRows,
+      abuse: abuseRows,
+    };
+  });
+
+  // ---- Mox Admin: customers / organizations ---------------------------------------
+
+  router.get("/api/admin/customers", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [orgRows, memberRows, subRows, serverRows, agentRows, noteRows] = await Promise.all([
+      db().select().from(organizations).orderBy(desc(organizations.createdAt)).limit(500),
+      db()
+        .select({
+          orgId: memberships.orgId,
+          userId: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: memberships.role,
+          joinedAt: memberships.joinedAt,
+          disabledAt: users.disabledAt,
+        })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .limit(2000),
+      db()
+        .select({
+          id: subscriptions.id,
+          orgId: subscriptions.orgId,
+          state: subscriptions.state,
+          failedRenewals: subscriptions.failedRenewals,
+          currentPeriodEnd: subscriptions.currentPeriodEnd,
+          planVersionId: subscriptions.planVersionId,
+          plan: products.displayName,
+          tier: products.tier,
+        })
+        .from(subscriptions)
+        .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
+        .innerJoin(products, eq(products.id, planVersions.productId))
+        .limit(1000),
+      db().select().from(serverOrders).limit(2000),
+      db().select().from(agents).limit(2000),
+      db()
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.action, "support.note"))
+        .orderBy(desc(auditEvents.at))
+        .limit(500),
+    ]);
+    return orgRows.map((org) => ({
+      orgId: org.id,
+      slug: org.slug,
+      displayName: org.displayName,
+      workspaceName: org.workspaceName,
+      createdAt: org.createdAt.toISOString(),
+      users: memberRows.filter((row) => row.orgId === org.id),
+      memberships: memberRows.filter((row) => row.orgId === org.id).map((row) => ({ userId: row.userId, role: row.role, joinedAt: row.joinedAt?.toISOString() })),
+      subscriptions: subRows.filter((row) => row.orgId === org.id).map((row) => ({
+        ...row,
+        currentPeriodEnd: row.currentPeriodEnd?.toISOString(),
+      })),
+      servers: serverRows.filter((row) => row.orgId === org.id),
+      agents: agentRows.filter((row) => row.orgId === org.id).map((row) => ({
+        agentId: row.id,
+        slug: row.slug,
+        displayName: row.displayName,
+        status: row.status,
+        currentVersion: row.currentVersion,
+      })),
+      supportNotes: noteRows.filter((row) => row.orgId === org.id).map((row) => ({
+        id: row.id,
+        actorId: row.actorId,
+        note: (row.after as { note?: string } | null)?.note ?? "",
+        at: row.at.toISOString(),
+      })),
+    }));
+  });
+
+  router.post("/api/admin/customers/:orgId/support-notes", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.customers.write");
+    const body = ctx.body as { note?: string } | undefined;
+    if (!body?.note?.trim()) throw httpError("note is required", 400);
+    const note = body.note.trim().slice(0, 4000);
+    await db().insert(auditEvents).values({
+      orgId: ctx.params.orgId!,
+      actorType: "platform_admin",
+      actorId: admin.userId,
+      action: "support.note",
+      resourceType: "organization",
+      resourceId: ctx.params.orgId!,
+      result: "success",
+      after: { note },
+    });
+    return { ok: true };
+  });
+
+  router.post("/api/admin/customers/:orgId/:action", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.customers.write");
+    const action = ctx.params.action!;
+    if (action !== "suspend" && action !== "reactivate") throw httpError("unsupported customer action", 400);
+    const now = new Date();
+    const body = ctx.body as { reason?: string } | undefined;
+    const orgSubs = await db().select().from(subscriptions).where(eq(subscriptions.orgId, ctx.params.orgId!));
+    for (const sub of orgSubs) {
+      const next = action === "suspend" ? "suspended" : "active";
+      await db().update(subscriptions).set({
+        state: next,
+        suspendedAt: action === "suspend" ? now : null,
+        updatedAt: now,
+      }).where(eq(subscriptions.id, sub.id));
+    }
+    await db().update(serverOrders).set({
+      state: action === "suspend" ? "stopped" : "requested",
+      updatedAt: now,
+    }).where(eq(serverOrders.orgId, ctx.params.orgId!));
+    await appendAdminAudit(admin, {
+      action: `customer.${action}`,
+      resourceType: "organization",
+      resourceId: ctx.params.orgId!,
+      after: { reason: body?.reason },
+    });
+    return { ok: true, changedSubscriptions: orgSubs.length };
+  });
+
+  // ---- Mox Admin: plans / entitlements / pricing ----------------------------------
+
+  router.get("/api/admin/plans", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [productRows, versionRows, entDefRows, entRows, currencyRows, regionRows, bookRows, priceRows, addonRows] = await Promise.all([
+      db().select().from(products).orderBy(asc(products.tier)),
+      db().select().from(planVersions).orderBy(desc(planVersions.createdAt)),
+      db().select().from(entitlementDefinitions).orderBy(asc(entitlementDefinitions.key)),
+      db().select().from(planEntitlementValues),
+      db().select().from(currencies).orderBy(asc(currencies.code)),
+      db().select().from(pricingRegions).orderBy(asc(pricingRegions.code)),
+      db().select().from(priceBooks),
+      db().select().from(priceVersions).orderBy(desc(priceVersions.effectiveFrom)),
+      db().select().from(addonDefinitions).orderBy(asc(addonDefinitions.code)),
+    ]);
+    return {
+      products: productRows,
+      planVersions: versionRows,
+      entitlementDefinitions: entDefRows,
+      entitlementValues: entRows,
+      currencies: currencyRows,
+      pricingRegions: regionRows,
+      priceBooks: bookRows.map((row) => ({
+        ...row,
+        baseAmountMinor: row.baseAmountMinor?.toString(),
+        fxRateScaled: row.fxRateScaled?.toString(),
+      })),
+      priceVersions: priceRows.map((row) => ({
+        ...row,
+        amountMinor: row.amountMinor.toString(),
+        effectiveFrom: row.effectiveFrom.toISOString(),
+      })),
+      addons: addonRows,
+    };
+  });
+
+  router.put("/api/admin/plans/currencies/:code", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const body = ctx.body as { exponent?: number; displayName?: string } | undefined;
+    const code = ctx.params.code!.toUpperCase();
+    if (!/^[A-Z]{3,8}$/.test(code) || !body?.displayName || body.exponent === undefined) throw httpError("valid code, displayName and exponent are required", 400);
+    await db().insert(currencies).values({ code, displayName: body.displayName, exponent: Number(body.exponent) }).onConflictDoUpdate({
+      target: currencies.code,
+      set: { displayName: body.displayName, exponent: Number(body.exponent) },
+    });
+    await appendAdminAudit(admin, { action: "plans.currency.upsert", resourceType: "currency", resourceId: code, after: { code, ...body } });
+    return { ok: true };
+  });
+
+  router.put("/api/admin/plans/price-books", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const body = ctx.body as {
+      productId?: string;
+      pricingRegion?: string;
+      mode?: "fixed" | "fx_derived" | "disabled";
+      baseCurrency?: string;
+      baseAmountMinor?: string | number;
+      fxRateScaled?: string | number;
+      amountMinor?: string | number;
+      currency?: string;
+      effectiveFrom?: string;
+    } | undefined;
+    if (!body?.productId || !body.pricingRegion || !body.mode) throw httpError("productId, pricingRegion and mode are required", 400);
+    const existing = await db().select().from(priceBooks).where(and(eq(priceBooks.productId, body.productId), eq(priceBooks.pricingRegion, body.pricingRegion))).limit(1);
+    let priceBookId = existing[0]?.id;
+    const bookValues = {
+      productId: body.productId,
+      pricingRegion: body.pricingRegion,
+      mode: body.mode,
+      baseCurrency: body.baseCurrency,
+      baseAmountMinor: body.baseAmountMinor === undefined ? undefined : BigInt(body.baseAmountMinor),
+      fxRateScaled: body.fxRateScaled === undefined ? undefined : BigInt(body.fxRateScaled),
+    };
+    if (priceBookId) {
+      await db().update(priceBooks).set(bookValues).where(eq(priceBooks.id, priceBookId));
+    } else {
+      const inserted = await db().insert(priceBooks).values(bookValues).returning({ id: priceBooks.id });
+      priceBookId = inserted[0]!.id;
+    }
+    if (body.amountMinor !== undefined && body.currency) {
+      const latest = await db().select({ version: priceVersions.version }).from(priceVersions).where(eq(priceVersions.priceBookId, priceBookId)).orderBy(desc(priceVersions.version)).limit(1);
+      await db().insert(priceVersions).values({
+        priceBookId,
+        version: Number(latest[0]?.version ?? 0) + 1,
+        amountMinor: BigInt(body.amountMinor),
+        currency: body.currency,
+        effectiveFrom: body.effectiveFrom ? new Date(body.effectiveFrom) : new Date(),
+      });
+    }
+    await appendAdminAudit(admin, { action: "plans.price_book.upsert", resourceType: "price_book", resourceId: priceBookId, after: body });
+    return { ok: true, priceBookId };
+  });
+
+  // ---- Mox Admin: compute ----------------------------------------------------------
+
+  router.get("/api/admin/compute", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [accounts, classes, orders, operations, nodes] = await Promise.all([
+      db().select().from(providerAccounts).orderBy(asc(providerAccounts.providerName)),
+      db().select().from(computeClasses).orderBy(asc(computeClasses.code)),
+      db().select().from(serverOrders).orderBy(desc(serverOrders.createdAt)).limit(500),
+      db().select().from(serverOperations).orderBy(desc(serverOperations.createdAt)).limit(500),
+      db().select().from(moxNodes).orderBy(desc(moxNodes.lastHeartbeatAt)).limit(500),
+    ]);
+    return {
+      providers: computeProviderNames,
+      accounts: accounts.map((row) => ({ ...row, hasCredentialRef: Boolean(row.credentialRefId) })),
+      classes,
+      orders,
+      operations,
+      nodes,
+    };
+  });
+
+  router.put("/api/admin/compute/accounts/:provider/:label", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.compute.write");
+    const providerName = ctx.params.provider!;
+    const accountLabel = ctx.params.label!;
+    if (!computeProviderNames.includes(providerName as never)) throw httpError("unsupported compute provider", 400);
+    const body = ctx.body as { regionCode?: string; commercialStatus?: string; healthScore?: number; enabled?: boolean; credentialRefId?: string } | undefined;
+    const existing = await db().select().from(providerAccounts).where(and(eq(providerAccounts.providerName, providerName), eq(providerAccounts.accountLabel, accountLabel))).limit(1);
+    const values = {
+      providerName,
+      accountLabel,
+      regionCode: body?.regionCode,
+      commercialStatus: body?.commercialStatus ?? "pending",
+      healthScore: Number(body?.healthScore ?? 100),
+      enabled: body?.enabled === true,
+      credentialRefId: body?.credentialRefId,
+    };
+    if (existing[0]) await db().update(providerAccounts).set(values).where(eq(providerAccounts.id, existing[0].id));
+    else await db().insert(providerAccounts).values(values);
+    await appendAdminAudit(admin, { action: "compute.account.upsert", resourceType: "provider_account", resourceId: `${providerName}/${accountLabel}`, after: { ...values, credentialRefId: values.credentialRefId ? "configured" : null } });
+    return { ok: true };
+  });
+
+  router.put("/api/admin/compute/classes/:code", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.compute.write");
+    const body = ctx.body as { displayName?: string; minVcpu?: number; minRamGb?: number; skuMap?: unknown[]; active?: boolean } | undefined;
+    if (!body?.displayName || body.minVcpu === undefined || body.minRamGb === undefined) throw httpError("displayName, minVcpu and minRamGb are required", 400);
+    const code = ctx.params.code!.toUpperCase();
+    await db().insert(computeClasses).values({
+      code,
+      displayName: body.displayName,
+      minVcpu: Number(body.minVcpu),
+      minRamGb: Number(body.minRamGb),
+      skuMap: (body.skuMap ?? []) as object,
+      active: body.active !== false,
+      updatedAt: new Date(),
+    }).onConflictDoUpdate({
+      target: computeClasses.code,
+      set: {
+        displayName: body.displayName,
+        minVcpu: Number(body.minVcpu),
+        minRamGb: Number(body.minRamGb),
+        skuMap: (body.skuMap ?? []) as object,
+        active: body.active !== false,
+        updatedAt: new Date(),
+      },
+    });
+    await appendAdminAudit(admin, { action: "compute.class.upsert", resourceType: "compute_class", resourceId: code, after: body });
+    return { ok: true };
+  });
+
+  router.post("/api/admin/compute/orders/:orderId/:action", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.compute.write");
+    const action = ctx.params.action!;
+    if (!["restart", "redeploy", "resize", "cancel"].includes(action)) throw httpError("unsupported compute action", 400);
+    const order = (await db().select().from(serverOrders).where(eq(serverOrders.id, ctx.params.orderId!)).limit(1))[0];
+    if (!order) throw httpError("server order not found", 404);
+    await db().insert(serverOperations).values({
+      orderId: order.id,
+      kind: action,
+      idempotencyKey: `admin:${admin.userId}:${action}:${Date.now()}`,
+      nextAttemptAt: new Date(),
+    });
+    await appendAdminAudit(admin, { action: `compute.order.${action}`, resourceType: "server_order", resourceId: order.id });
+    return { ok: true };
+  });
+
+  // ---- Mox Admin: Models / Intelligence ------------------------------------------
+
+  router.get("/api/admin/intelligence", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.read");
+    const [providers, connections, modelRows, refs] = await Promise.all([
+      db().select().from(modelProviders).where(eq(modelProviders.orgId, admin.orgId)),
+      db().select().from(modelConnections).where(eq(modelConnections.orgId, admin.orgId)),
+      db().select().from(models).where(eq(models.orgId, admin.orgId)),
+      db().select().from(credentialRefs).where(and(eq(credentialRefs.orgId, admin.orgId), eq(credentialRefs.scope, "mox_system_model_provider"))),
+    ]);
+    return {
+      providers: intelligenceProviderNames.map((slug) => {
+        const provider = providers.find((row) => row.slug === slug);
+        const connection = provider ? connections.find((row) => row.providerId === provider.id) : undefined;
+        const ref = connection?.credentialRefId ? refs.find((row) => row.id === connection.credentialRefId) : undefined;
+        return {
+          slug,
+          displayName: provider?.displayName ?? slug,
+          kind: provider?.kind ?? "api",
+          configured: Boolean(connection?.credentialRefId),
+          credentialFingerprint: ref?.label ?? undefined,
+          baseUrlConfigured: Boolean(connection?.baseUrl),
+          settings: provider?.capabilities ?? {},
+          models: provider ? modelRows.filter((row) => row.providerId === provider.id) : [],
+        };
+      }),
+    };
+  });
+
+  router.put("/api/admin/intelligence/providers/:slug", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.intelligence.write");
+    const slug = ctx.params.slug!;
+    if (!intelligenceProviderNames.includes(slug as never)) throw httpError("unsupported intelligence provider", 400);
+    const body = ctx.body as {
+      displayName?: string;
+      kind?: "api" | "cli-proxy" | "local";
+      baseUrl?: string | null;
+      secretRef?: string | null;
+      availability?: string;
+      defaultModel?: string;
+      fallbackModel?: string;
+      featureModels?: Record<string, string>;
+      quotas?: Record<string, unknown>;
+      costMetadata?: Record<string, unknown>;
+      internalLayer?: boolean;
+    } | undefined;
+    rejectSecretBearingUrl(body?.baseUrl);
+    let provider = (await db().select().from(modelProviders).where(and(eq(modelProviders.orgId, admin.orgId), eq(modelProviders.slug, slug))).limit(1))[0];
+    const providerValues = {
+      orgId: admin.orgId,
+      slug,
+      displayName: body?.displayName ?? slug,
+      kind: body?.kind ?? "api",
+      capabilities: {
+        availability: body?.availability ?? "available",
+        defaultModel: body?.defaultModel,
+        fallbackModel: body?.fallbackModel,
+        featureModels: body?.featureModels ?? {},
+        quotas: body?.quotas ?? {},
+        costMetadata: body?.costMetadata ?? {},
+        internalLayer: body?.internalLayer === true,
+      } as object,
+      updatedAt: new Date(),
+    };
+    if (provider) {
+      await db().update(modelProviders).set(providerValues).where(eq(modelProviders.id, provider.id));
+    } else {
+      const inserted = await db().insert(modelProviders).values(providerValues).returning();
+      provider = inserted[0]!;
+    }
+    let credentialRefId: string | null | undefined;
+    if (typeof body?.secretRef === "string" && body.secretRef.trim()) {
+      const externalId = `mox:${slug}:${body.secretRef.trim()}`;
+      const ref = await db().insert(credentialRefs).values({
+        orgId: admin.orgId,
+        scope: "mox_system_model_provider",
+        externalId,
+        label: body.secretRef.trim(),
+      }).onConflictDoUpdate({
+        target: [credentialRefs.orgId, credentialRefs.externalId],
+        set: { label: body.secretRef.trim() },
+      }).returning({ id: credentialRefs.id });
+      credentialRefId = ref[0]?.id;
+    }
+    const existingConnection = (await db().select().from(modelConnections).where(and(eq(modelConnections.orgId, admin.orgId), eq(modelConnections.providerId, provider.id))).limit(1))[0];
+    const connectionValues = {
+      orgId: admin.orgId,
+      providerId: provider.id,
+      credentialRefId,
+      baseUrl: body?.baseUrl ?? null,
+      updatedAt: new Date(),
+    };
+    if (existingConnection) await db().update(modelConnections).set(connectionValues).where(eq(modelConnections.id, existingConnection.id));
+    else await db().insert(modelConnections).values(connectionValues);
+    await appendAdminAudit(admin, {
+      action: "intelligence.provider.upsert",
+      resourceType: "model_provider",
+      resourceId: slug,
+      after: { ...providerValues.capabilities, hasSecretRef: Boolean(credentialRefId), baseUrlConfigured: Boolean(body?.baseUrl) },
+    });
+    return { ok: true };
+  });
+
   router.get("/api/admin/billing-providers", async (ctx) => {
-    await requireAdminSession(ctx);
-    const rows = await db().select().from(billingProviderConfigs);
-    return rows.map((row) => ({
+    await requireAdminCapability(ctx, "admin.read");
+    const [rows, payments, webhooks] = await Promise.all([
+      db().select().from(billingProviderConfigs),
+      db().select().from(providerPayments).orderBy(desc(providerPayments.receivedAt)).limit(500),
+      db().select().from(verifiedWebhookEvents).orderBy(desc(verifiedWebhookEvents.receivedAt)).limit(500),
+    ]);
+    return providerNames.map((providerName) => {
+      const row = rows.find((r) => r.providerName === providerName);
+      const providerPaymentsRows = payments.filter((p) => p.providerName === providerName);
+      const providerWebhookRows = webhooks.filter((w) => w.providerName === providerName);
+      return row ? ({
       providerName: row.providerName,
       environment: row.environment,
       enabled: row.enabled,
@@ -783,13 +1378,33 @@ export function buildApiRouter(deps: ApiDeps): Router {
       hasSecretRef: Boolean(row.secretRef),
       hasWebhookSecretRef: Boolean(row.webhookSecretRef),
       updatedAt: row.updatedAt.toISOString(),
-    }));
+      webhookStatus: providerWebhookRows[0]?.status ?? "not_configured",
+      reconciliationStatus: providerPaymentsRows.some((p) => !p.reconciledAt) ? "pending" : "current",
+      health: row.enabled && !row.maintenanceMode && row.secretRef ? "healthy" : row.maintenanceMode ? "maintenance" : "not_configured",
+    }) : ({
+      providerName,
+      environment: "test",
+      enabled: false,
+      displayName: providerName,
+      publicConfig: {},
+      supportedCurrencies: [],
+      supportedRegions: [],
+      priority: 100,
+      maintenanceMode: false,
+      hasSecretRef: false,
+      hasWebhookSecretRef: false,
+      updatedAt: null,
+      webhookStatus: "not_configured",
+      reconciliationStatus: "none",
+      health: "not_configured",
+    });
+    });
   });
 
   router.put("/api/admin/billing-providers/:name", async (ctx) => {
-    await requireAdminSession(ctx);
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
     const name = ctx.params.name!;
-    if (!/^[a-z0-9-]{2,40}$/.test(name)) throw httpError("invalid provider name", 400);
+    if (!providerNames.includes(name as never)) throw httpError("unsupported payment provider", 400);
     const body = ctx.body as {
       environment?: string;
       enabled?: boolean;
@@ -829,9 +1444,90 @@ export function buildApiRouter(deps: ApiDeps): Router {
     } else {
       await db().insert(billingProviderConfigs).values(values);
     }
+    await appendAdminAudit(admin, {
+      action: "billing.provider.upsert",
+      resourceType: "billing_provider",
+      resourceId: name,
+      after: { ...values, secretRef: values.secretRef ? "configured" : null, webhookSecretRef: values.webhookSecretRef ? "configured" : null },
+    });
     return {
       ok: true,
       note: "provider registered; restart or reconciliation reload activates adapters",
+    };
+  });
+
+  // ---- Mox Admin: agents/runtime + operations ------------------------------------
+
+  router.get("/api/admin/runtime", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [agentRows, deploymentRows, nodeRows, orderRows] = await Promise.all([
+      db().select().from(agents).orderBy(desc(agents.updatedAt)).limit(1000),
+      db().select().from(agentDeployments).orderBy(desc(agentDeployments.updatedAt)).limit(1000),
+      db().select().from(moxNodes).orderBy(desc(moxNodes.lastHeartbeatAt)).limit(1000),
+      db().select().from(serverOrders).limit(1000),
+    ]);
+    return agentRows.map((agent) => {
+      const deployment = deploymentRows.find((row) => row.agentId === agent.id);
+      const order = deployment?.computeInstanceId ? orderRows.find((row) => row.id === deployment.computeInstanceId) : undefined;
+      const node = order ? nodeRows.find((row) => row.orderId === order.id) : undefined;
+      return {
+        agentId: agent.id,
+        orgId: agent.orgId,
+        slug: agent.slug,
+        displayName: agent.displayName,
+        status: agent.status,
+        deploymentState: deployment ? "deployed" : "not_deployed",
+        runtimeVersion: node?.version,
+        serverPlacement: order?.hostname,
+        failures: order?.lastError ? [order.lastError] : [],
+        lastHeartbeatAt: node?.lastHeartbeatAt?.toISOString(),
+      };
+    });
+  });
+
+  router.post("/api/admin/runtime/agents/:agentId/:action", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.operations.write");
+    const action = ctx.params.action!;
+    if (!["restart", "redeploy"].includes(action)) throw httpError("unsupported runtime action", 400);
+    const deployment = (await db().select().from(agentDeployments).where(eq(agentDeployments.agentId, ctx.params.agentId!)).limit(1))[0];
+    if (!deployment?.computeInstanceId) throw httpError("agent has no server placement", 404);
+    const order = (await db().select().from(serverOrders).where(eq(serverOrders.id, deployment.computeInstanceId)).limit(1))[0];
+    if (!order) throw httpError("agent runtime is not placed on a managed Mox server order", 404);
+    await db().insert(serverOperations).values({
+      orderId: order.id,
+      kind: `agent.${action}`,
+      idempotencyKey: `admin:${admin.userId}:agent:${ctx.params.agentId}:${action}:${Date.now()}`,
+      nextAttemptAt: new Date(),
+    });
+    await appendAdminAudit(admin, { action: `runtime.agent.${action}`, resourceType: "agent", resourceId: ctx.params.agentId! });
+    return { ok: true };
+  });
+
+  router.get("/api/admin/operations", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const [jobs, ops, incidentRows, backupRows, abuseRows, auditRows, flagRows, costRows] = await Promise.all([
+      db().select().from(notificationJobs).orderBy(desc(notificationJobs.createdAt)).limit(100),
+      db().select().from(serverOperations).orderBy(desc(serverOperations.createdAt)).limit(100),
+      db().select().from(incidents).orderBy(desc(incidents.startedAt)).limit(100),
+      db().select().from(backups).orderBy(desc(backups.createdAt)).limit(100),
+      db().select().from(abuseCases).orderBy(desc(abuseCases.createdAt)).limit(100),
+      db().select().from(auditEvents).orderBy(desc(auditEvents.at)).limit(200),
+      db().select().from(featureFlags).orderBy(asc(featureFlags.key)).limit(200),
+      db().select().from(costLedgerEntries).orderBy(desc(costLedgerEntries.at)).limit(200),
+    ]);
+    return { jobs, queues: ops, incidents: incidentRows, backups: backupRows, abuse: abuseRows, audit: auditRows, featureFlags: flagRows, costLedger: costRows };
+  });
+
+  router.get("/api/admin/notifications/jobs", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.read");
+    const jobs = await db().select().from(notificationJobs).orderBy(desc(notificationJobs.createdAt)).limit(100);
+    return {
+      jobs,
+      stats: {
+        scheduled: jobs.filter((job) => job.status === "scheduled").length,
+        completed: jobs.filter((job) => job.status === "completed").length,
+        failed: jobs.filter((job) => job.status === "failed").length,
+      },
     };
   });
 
@@ -924,13 +1620,13 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Prompt 02: admin authoring (platform-admin gated) --------------------------
 
   router.post("/api/admin/notifications/preview", async (ctx) => {
-    await requirePlatformAdmin(ctx);
+    await requireAdminCapability(ctx, "admin.notifications.write");
     const body = ctx.body as { title?: string; body?: string; templateVars?: Record<string, string> } | undefined;
     return services.notifications.preview({ title: body?.title ?? "", body: body?.body ?? "", templateVars: body?.templateVars });
   });
 
   router.post("/api/admin/notifications/send", async (ctx) => {
-    const admin = await requirePlatformAdmin(ctx);
+    const admin = await requireAdminCapability(ctx, "admin.notifications.write");
     const input = validateAdminSendBody(ctx.body);
     const { job } = await services.notifications.createJob({
       ...input,
@@ -944,7 +1640,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/admin/notifications/schedule", async (ctx) => {
-    const admin = await requirePlatformAdmin(ctx);
+    const admin = await requireAdminCapability(ctx, "admin.notifications.write");
     const input = validateAdminSendBody(ctx.body);
     if (!input.scheduledAt) throw httpError("scheduledAt is required", 400);
     const { job } = await services.notifications.createJob({
@@ -955,14 +1651,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/admin/notifications/jobs/:jobId/cancel", async (ctx) => {
-    await requirePlatformAdmin(ctx);
+    await requireAdminCapability(ctx, "admin.notifications.write");
     const canceled = await services.notifications.cancelJob(ctx.params.jobId!);
     if (!canceled) throw httpError(`job ${ctx.params.jobId} not found or not cancelable`, 404);
     return { ok: true };
   });
 
   router.get("/api/admin/notifications/jobs/:jobId", async (ctx) => {
-    await requirePlatformAdmin(ctx);
+    await requireAdminCapability(ctx, "admin.read");
     const job = await services.notifications.getJob(ctx.params.jobId!);
     if (!job) throw httpError(`job ${ctx.params.jobId} not found`, 404);
     return job;
@@ -1130,6 +1826,12 @@ export function buildApiRouter(deps: ApiDeps): Router {
     await requireAuth(ctx, "servers");
     void ctx;
     throw httpError("workspace file access is not configured on this deployment", 501, { code: "not_configured" });
+  });
+
+  router.post("/api/agents/:agentId/terminal", async (ctx) => {
+    await requireAuth(ctx, "servers");
+    void ctx;
+    throw httpError("Mox Runtime terminal execution is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.get("/api/agents/:agentId/logs", async (ctx) => {

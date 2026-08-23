@@ -5,31 +5,60 @@ import {
 } from "@mox/contracts";
 import { createEnvelope } from "@mox/events";
 import { dshEventToEnvelope, type DshSessionEvent } from "@mox/adapters";
-import { RuntimeClient, newRunId } from "@mox/runtime-client";
+import { newRunId } from "@mox/runtime-client";
+import type {
+  ApprovalRespondRequest,
+  ApprovalRespondResult,
+  CapabilitiesResult,
+  HealthResult,
+  RunCancelRequest,
+  RunCancelResult,
+  RunListRequest,
+  RunListResult,
+  RunResumeRequest,
+  RunResumeResult,
+  RunStartRequest,
+  RunStartResult,
+  ShutdownRequest,
+  ShutdownResult,
+  StreamEventParams,
+} from "@mox/runtime-client";
 
 /**
- * AgentRuntime: the Mox composition around a DSH-derived kernel.
+ * AgentRuntime: the Mox composition around the native Mox Runtime engine.
  *
  * Responsibilities (Prompt 03):
  * - accept an AgentDefinition + runtime-scoped credentials/config and launch
  *   runs on the runtime process through @mox/runtime-client;
  * - stream canonical AgentEvents (normalized via @mox/adapters) and persist
- *   them through the SessionEventStore seam — never DSH local storage;
+ *   them through the SessionEventStore seam — never runtime-local storage;
  * - supervise runs: cancel, crash detection, bounded restart with resume;
  * - enforce tenant isolation at routing time (org-scoped run registry).
  *
- * The Control Plane talks to THIS class only. DSH internals never leak past
- * it; when no external kernel is configured, `engine` runs in-process as the
- * reference loop so behavior stays testable.
+ * The Control Plane talks to THIS class only. Runtime internals never leak
+ * past it; production deployments require an explicit Mox Runtime process and
+ * never fall back to the in-process reference loop.
  */
 
 export interface AgentRuntimeOptions {
-  client: RuntimeClient;
+  client: RuntimeClientLike;
   events: SessionEventStoreLike;
   credentials?: CredentialGrantProviderLike;
   config?: ConfigProviderLike;
   /** Max supervised restarts per run before declaring failure. */
   maxRestartsPerRun?: number;
+}
+
+export interface RuntimeClientLike {
+  health(): Promise<HealthResult>;
+  capabilities(): Promise<CapabilitiesResult>;
+  startRun(request: RunStartRequest): Promise<RunStartResult>;
+  resumeRun(request: RunResumeRequest): Promise<RunResumeResult>;
+  cancelRun(request: RunCancelRequest): Promise<RunCancelResult>;
+  listRuns(request?: RunListRequest): Promise<RunListResult>;
+  respondApproval(request: ApprovalRespondRequest): Promise<ApprovalRespondResult>;
+  shutdown(request?: ShutdownRequest): Promise<ShutdownResult>;
+  onEvent?(listener: (params: StreamEventParams) => void): () => void;
 }
 
 /** Structural seams (kept import-free here for host-side composition). */
@@ -78,7 +107,18 @@ interface RunRecord {
 export class AgentRuntime {
   private readonly runs = new Map<string, RunRecord>();
 
-  constructor(private readonly opts: AgentRuntimeOptions) {}
+  constructor(private readonly opts: AgentRuntimeOptions) {
+    this.opts.client.onEvent?.((params) => {
+      const record = this.runs.get(params.runId);
+      if (!record) return;
+      void this.opts.events.append(record.orgId, params.runId, params.event).then(() => {
+        if (params.event.type === "approval.opened") record.state = "waiting-approval";
+        if (params.event.type === "approval.resolved" && record.state === "waiting-approval") record.state = "running";
+        if (params.event.type === "turn.completed") record.state = "succeeded";
+        if (params.event.type === "turn.failed" || params.event.type === "error") record.state = "failed";
+      });
+    });
+  }
 
   async health() {
     return this.opts.client.health();
@@ -124,6 +164,7 @@ export class AgentRuntime {
       agentId: input.agentId,
       threadId: input.threadId,
       definition,
+      userInput: input.userInput,
       runtimeConfig: runtimeConfigPieces,
     });
     record.state = "running";
@@ -148,6 +189,7 @@ export class AgentRuntime {
       agentId: input.agentId,
       threadId: input.threadId,
       definition,
+      userInput: input.userInput,
       runtimeConfig: {},
       resumeToken: input.resumeToken,
     });

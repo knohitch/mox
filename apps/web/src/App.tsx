@@ -4,6 +4,7 @@ import { MoxProvider, useMox } from "./api/store.js";
 import { NotificationBell } from "./views/NotificationCenter.js";
 import { resolveParams, useRoute, Link } from "./router.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
+import { AdminView } from "./views/AdminView.js";
 import {
   BillingView,
   ChannelsView,
@@ -29,6 +30,7 @@ const ROUTES: Record<string, (params: Record<string, string>) => ReactNode> = {
   "/usage": () => <UsageView />,
   "/billing": () => <BillingView />,
   "/settings": () => <SettingsView />,
+  "/admin": () => <AdminView />,
 };
 
 const NAV = [
@@ -43,6 +45,7 @@ const NAV = [
   ["/usage", "Usage"],
   ["/billing", "Billing"],
   ["/settings", "Settings"],
+  ["/admin", "Mox Admin"],
 ] as const;
 
 export function App() {
@@ -59,6 +62,7 @@ function Shell() {
   const match = resolveParams(Object.keys(ROUTES), path);
   const active = match?.pattern ?? null;
   const View = active ? ROUTES[active] : undefined;
+  const adminRoute = active === "/admin";
 
   return (
     <div className="app">
@@ -86,7 +90,7 @@ function Shell() {
       </aside>
       <main className="main">
         {needsAuth && !ready ? (
-          <AuthGate onSignIn={signIn} onSignUp={signUp} />
+          <AuthGate onSignIn={signIn} onSignUp={signUp} allowSignup={!adminRoute} title={adminRoute ? "Sign in to Mox Admin" : undefined} />
         ) : (
           <>
             {error ? (
@@ -115,6 +119,8 @@ function Shell() {
 function AuthGate(props: {
   onSignIn: (input: { email: string; password: string }) => Promise<void>;
   onSignUp: (input: { email: string; password: string; orgName?: string }) => Promise<void>;
+  allowSignup?: boolean;
+  title?: string;
 }): ReactNode {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
@@ -128,7 +134,7 @@ function AuthGate(props: {
     setBusy(true);
     setAuthError(null);
     const action =
-      mode === "login"
+      mode === "login" || props.allowSignup === false
         ? props.onSignIn({ email, password })
         : props.onSignUp({ email, password, orgName: orgName || undefined });
     action.catch((error) => setAuthError(error instanceof Error ? error.message : String(error))).finally(() => setBusy(false));
@@ -136,7 +142,7 @@ function AuthGate(props: {
 
   return (
     <form className="auth-gate" onSubmit={submit}>
-      <h1>{mode === "login" ? "Sign in to Mox" : "Create your Mox workspace"}</h1>
+      <h1>{props.title ?? (mode === "login" ? "Sign in to Mox" : "Create your Mox workspace")}</h1>
       <label>
         Email
         <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" />
@@ -152,7 +158,7 @@ function AuthGate(props: {
           autoComplete={mode === "login" ? "current-password" : "new-password"}
         />
       </label>
-      {mode === "signup" ? (
+      {props.allowSignup !== false && mode === "signup" ? (
         <label>
           Workspace name (optional)
           <input type="text" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
@@ -164,15 +170,19 @@ function AuthGate(props: {
         </div>
       ) : null}
       <button type="submit" disabled={busy}>
-        {busy ? "Working…" : mode === "login" ? "Sign in" : "Sign up"}
+        {busy ? "Working…" : mode === "login" || props.allowSignup === false ? "Sign in" : "Sign up"}
       </button>
-      <button
-        type="button"
-        className="linklike"
-        onClick={() => setMode(mode === "login" ? "signup" : "login")}
-      >
-        {mode === "login" ? "Need an account? Sign up" : "Have an account? Sign in"}
-      </button>
+      {props.allowSignup === false ? (
+        <p className="muted">Admin access is provisioned by Mox operators. Public admin signup is not available.</p>
+      ) : (
+        <button
+          type="button"
+          className="linklike"
+          onClick={() => setMode(mode === "login" ? "signup" : "login")}
+        >
+          {mode === "login" ? "Need an account? Sign up" : "Have an account? Sign in"}
+        </button>
+      )}
     </form>
   );
 }

@@ -17,7 +17,9 @@
  *      - production wiring   → forbidden here (lint/review gate).
  */
 
+import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import type { AgentEvent, SessionEvent } from "@mox/contracts";
 import {
   createDb,
   billingProviderConfigs,
@@ -43,6 +45,8 @@ import {
 import { ComputeOrchestrator } from "@mox/compute-orchestrator";
 import { EntitlementService } from "@mox/entitlements";
 import { NotificationService } from "@mox/notification-service";
+import { AgentRuntime, assertMoxRuntimeMode, verifyFullMoxRuntime, type SessionEventStoreLike } from "@mox/agent-runtime";
+import { launchStdioRuntime } from "@mox/runtime-client";
 import type { ControlPlaneConfig } from "./config.js";
 
 export interface ControlPlaneServices {
@@ -57,6 +61,7 @@ export interface ControlPlaneServices {
   messages: PgMessageStore;
   events: PgSessionEventStore;
   memory: PgMemoryStore;
+  runtime?: AgentRuntime;
 }
 
 export async function composeControlPlane(config: ControlPlaneConfig): Promise<ControlPlaneServices> {
@@ -126,6 +131,26 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
   // from environment variables NAMED by admin-configured refs — never
   // stored in the database, never logged.
   await registerBillingProvidersFromDb(db, billing);
+  assertMoxRuntimeMode({
+    nodeEnv: config.env,
+    mode: config.runtimeMode,
+    runtimeCommand: config.runtimeCommand,
+  });
+
+  let runtime: AgentRuntime | undefined;
+  const events = new PgSessionEventStore(db);
+  if (config.runtimeMode === "full") {
+    const runtimeClient = launchStdioRuntime(config.runtimeCommand!, config.runtimeArgs, {
+      cwd: config.runtimeCwd,
+      timeoutMs: config.runtimeRequestTimeoutMs,
+    });
+    await verifyFullMoxRuntime(runtimeClient, config.env);
+    runtime = new AgentRuntime({
+      client: runtimeClient,
+      events: new RuntimeEventStoreAdapter(events),
+      maxRestartsPerRun: 2,
+    });
+  }
 
   return {
     config,
@@ -137,9 +162,102 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     notifications,
     threads: new PgThreadStore(db),
     messages: new PgMessageStore(db),
-    events: new PgSessionEventStore(db),
+    events,
     memory: new PgMemoryStore(db),
+    runtime,
   };
+}
+
+class RuntimeEventStoreAdapter implements SessionEventStoreLike {
+  constructor(private readonly store: PgSessionEventStore) {}
+
+  async append(orgId: string, runId: string, event: AgentEvent): Promise<void> {
+    const sessionEvent = agentEventToSessionEvent(orgId, runId, event);
+    const subject = sessionEvent.roomId
+      ? ({ kind: "room" as const, id: sessionEvent.roomId })
+      : ({ kind: "thread" as const, id: sessionEvent.threadId ?? orgId });
+    await this.store.append({ orgId }, subject, sessionEvent);
+  }
+
+  async replay(orgId: string, runId: string): Promise<AgentEvent[]> {
+    const rows = await this.store.replayCorrelation({ orgId }, runId);
+    return rows.map((event) => sessionEventToAgentEvent(event)).filter((event): event is AgentEvent => event !== undefined);
+  }
+}
+
+function baseSessionFields(orgId: string, runId: string, event: AgentEvent) {
+  return {
+    eventId: event.eventId,
+    orgId,
+    agentId: event.agentId,
+    threadId: "threadId" in event ? event.threadId : undefined,
+    roomId: "roomId" in event ? event.roomId : undefined,
+    runId,
+    turnId: "turnId" in event ? event.turnId : undefined,
+    correlationId: runId,
+    at: event.at,
+  };
+}
+
+function agentEventToSessionEvent(orgId: string, runId: string, event: AgentEvent): SessionEvent {
+  const base = baseSessionFields(orgId, runId, event);
+  switch (event.type) {
+    case "turn.started":
+      return { ...base, type: "run.started", input: event.input };
+    case "turn.completed":
+      return { ...base, type: "run.completed", output: event.output };
+    case "turn.failed":
+      return { ...base, type: "run.failed", error: event.error, retryable: false };
+    case "message.delta":
+      return { ...base, type: "assistant.delta", messageId: event.messageId, delta: event.delta };
+    case "message.completed":
+      return { ...base, type: "assistant.final", messageId: event.messageId, text: event.text };
+    case "tool.requested":
+      return { ...base, type: "tool.requested", toolName: event.toolName, input: event.input };
+    case "tool.completed":
+      return { ...base, type: event.ok ? "tool.completed" : "tool.failed", toolName: event.toolName, outputSummary: event.ok ? event.output : undefined, error: event.ok ? undefined : JSON.stringify(event.output), ok: event.ok } as SessionEvent;
+    case "approval.opened":
+      return { ...base, type: "approval.requested", approvalId: event.approvalId, summary: event.summary };
+    case "approval.resolved":
+      return { ...base, type: "approval.resolved", approvalId: event.approvalId, outcome: event.outcome };
+    case "error":
+      return { ...base, type: "run.failed", error: event.error, retryable: false };
+  }
+}
+
+function sessionEventToAgentEvent(event: SessionEvent): AgentEvent | undefined {
+  const base = {
+    eventId: randomUUID(),
+    agentId: event.agentId ?? "unknown",
+    threadId: event.threadId,
+    roomId: event.roomId,
+    turnId: event.turnId,
+    at: event.at,
+  };
+  switch (event.type) {
+    case "run.started":
+      return { ...base, type: "turn.started", input: event.input } as unknown as AgentEvent;
+    case "run.completed":
+      return { ...base, type: "turn.completed", output: event.output } as unknown as AgentEvent;
+    case "run.failed":
+      return { ...base, type: "turn.failed", error: event.error } as unknown as AgentEvent;
+    case "assistant.delta":
+      return { ...base, type: "message.delta", messageId: event.messageId, delta: event.delta } as unknown as AgentEvent;
+    case "assistant.final":
+      return { ...base, type: "message.completed", messageId: event.messageId, text: event.text } as unknown as AgentEvent;
+    case "tool.requested":
+      return { ...base, type: "tool.requested", toolName: event.toolName, input: event.input } as unknown as AgentEvent;
+    case "tool.completed":
+      return { ...base, type: "tool.completed", toolName: event.toolName, output: event.outputSummary, ok: event.ok } as unknown as AgentEvent;
+    case "tool.failed":
+      return { ...base, type: "tool.completed", toolName: event.toolName, output: { error: event.error }, ok: false } as unknown as AgentEvent;
+    case "approval.requested":
+      return { ...base, type: "approval.opened", approvalId: event.approvalId, summary: event.summary } as unknown as AgentEvent;
+    case "approval.resolved":
+      return { ...base, type: "approval.resolved", approvalId: event.approvalId, outcome: event.outcome === "cancelled" ? "expired" : event.outcome } as unknown as AgentEvent;
+    default:
+      return undefined;
+  }
 }
 
 /**

@@ -46,6 +46,8 @@ describe("billing chaos", () => {
       type: "checkout.completed",
       subjectRef: session.providerRef,
       checkoutSessionId: session.id,
+      amountMinor: 4900,
+      currency: "USD",
     });
 
     // Concurrent redelivery — only ONE subscription may ever exist.
@@ -81,7 +83,7 @@ describe("billing chaos", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "c-1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "c-1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 9900, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
 
     const sub = (await fx.billing.getActiveSubscription("org-replay"))!;

@@ -5,3 +5,5 @@ export * from "./events.js";
 export * from "./tools.js";
 export * from "./reference-engine.js";
 export * from "./agent-runtime.js";
+export * from "./capability-matrix.js";
+export * from "./production-mode.js";

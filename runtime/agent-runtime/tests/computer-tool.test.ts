@@ -17,8 +17,8 @@ import {
 } from "../src/index.js";
 
 /**
- * End-to-end proof of Prompt 04 acceptance: "DSH uses Mox Computer Gateway
- * for computer/browser side effects." A reference-engine run issues a
+ * End-to-end proof that Mox Runtime uses Mox Computer Gateway for
+ * computer/browser side effects. A reference-engine run issues a
  * `computer` tool request; the request flows runtime gate → gateway
  * (entitlement → policy → approval → audit) → provider — and nothing else can
  * reach the provider.
@@ -98,7 +98,7 @@ function world(orgId: string, agentId: string): World {
   return w;
 }
 
-describe("computer tool over the reference engine (DSH → gateway → provider)", () => {
+describe("computer tool over the reference engine (Mox Runtime to gateway to provider)", () => {
   it("routes model-requested browser actions through the gateway to the provider", async () => {
     const w = world("org-1", "agent-1");
     const engine = new ReferenceAgentEngine(async () => ({

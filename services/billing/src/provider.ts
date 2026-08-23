@@ -122,28 +122,6 @@ export function supportsReconciliation(p: BillingProvider): p is ReconcilableBil
   return typeof (p as ReconcilableBillingProvider).verifyCheckout === "function";
 }
 
-export interface BillingProvider {
-  readonly name: string;
-  readonly capabilities: readonly BillingProviderCapability[];
-  /** True when real credentials are configured; false means unusable. */
-  readonly configured: boolean;
-  /** Human-readable configuration blocker when configured is false. */
-  readonly blocker?: string;
-  createCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult>;
-  charge(input: {
-    providerRef: string;
-    amountMinor: bigint | number;
-    currency: string;
-    idempotencyKey: string;
-  }): Promise<{ ok: boolean; providerInvoiceRef?: string; failureReason?: string }>;
-  cancelRemote(providerRef: string): Promise<void>;
-  /**
-   * Verify an inbound webhook and normalize it. Throws
-   * WebhookVerificationError for bad signatures/replays.
-   */
-  verifyWebhook(headers: Record<string, string>, rawBody: string): Promise<ProviderEvent>;
-}
-
 /** Shared HMAC-SHA256 webhook signing scheme used by Mox-compatible gateways. */
 export function signPayload(secret: string, rawBody: string, timestamp: string): string {
   return createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
@@ -222,7 +200,14 @@ export class FakeBillingProvider implements BillingProvider {
     if (!safeEqual(expected, signature)) {
       throw new WebhookVerificationError("signature mismatch");
     }
-    let parsed: { eventId?: string; type?: string; subjectRef?: string; sequence?: number };
+    let parsed: {
+      eventId?: string;
+      type?: string;
+      subjectRef?: string;
+      sequence?: number;
+      amountMinor?: number | string;
+      currency?: string;
+    };
     try {
       parsed = JSON.parse(rawBody) as typeof parsed;
     } catch {
@@ -238,6 +223,8 @@ export class FakeBillingProvider implements BillingProvider {
       type: parsed.type as ProviderEvent["type"],
       sequence: parsed.sequence ?? this.eventCounter,
       subjectRef: parsed.subjectRef,
+      amountMinor: parsed.amountMinor !== undefined ? BigInt(parsed.amountMinor) : undefined,
+      currency: parsed.currency,
       payload: parsed,
     };
   }

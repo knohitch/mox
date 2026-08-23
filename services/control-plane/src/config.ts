@@ -31,11 +31,23 @@ export interface ControlPlaneConfig {
   corsOrigins: string[];
   /**
    * Explicit platform-admin user ids (Prompt 01 §Provider config):
-   * payment-provider administration requires membership in this list.
-   * Org owner/admin alone is NOT platform authority. Empty list = no
-   * provider administration until an operator provisions ids explicitly.
+   * membership in this list grants all admin capabilities. Org owner/admin
+   * alone is NOT platform authority. Empty list = no provider administration
+   * until an operator provisions ids explicitly.
    */
   platformAdminUserIds: string[];
+  /**
+   * Optional per-admin capability allowlist. Keys are user ids; values are
+   * admin capability names or "*" for all. This is evaluated server-side.
+   */
+  platformAdminCapabilities: Record<string, string[]>;
+  /** Explicit Mox Runtime mode. Production accepts only "full". */
+  runtimeMode: "full" | "disabled" | "reference-dev";
+  /** Command used to launch the production Mox Runtime protocol process. */
+  runtimeCommand?: string;
+  runtimeArgs: string[];
+  runtimeCwd?: string;
+  runtimeRequestTimeoutMs: number;
 }
 
 function requireValue(env: Record<string, string | undefined>, key: string, purpose: string): string {
@@ -60,6 +72,25 @@ function validatePublicUrl(raw: string, env: string): string {
     throw new ConfigError(`MOX_PUBLIC_URL must use https in production (got ${parsed.protocol})`);
   }
   return parsed.toString().replace(/\/$/, "");
+}
+
+function parsePlatformAdminCapabilities(raw: string | undefined): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const entry of (raw ?? "").split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) throw new ConfigError(`invalid MOX_PLATFORM_ADMIN_CAPABILITIES entry: ${trimmed}`);
+    const userId = trimmed.slice(0, idx).trim();
+    const capabilities = trimmed
+      .slice(idx + 1)
+      .split(/[| ]+/)
+      .map((cap) => cap.trim())
+      .filter(Boolean);
+    if (capabilities.length === 0) throw new ConfigError(`no capabilities configured for platform admin ${userId}`);
+    out[userId] = capabilities;
+  }
+  return out;
 }
 
 /** Parses and validates environment config; throws ConfigError when absent/invalid. */
@@ -93,6 +124,27 @@ export function loadControlPlaneConfig(
     throw new ConfigError(`control plane configuration invalid:\n- ${errors.join("\n- ")}`);
   }
 
+  const runtimeMode = ((env["MOX_RUNTIME_MODE"] ?? (nodeEnv === "production" ? "full" : "disabled")).trim() || "disabled") as ControlPlaneConfig["runtimeMode"];
+  if (!["full", "disabled", "reference-dev"].includes(runtimeMode)) {
+    throw new ConfigError(`MOX_RUNTIME_MODE must be full, disabled, or reference-dev (got ${runtimeMode})`);
+  }
+  const runtimeCommand = env["MOX_RUNTIME_COMMAND"]?.trim() || undefined;
+  if (nodeEnv === "production" && runtimeMode !== "full") {
+    throw new ConfigError("production requires MOX_RUNTIME_MODE=full; reference-dev/disabled runtimes are not allowed");
+  }
+  if (nodeEnv === "production" && !runtimeCommand) {
+    throw new ConfigError("production requires MOX_RUNTIME_COMMAND for the full Mox Runtime");
+  }
+
+  const platformAdminUserIds = (env["MOX_PLATFORM_ADMIN_USER_IDS"] ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const platformAdminCapabilities = parsePlatformAdminCapabilities(env["MOX_PLATFORM_ADMIN_CAPABILITIES"]);
+  for (const id of platformAdminUserIds) {
+    platformAdminCapabilities[id] = ["*"];
+  }
+
   return {
     env: nodeEnv,
     port: Number(env["PORT"] ?? 8080),
@@ -107,10 +159,16 @@ export function loadControlPlaneConfig(
       .split(",")
       .map((o) => o.trim())
       .filter(Boolean),
-    platformAdminUserIds: (env["MOX_PLATFORM_ADMIN_USER_IDS"] ?? "")
-      .split(",")
-      .map((id) => id.trim())
+    platformAdminUserIds,
+    platformAdminCapabilities,
+    runtimeMode,
+    runtimeCommand,
+    runtimeArgs: (env["MOX_RUNTIME_ARGS"] ?? "")
+      .split(" ")
+      .map((arg) => arg.trim())
       .filter(Boolean),
+    runtimeCwd: env["MOX_RUNTIME_CWD"] || undefined,
+    runtimeRequestTimeoutMs: Number(env["MOX_RUNTIME_REQUEST_TIMEOUT_MS"] ?? 60_000),
     ...overrides,
   };
 }

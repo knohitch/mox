@@ -27,7 +27,7 @@ export interface DeployImageResolver {
   resolve(definition: AgentDefinition, target: DeploymentTarget): Promise<{ image: string; env: Record<string, string> }>;
 }
 
-/** Default resolver: DSH runtime image; external endpoints proxy instead. */
+/** Default resolver: Mox Runtime image; external endpoints proxy instead. */
 export class DefaultImageResolver implements DeployImageResolver {
   async resolve(
     definition: AgentDefinition,
@@ -37,7 +37,7 @@ export class DefaultImageResolver implements DeployImageResolver {
     const image =
       "runtimeImage" in definition.metadata && typeof definition.metadata.runtimeImage === "string"
         ? definition.metadata.runtimeImage
-        : "ghcr.io/mox/dsh-runtime:latest";
+        : "ghcr.io/mox/mox-runtime:latest";
     return {
       image,
       env: {
@@ -220,7 +220,7 @@ export class AgentControlService {
 
   /**
    * Reconcile desired deployments toward their targets via Mox Node signed
-   * commands. External AG-UI endpoints register as proxies without DSH
+   * commands. External AG-UI endpoints register as proxies without runtime
    * internals; custom Docker/Git images resolve through DeployImageResolver.
    */
   async reconcile(): Promise<{ reconciled: number; failed: number }> {

@@ -64,6 +64,8 @@ describe("billing", () => {
       type: "checkout.completed",
       subjectRef: session.providerRef,
       checkoutSessionId: session.id,
+      amountMinor: 9900,
+      currency: "USD",
     });
     const first = await fx.billing.handleProviderWebhook(fx.providerName, headers, raw);
     expect(first.applied).toBe(true);
@@ -95,6 +97,29 @@ describe("billing", () => {
     expect(await fx.billing.getActiveSubscription("org-1")).toBeUndefined();
   });
 
+  it("rejects verified checkout completions that omit amount or currency", async () => {
+    const fx = await fixture();
+    const { session } = await fx.billing.createCheckout({
+      orgId: "org-missing-money",
+      productId: fx.productIds.plus!,
+      planVersionId: fx.planVersionIds.plus!,
+      pricingRegionCode: "GLOBAL",
+      successUrl: "s",
+      cancelUrl: "c",
+      providerName: fx.providerName,
+    });
+    const missing = signedBody(fx.secret, {
+      eventId: "evt_missing_money",
+      type: "checkout.completed",
+      subjectRef: session.providerRef,
+      checkoutSessionId: session.id,
+    });
+    const result = await fx.billing.handleProviderWebhook(fx.providerName, missing.headers, missing.raw);
+    expect(result.rejected).toBe(true);
+    expect(result.reason).toMatch(/missing amount or currency/);
+    expect(await fx.billing.getActiveSubscription("org-missing-money")).toBeUndefined();
+  });
+
   it("converges under out-of-order webhook delivery", async () => {
     const fx = await fixture();
     const { session } = await fx.billing.createCheckout({
@@ -123,6 +148,8 @@ describe("billing", () => {
       subjectRef: session.providerRef,
       checkoutSessionId: session.id,
       sequence: 1,
+      amountMinor: 4900,
+      currency: "USD",
     });
     await fx.billing.handleProviderWebhook(fx.providerName, completeBody.headers, completeBody.raw);
     expect((await fx.billing.getActiveSubscription("org-2"))?.state).toBe("active");
@@ -146,7 +173,7 @@ describe("billing", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "e1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "e1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 2000, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
 
     const fake = fx.billing.provider(fx.providerName) as FakeBillingProvider;
@@ -187,7 +214,7 @@ describe("billing", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "c1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "c1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 9900, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
     const subBefore = (await fx.billing.getActiveSubscription("org-4"))!;
     const result = await fx.billing.runRenewals(new Date(new Date(subBefore.currentPeriodEnd!).getTime() + DAY).toISOString());    expect(result.renewed).toBe(1);
@@ -208,7 +235,7 @@ describe("billing", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "cc1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "cc1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 2000, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
     const sub = (await fx.billing.getActiveSubscription("org-5"))!;
 
@@ -275,7 +302,7 @@ describe("billing", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "en1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "en1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 29900, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
     const sub = (await fx.billing.getActiveSubscription("org-6"))!;
 
@@ -299,7 +326,7 @@ describe("billing", () => {
       cancelUrl: "c",
       providerName: fx.providerName,
     });
-    const complete = signedBody(fx.secret, { eventId: "ad1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const complete = signedBody(fx.secret, { eventId: "ad1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 4900, currency: "USD" });
     await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
     const sub = (await fx.billing.getActiveSubscription("org-7"))!;
     await fx.billing.attachAddon(sub.id, "extra_vps", 2);

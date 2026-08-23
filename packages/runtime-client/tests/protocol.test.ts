@@ -45,6 +45,7 @@ describe("runtime wire protocol", () => {
       agentId: "agent-1",
       threadId: "thread-1",
       definition: definition(),
+      userInput: "hello",
       runtimeConfig: { model: { provider: "stub" } },
     });
     expect(parsed.definition.agentId).toBe("agent-1");
@@ -60,6 +61,7 @@ describe("runtime wire protocol", () => {
         agentId: "agent-1",
         threadId: "thread-1",
         definition: bad,
+        userInput: "hello",
         runtimeConfig: {},
       }),
     ).toThrow();
@@ -72,6 +74,7 @@ describe("runtime wire protocol", () => {
       agentId: "agent-1",
       threadId: "thread-1",
       definition: definition(),
+      userInput: "resume",
       runtimeConfig: {},
     };
     expect(RunResumeRequest.safeParse(base).success).toBe(false);

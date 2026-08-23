@@ -26,6 +26,15 @@ import type { NotificationItem } from "./notification-types.js";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
 import type {
   AgentSummary,
+  AdminCompute,
+  AdminCustomer,
+  AdminIntelligence,
+  AdminNotificationJobs,
+  AdminOperations,
+  AdminOverview,
+  AdminPaymentProvider,
+  AdminPlans,
+  AdminRuntimeAgent,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
@@ -397,7 +406,7 @@ export class HttpMoxApi implements MoxApi {
   }
 
   async listCliEngines(): Promise<CliEngineRow[]> {
-    return [];
+    return this.call("/api/cli-engines");
   }
 
   // ---- Integrations/Apps + Channels --------------------------------------------------
@@ -442,6 +451,133 @@ export class HttpMoxApi implements MoxApi {
     };
   }
 
+  // ---- Protected Mox Admin ----------------------------------------------------------
+
+  adminOverview(): Promise<AdminOverview> {
+    return this.call("/api/admin/overview");
+  }
+
+  adminCustomers(): Promise<AdminCustomer[]> {
+    return this.call("/api/admin/customers");
+  }
+
+  adminCustomerAction(orgId: string, action: "suspend" | "reactivate", reason?: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/customers/${encodeURIComponent(orgId)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }).then(() => undefined);
+  }
+
+  adminAddSupportNote(orgId: string, note: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/customers/${encodeURIComponent(orgId)}/support-notes`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
+    }).then(() => undefined);
+  }
+
+  adminPlans(): Promise<AdminPlans> {
+    return this.call("/api/admin/plans");
+  }
+
+  adminUpsertCurrency(input: { code: string; displayName: string; exponent: number }): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/plans/currencies/${encodeURIComponent(input.code)}`, {
+      method: "PUT",
+      body: JSON.stringify({ displayName: input.displayName, exponent: input.exponent }),
+    }).then(() => undefined);
+  }
+
+  adminUpsertPriceBook(input: Record<string, unknown>): Promise<void> {
+    return this.call<{ ok: boolean }>("/api/admin/plans/price-books", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }).then(() => undefined);
+  }
+
+  adminPaymentProviders(): Promise<AdminPaymentProvider[]> {
+    return this.call("/api/admin/billing-providers");
+  }
+
+  adminSavePaymentProvider(providerName: string, input: Record<string, unknown>): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/billing-providers/${encodeURIComponent(providerName)}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }).then(() => undefined);
+  }
+
+  adminCompute(): Promise<AdminCompute> {
+    return this.call("/api/admin/compute");
+  }
+
+  adminSaveComputeAccount(providerName: string, accountLabel: string, input: Record<string, unknown>): Promise<void> {
+    return this.call<{ ok: boolean }>(
+      `/api/admin/compute/accounts/${encodeURIComponent(providerName)}/${encodeURIComponent(accountLabel)}`,
+      { method: "PUT", body: JSON.stringify(input) },
+    ).then(() => undefined);
+  }
+
+  adminSaveComputeClass(code: string, input: Record<string, unknown>): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/compute/classes/${encodeURIComponent(code)}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }).then(() => undefined);
+  }
+
+  adminComputeOrderAction(orderId: string, action: "restart" | "redeploy" | "resize" | "cancel"): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/compute/orders/${encodeURIComponent(orderId)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
+  adminIntelligence(): Promise<AdminIntelligence> {
+    return this.call("/api/admin/intelligence");
+  }
+
+  adminSaveIntelligenceProvider(slug: string, input: Record<string, unknown>): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/intelligence/providers/${encodeURIComponent(slug)}`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }).then(() => undefined);
+  }
+
+  adminRuntime(): Promise<AdminRuntimeAgent[]> {
+    return this.call("/api/admin/runtime");
+  }
+
+  adminRuntimeAction(agentId: string, action: "restart" | "redeploy"): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/runtime/agents/${encodeURIComponent(agentId)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
+  adminOperations(): Promise<AdminOperations> {
+    return this.call("/api/admin/operations");
+  }
+
+  adminNotificationJobs(): Promise<AdminNotificationJobs> {
+    return this.call("/api/admin/notifications/jobs");
+  }
+
+  adminPreviewNotification(input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.call("/api/admin/notifications/preview", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  adminSendNotification(input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.call("/api/admin/notifications/send", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  adminScheduleNotification(input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.call("/api/admin/notifications/schedule", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  adminCancelNotificationJob(jobId: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/notifications/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
   // ---- Computer + files/logs -----------------------------------------------------------
 
   async computerSnapshot(_agentId: string): Promise<ComputerSnapshot | undefined> {
@@ -466,6 +602,13 @@ export class HttpMoxApi implements MoxApi {
 
   async filePreview(_agentId: string, _path: string): Promise<string> {
     throw new ApiUnavailableError("workspace file access is not configured on this deployment");
+  }
+
+  async runTerminalCommand(agentId: string, command: string): Promise<{ output: string }> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/terminal`, {
+      method: "POST",
+      body: JSON.stringify({ command }),
+    });
   }
 
   async getLogs(_agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>> {

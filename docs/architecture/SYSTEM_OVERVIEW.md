@@ -1,8 +1,8 @@
 # Mox System Overview
 
 Mox is a hosted AI-agent cloud + VPS reseller/control plane + multi-model
-agent runtime, consolidated from three donor projects into one coherent
-system (see `docs/consolidation/`).
+agent runtime, implemented as one coherent system with dedicated
+legal/provenance records under `third_party/`.
 
 ## Architecture at a glance
 
@@ -10,7 +10,7 @@ system (see `docs/consolidation/`).
 |---|---|
 | Apps | `apps/web` (React+Vite), `apps/cli` (mox CLI) |
 | Services | control-plane concerns split by ownership: `billing`, `compute-orchestrator`, `agent-control`, `channel-gateway`, `integration-gateway`, `notification-service`, `usage-meter`, `cost-engine`, `platform-ops`, `admin`, `audit-service` |
-| Runtime | `runtime/agent-runtime` (single DSH kernel), `runtime/computer-runtime`, `runtime/mox-node` (customer VPS agent) |
+| Runtime | `runtime/agent-runtime` (Mox Runtime), `runtime/computer-runtime`, `runtime/mox-node` (customer VPS agent) |
 | Packages | contracts, database, money, entitlements, feature-flags, provider-health, compute-providers, backups, voice-device, credentials, policy, security, observability, events, realtime, adapters |
 
 ## Core rules (binding)

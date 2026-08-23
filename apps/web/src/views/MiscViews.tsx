@@ -11,7 +11,7 @@ export function HomeView() {
   return (
     <div>
       <h1>Home</h1>
-      <div className="demo-banner">Demo workspace — data is local to this browser session until the control plane is connected.</div>
+      <div className="demo-banner">Connected to the Mox control plane. This workspace uses authoritative service data.</div>
       <div className="grid grid-3">
         <Card title="Agents">
           <h1 style={{ margin: 0 }}>{mox.agents.length}</h1>
@@ -176,7 +176,13 @@ export function ModelsView() {
   const [status, setStatus] = useState<string | null>(null);
   useEffect(() => {
     void mox.api.listModels().then(setModels);
-    void mox.api.listCliEngines().then(setCliEngines);
+    void mox.api
+      .listCliEngines()
+      .then(setCliEngines)
+      .catch((error) => {
+        setCliEngines([]);
+        setStatus(error instanceof Error ? error.message : String(error));
+      });
   }, [mox.api]);
 
   return (
@@ -285,9 +291,9 @@ export function BillingView() {
     <div>
       <h1>Billing</h1>
       <Card title="Plan">
-        <Badge tone="accent">Demo workspace</Badge>
+        <Badge tone="accent">Mox billing</Badge>
         <p className="muted" style={{ marginTop: 8 }}>
-          Plans, regional pricing and add-ons are owned by the Mox billing service (build-pack prompt 08).
+          Plans, regional pricing and add-ons are owned by the Mox billing service.
         </p>
       </Card>
       <TableView
@@ -310,8 +316,8 @@ export function SettingsView() {
     <div>
       <h1>Settings</h1>
       <Card title="Workspace">
-        <p><strong>Organization:</strong> Demo org (<span className="mono">org_demo</span>)</p>
-        <p><strong>Data residency:</strong> eu-central (demo)</p>
+        <p><strong>Organization:</strong> Current Mox workspace</p>
+        <p><strong>Data residency:</strong> Controlled by the Mox control plane</p>
       </Card>
       <Card title="Capabilities">
         <ul>

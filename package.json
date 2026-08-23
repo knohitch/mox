@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
+  "packageManager": "pnpm@10.15.1",
   "engines": {
     "node": ">=24"
   },
@@ -10,8 +11,13 @@
     "build": "pnpm -r --filter @mox/* run build",
     "typecheck": "pnpm -r --filter @mox/* run typecheck",
     "lint": "oxlint packages apps services runtime infra",
+    "public-branding-scan": "node scripts/public-branding-scan.mjs",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "container-builds": "node scripts/container-builds.mjs",
+    "dependency-security": "pnpm audit --audit-level high",
     "test": "vitest run",
     "scan:authority": "node scripts/authority-scan.mjs",
+    "quality": "pnpm public-branding-scan && pnpm secret-scan && pnpm dependency-security && pnpm scan:authority && pnpm typecheck && pnpm test",
     "baseline:checks": "scripts\\baseline-checks.cmd"
   },
   "devDependencies": {

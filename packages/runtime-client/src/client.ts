@@ -60,7 +60,7 @@ export interface RuntimeClientOptions {
 
 /**
  * Typed client for the Mox runtime wire protocol. The Control Plane depends
- * on this class only — never on DSH or any other runtime's internals.
+ * on this class only — never on runtime internals.
  */
 export class RuntimeClient {
   private nextId = 1;

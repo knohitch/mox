@@ -178,6 +178,34 @@ export class DemoMoxApi implements MoxApi {
     );
   }
 
+  private adminUnavailable(): never {
+    throw new Error("Mox Admin requires the authenticated control-plane API; no local admin simulation is available.");
+  }
+
+  async adminOverview() { return this.adminUnavailable(); }
+  async adminCustomers() { return this.adminUnavailable(); }
+  async adminCustomerAction() { return this.adminUnavailable(); }
+  async adminAddSupportNote() { return this.adminUnavailable(); }
+  async adminPlans() { return this.adminUnavailable(); }
+  async adminUpsertCurrency() { return this.adminUnavailable(); }
+  async adminUpsertPriceBook() { return this.adminUnavailable(); }
+  async adminPaymentProviders() { return this.adminUnavailable(); }
+  async adminSavePaymentProvider() { return this.adminUnavailable(); }
+  async adminCompute() { return this.adminUnavailable(); }
+  async adminSaveComputeAccount() { return this.adminUnavailable(); }
+  async adminSaveComputeClass() { return this.adminUnavailable(); }
+  async adminComputeOrderAction() { return this.adminUnavailable(); }
+  async adminIntelligence() { return this.adminUnavailable(); }
+  async adminSaveIntelligenceProvider() { return this.adminUnavailable(); }
+  async adminRuntime() { return this.adminUnavailable(); }
+  async adminRuntimeAction() { return this.adminUnavailable(); }
+  async adminOperations() { return this.adminUnavailable(); }
+  async adminNotificationJobs() { return this.adminUnavailable(); }
+  async adminPreviewNotification() { return this.adminUnavailable(); }
+  async adminSendNotification() { return this.adminUnavailable(); }
+  async adminScheduleNotification() { return this.adminUnavailable(); }
+  async adminCancelNotificationJob() { return this.adminUnavailable(); }
+
   // ---- Roster ----
 
   async listAgents(): Promise<AgentSummary[]> {
@@ -443,6 +471,10 @@ export class DemoMoxApi implements MoxApi {
     if (path.endsWith(".md")) return "# Draft\n\nCompiled from today's research turns.";
     if (path.endsWith(".json")) return '[\n  { "url": "https://example.com/quarterly-report", "checked": true }\n]';
     return "";
+  }
+
+  async runTerminalCommand(_agentId: string, command: string): Promise<{ output: string }> {
+    return { output: `Mox Runtime terminal command accepted in demo mode: ${command}` };
   }
 
   async getLogs(agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>> {

@@ -13,12 +13,12 @@ apps/       web (React+Vite), cli (mox CLI)
 services/   billing · compute-orchestrator · agent-control · channel-gateway
             integration-gateway · notification-service · usage-meter
             cost-engine · platform-ops · admin · audit-service
-runtime/    agent-runtime (single DSH kernel) · computer-runtime · mox-node
+runtime/    agent-runtime (Mox Runtime) · computer-runtime · mox-node
 packages/   contracts · database · money · entitlements · feature-flags
             provider-health · compute-providers · backups · voice-device
             credentials · policy · security · observability · events …
 docs/       architecture · operations · security · verification · consolidation
-third_party/ licenses · notices · provenance (vendored donor attribution)
+third_party/ licenses · notices · provenance (private legal attribution)
 md/         the original build-pack prompts (00–15)
 ```
 
@@ -30,7 +30,8 @@ pnpm test        # full unit/integration suite (368+ tests)
 pnpm typecheck
 pnpm lint
 pnpm build
-node scripts/authority-scan.mjs   # vendored-tree import guard
+pnpm public-branding-scan          # public product-name guard
+node scripts/authority-scan.mjs    # vendored-tree import guard
 ```
 
 Database migrations live in `packages/database/migrations`
@@ -46,7 +47,7 @@ Database migrations live in `packages/database/migrations`
 | Operations | [docs/operations/RUNBOOK.md](docs/operations/RUNBOOK.md) · [DISASTER_RECOVERY.md](docs/operations/DISASTER_RECOVERY.md) |
 | Provider onboarding | [docs/operations/PROVIDER_ONBOARDING.md](docs/operations/PROVIDER_ONBOARDING.md) |
 | Releases | [docs/operations/RELEASE_CHECKLIST.md](docs/operations/RELEASE_CHECKLIST.md) |
-| Donor attribution | [third_party/provenance/PROVENANCE_ADAPTATIONS.md](third_party/provenance/PROVENANCE_ADAPTATIONS.md) |
+| Legal attribution | [third_party/provenance/PROVENANCE_ADAPTATIONS.md](third_party/provenance/PROVENANCE_ADAPTATIONS.md) |
 
 ## Design rules (binding)
 
@@ -60,7 +61,6 @@ Database migrations live in `packages/database/migrations`
 
 ## Provenance
 
-Mox was consolidated from three donor projects (OpenBot, OpenMausBot,
-DeepSeek Harness). Their licenses and adapted-component records are
-preserved under `third_party/`. The vendored trees are reference-only
-snapshots excluded from version control, builds, tests and deployments.
+Mox preserves required third-party license, notice and adapted-component
+records under `third_party/`. Those records are legal/provenance material
+only; customer-facing surfaces use the Mox product and runtime identity.

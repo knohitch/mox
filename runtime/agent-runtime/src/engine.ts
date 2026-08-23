@@ -1,11 +1,10 @@
 import type { AgentDefinition } from "@mox/contracts";
 
 /**
- * Execution engine seam: the single place where a DSH-derived kernel plugs
- * into the Mox runtime host. Prompt 03's in-repo implementation is the
- * reference loop (model stub + tool registry + approval questions); the DSH
- * out-of-process kernel implements the same interface from its SDK process,
- * keeping failure boundaries clean.
+ * Execution engine seam: the single place where the Mox Runtime engine plugs
+ * into the runtime host. The in-repo implementation is the reference loop
+ * (model stub + tool registry + approval questions); the production runtime
+ * process implements the same interface, keeping failure boundaries clean.
  *
  * The engine receives only Mox contracts and resolved config — it never
  * imports Control Plane modules, and its local storage is non-authoritative.

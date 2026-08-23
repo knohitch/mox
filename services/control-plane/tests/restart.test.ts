@@ -89,6 +89,8 @@ function defineRestartSuite(harness: Harness): void {
       eventId: "evt_restart_1",
       type: "checkout.completed",
       subjectRef: session.providerRef!,
+      amountMinor: 1999,
+      currency: "USD",
     });
     const stamp = new Date().toISOString();
     const headers = { "x-mox-timestamp": stamp, "x-mox-signature": signPayload("test-webhook-secret", body, stamp) };
@@ -128,7 +130,7 @@ function defineRestartSuite(harness: Harness): void {
       cancelUrl: "https://app.example/cancel",
       providerName: provider.name,
     });
-    const body = JSON.stringify({ eventId: "evt_dedupe_1", type: "checkout.completed", subjectRef: session.providerRef! });
+    const body = JSON.stringify({ eventId: "evt_dedupe_1", type: "checkout.completed", subjectRef: session.providerRef!, amountMinor: 2999, currency: "USD" });
     const stamp = new Date().toISOString();
     const headers = { "x-mox-timestamp": stamp, "x-mox-signature": signPayload("test-webhook-secret", body, stamp) };
     expect((await boot.handleProviderWebhook(provider.name, headers, body)).applied).toBe(true);
@@ -166,7 +168,7 @@ function defineRestartSuite(harness: Harness): void {
 
     const firstCheckout = await checkout();
     const complete = async (ref: string, eventId: string) => {
-      const body = JSON.stringify({ eventId, type: "checkout.completed", subjectRef: ref });
+      const body = JSON.stringify({ eventId, type: "checkout.completed", subjectRef: ref, amountMinor: 4999, currency: "USD" });
       const stamp = new Date().toISOString();
       return svc.handleProviderWebhook(provider.name, { "x-mox-timestamp": stamp, "x-mox-signature": signPayload("test-webhook-secret", body, stamp) }, body);
     };

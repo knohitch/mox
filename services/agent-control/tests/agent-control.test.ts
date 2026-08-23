@@ -86,10 +86,10 @@ describe("agent builder", () => {
     const devDef = compileDeveloperMode({
       ...JSON.parse(JSON.stringify(simpleDef)),
       authoring: { mode: "developer", ui: { showAdvanced: true } },
-      metadata: { runtimeImage: "ghcr.io/mox/dsh-runtime:2.0.0" },
+      metadata: { runtimeImage: "ghcr.io/mox/mox-runtime:2.0.0" },
     });
     expect(devDef.authoring.mode).toBe("developer");
-    expect(devDef.metadata.runtimeImage).toBe("ghcr.io/mox/dsh-runtime:2.0.0");
+    expect(devDef.metadata.runtimeImage).toBe("ghcr.io/mox/mox-runtime:2.0.0");
     // Both validate identically — one engine.
     expect(devDef.agentId).toBe(simpleDef.agentId);
   });

@@ -7,6 +7,7 @@
  */
 
 import { ToolDefinition, type JsonValue } from "@mox/contracts";
+import { assertSafeOutboundUrl } from "@mox/security";
 
 export type IntegrationProviderKind = "mcp" | "composio" | "oauth-api" | "make" | "n8n" | "webhook-token";
 
@@ -145,11 +146,18 @@ export class ComposioProvider implements IntegrationProvider {
 export class WebhookAutomationProvider implements IntegrationProvider {
   readonly kind: IntegrationProviderKind;
   readonly displayName: string;
+  private readonly fetchImpl: typeof fetch;
+  private readonly resolveSecret?: (secretRef: string) => Promise<string | undefined>;
 
-  constructor(kind: "make" | "n8n" | "webhook-token") {
+  constructor(
+    kind: "make" | "n8n" | "webhook-token",
+    options: { fetchImpl?: typeof fetch; resolveSecret?: (secretRef: string) => Promise<string | undefined> } = {},
+  ) {
     this.kind = kind;
     this.displayName =
       kind === "make" ? "Make.com" : kind === "n8n" ? "n8n" : "Generic Webhook/API Token";
+    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
+    this.resolveSecret = options.resolveSecret;
   }
 
   async listTools(connection: IntegrationConnection): Promise<ToolDefinition[]> {
@@ -177,12 +185,20 @@ export class WebhookAutomationProvider implements IntegrationProvider {
     input: Record<string, unknown>,
   ): Promise<{ ok: boolean; output: JsonValue; error?: string }> {
     if (!connection.webhookUrl) return { ok: false, output: null, error: "webhook_not_configured" };
+    const urlCheck = assertSafeOutboundUrl(connection.webhookUrl);
+    if (!urlCheck.ok) return { ok: false, output: null, error: `webhook_url_denied:${urlCheck.reason}` };
+    let bearer: string | undefined;
+    if (connection.secretRef) {
+      if (!this.resolveSecret) return { ok: false, output: null, error: "secret_resolution_not_configured" };
+      bearer = await this.resolveSecret(connection.secretRef);
+      if (!bearer) return { ok: false, output: null, error: "secret_not_found" };
+    }
     try {
-      const res = await fetch(connection.webhookUrl, {
+      const res = await this.fetchImpl(connection.webhookUrl, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(connection.secretRef ? { authorization: `Bearer ${connection.secretRef}` } : {}),
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
         },
         body: JSON.stringify(input.payload ?? {}),
       });

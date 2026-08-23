@@ -349,15 +349,38 @@ describe("compute orchestrator", () => {
     expect(failedOrder.state).toBe("error");
     expect(failedOrder.lastError).toContain("not commercially approved");
 
-    // Once approved on an account + provider gate, selection succeeds.
+    // Provider approval alone is insufficient: an enabled matching account
+    // must exist before production traffic is routed.
+    (hetzner as unknown as { commercialStatus: string }).commercialStatus = "approved";
+    const noAccount = await orch.orderServer({ orgId: "org-9", computeClassCode: "COMPUTE_LARGE", hostname: "h-no-account", idempotencyKey: "k9-no-account" });
+    await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
+    const noAccountOrder = await orch.getOrder(noAccount.order.id);
+    expect(noAccountOrder.state).toBe("error");
+    expect(noAccountOrder.lastError).toContain("no eligible compute candidate");
+
+    await orch.registerProviderAccount({
+      providerName: "hetzner",
+      accountLabel: "wrong-region",
+      commercialStatus: "approved",
+      regionCode: "nbg1",
+      healthScore: 100,
+      enabled: true,
+    });
+    const wrongRegion = await orch.orderServer({ orgId: "org-9", computeClassCode: "COMPUTE_LARGE", hostname: "h-wrong-region", idempotencyKey: "k9-wrong-region" });
+    await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
+    const wrongRegionOrder = await orch.getOrder(wrongRegion.order.id);
+    expect(wrongRegionOrder.state).toBe("error");
+    expect(wrongRegionOrder.lastError).toContain("no eligible compute candidate");
+
+    // Once approved on a matching account + provider gate, selection succeeds.
     await orch.registerProviderAccount({
       providerName: "hetzner",
       accountLabel: "eu-central",
       commercialStatus: "approved",
+      regionCode: "fsn1",
       healthScore: 100,
       enabled: true,
     });
-    (hetzner as unknown as { commercialStatus: string }).commercialStatus = "approved";
     const second = await orch.orderServer({ orgId: "org-9", computeClassCode: "COMPUTE_LARGE", hostname: "h2", idempotencyKey: "k9b" });
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     expect((await orch.getOrder(second.order.id)).state).toBe("running");

@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition, AgentEvent } from "@mox/contracts";
 import { AgentRuntime } from "../src/agent-runtime.js";
+import { assertRuntimeCapabilityMatrixClosed, REQUIRED_RUNTIME_CAPABILITIES } from "../src/capability-matrix.js";
 import { InMemorySessionEventStore } from "../src/persistence.js";
 import { PermissionsPolicyEngine } from "../src/policy.js";
+import {
+  MoxRuntimeUnavailableError,
+  assertMoxRuntimeMode,
+  rejectReferenceRuntimeCapabilities,
+} from "../src/production-mode.js";
 import { ReferenceAgentEngine, type ModelStub } from "../src/reference-engine.js";
 import { ToolRegistry } from "../src/tools.js";
 import type { ToolDefinition } from "@mox/contracts";
@@ -99,6 +105,7 @@ describe("AgentRuntime launch (AgentDefinition → runtime)", () => {
     expect(sent.method).toBe("run.start");
     expect((sent.params as { orgId: string }).orgId).toBe("org-1");
     expect((sent.params as { definition: AgentDefinition }).definition.agentId).toBe("agent-1");
+    expect((sent.params as { userInput: string }).userInput).toBe("hello");
   });
 
   it("rejects invalid definitions before they reach the runtime", async () => {
@@ -135,6 +142,34 @@ describe("AgentRuntime launch (AgentDefinition → runtime)", () => {
     const cfg = (client.sent[0]!.params as { runtimeConfig: Record<string, unknown> }).runtimeConfig;
     expect(cfg.region).toBe("us");
     expect(Array.isArray(cfg.grants)).toBe(true);
+  });
+});
+
+describe("production Mox Runtime mode", () => {
+  it("closes the runtime capability matrix with no missing documented core gaps", () => {
+    expect(() => assertRuntimeCapabilityMatrixClosed()).not.toThrow();
+    expect(REQUIRED_RUNTIME_CAPABILITIES).toContain("model loop");
+    expect(REQUIRED_RUNTIME_CAPABILITIES).toContain("approvals");
+  });
+
+  it("production cannot silently use the reference engine or disabled runtime", () => {
+    expect(() => assertMoxRuntimeMode({ nodeEnv: "production", mode: "disabled" })).toThrow(MoxRuntimeUnavailableError);
+    expect(() => assertMoxRuntimeMode({ nodeEnv: "production", mode: "reference-dev", runtimeCommand: "node" })).toThrow(
+      MoxRuntimeUnavailableError,
+    );
+    expect(() => assertMoxRuntimeMode({ nodeEnv: "production", mode: "full" })).toThrow(MoxRuntimeUnavailableError);
+    expect(() => assertMoxRuntimeMode({ nodeEnv: "production", mode: "full", runtimeCommand: "mox-runtime" })).not.toThrow();
+  });
+
+  it("production rejects reference-like runtime capabilities after connection", () => {
+    expect(() =>
+      rejectReferenceRuntimeCapabilities({
+        runtime: "mox-reference",
+        protocolVersion: 1,
+        capabilities: [...REQUIRED_RUNTIME_CAPABILITIES],
+        tools: [],
+      }),
+    ).toThrow(MoxRuntimeUnavailableError);
   });
 });
 

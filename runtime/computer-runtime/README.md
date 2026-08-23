@@ -17,6 +17,6 @@ browser/desktop/shell surface.
   per-agent/session isolation, health/restart budget, resource limits,
   per-session workspaces), ready to embed into Mox Node.
 
-Donors: OpenBot `server/src/computer/*` (gateway/policy/audit flow) and
-`supervisor/` (lifecycle concepts); OpenMaus computer modules are optional
-provider patterns only, never authority.
+Required attribution for adapted gateway, supervisor and provider patterns is
+preserved under `third_party/` and internal provenance records. This runtime's
+public identity is Mox Computer.

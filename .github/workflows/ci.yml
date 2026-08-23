@@ -1,0 +1,58 @@
+name: Mox CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  release-gate:
+    name: Release gate
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Branding scan
+        run: pnpm public-branding-scan
+
+      - name: Secret scan
+        run: pnpm secret-scan
+
+      - name: Dependency security check
+        run: pnpm dependency-security
+
+      - name: Runtime authority scan
+        run: pnpm scan:authority
+
+      - name: Build all packages
+        run: pnpm -r run build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit and integration tests
+        run: pnpm test
+
+      - name: PostgreSQL migrations and upgrade drill
+        run: powershell -ExecutionPolicy Bypass -File scripts\run-postgres-verification.ps1
+
+      - name: Container builds
+        run: pnpm container-builds

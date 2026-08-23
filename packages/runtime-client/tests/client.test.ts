@@ -52,6 +52,7 @@ describe("RuntimeClient over a loopback transport", () => {
       agentId: "a1",
       threadId: "t1",
       definition: validDefinition() as unknown as Parameters<typeof client.startRun>[0]["definition"],
+      userInput: "hello",
       runtimeConfig: {},
     });
     const request = t.sent[0] as { id: number };

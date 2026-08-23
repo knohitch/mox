@@ -163,7 +163,7 @@ describe("secret hygiene", () => {
       cancelUrl: "c",
       providerName: "gw",
     });
-    const raw = JSON.stringify({ eventId: "rp-1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id });
+    const raw = JSON.stringify({ eventId: "rp-1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 2000, currency: "USD" });
     const ts = new Date().toISOString();
     const headers = { "x-mox-timestamp": ts, "x-mox-signature": signPayload("sec", raw, ts) };
 

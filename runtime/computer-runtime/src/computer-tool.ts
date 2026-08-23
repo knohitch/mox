@@ -4,9 +4,9 @@ import { ComputerGateway } from "./gateway.js";
 import type { ComputerActionOutcome } from "./provider.js";
 
 /**
- * The `computer` tool: the ONLY tool through which DSH/runtime agent code
- * reaches browser/computer side effects (Prompt 04 acceptance: "DSH uses Mox
- * Computer Gateway for computer/browser side effects").
+ * The `computer` tool: the ONLY tool through which Mox Runtime agent code
+ * reaches browser/computer side effects. Mox Runtime uses Mox Computer
+ * Gateway for computer/browser side effects.
  *
  * The tool is a thin delegation — it validates the action against the
  * canonical contract and forwards it to the gateway, where entitlement,

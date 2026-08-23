@@ -359,8 +359,18 @@ function TerminalTab({ agentId }: { agentId: string }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!cmd.trim()) return;
-          setLines((prev) => [...prev, `$ ${cmd}`, "(demo runtime: shell executes inside the container in hosted mode)"]);
+          const next = cmd.trim();
+          setLines((prev) => [...prev, `$ ${next}`]);
           setCmd("");
+          void mox.api
+            .runTerminalCommand(agentId, next)
+            .then((result) => setLines((prev) => [...prev, result.output || "(no output)"]))
+            .catch((error) =>
+              setLines((prev) => [
+                ...prev,
+                error instanceof Error ? error.message : String(error),
+              ]),
+            );
         }}
       >
         <input

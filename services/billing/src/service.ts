@@ -654,15 +654,16 @@ export class BillingService {
       const priceVersion = await this.requirePriceVersion(session.priceVersionId);
       // Wrong amount/currency guard (Prompt 01): the provider-reported money
       // must match the server-pinned price exactly, or the event is rejected.
-      if (event?.amountMinor !== undefined) {
-        const expected = BigInt(priceVersion.amountMinor);
-        if (BigInt(event.amountMinor) !== expected) {
-          throw new BillingError(
-            `provider amount mismatch: got ${event.amountMinor} ${event.currency ?? ""}, expected ${expected}`,
-          );
-        }
+      if (event?.amountMinor === undefined || !event.currency) {
+        throw new BillingError("provider checkout completion missing amount or currency");
       }
-      if (event?.currency && event.currency !== priceVersion.currency) {
+      const expected = BigInt(priceVersion.amountMinor);
+      if (BigInt(event.amountMinor) !== expected) {
+        throw new BillingError(
+          `provider amount mismatch: got ${event.amountMinor} ${event.currency ?? ""}, expected ${expected}`,
+        );
+      }
+      if (event.currency !== priceVersion.currency) {
         throw new BillingError(`provider currency mismatch: ${event.currency} != ${priceVersion.currency}`);
       }
       session.state = "completed";

@@ -202,4 +202,85 @@ describe("integration gateway", () => {
     });
     expect((await gw.listToolsForConnection("with-token")).map((t) => t.name)).toEqual(["api_create_issue"]);
   });
+
+  it("webhook automation blocks SSRF targets before any outbound fetch", async () => {
+    let called = false;
+    const provider = new WebhookAutomationProvider("webhook-token", {
+      fetchImpl: async () => {
+        called = true;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const result = await provider.invoke(
+      {
+        connectionId: "conn-ssrf",
+        orgId: "org-1",
+        providerKind: "webhook-token",
+        displayName: "Internal",
+        webhookUrl: "https://169.254.169.254/latest/meta-data/",
+        config: {},
+        status: "connected",
+      },
+      "webhook-token_trigger_Internal",
+      { payload: { ok: true } },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("webhook_url_denied");
+    expect(called).toBe(false);
+  });
+
+  it("webhook automation resolves vault refs and never sends the ref as a bearer token", async () => {
+    let authHeader = "";
+    const provider = new WebhookAutomationProvider("webhook-token", {
+      resolveSecret: async (ref) => (ref === "vault://integration/token" ? "real-secret-token" : undefined),
+      fetchImpl: async (_url, init) => {
+        authHeader = String((init?.headers as Record<string, string> | undefined)?.authorization ?? "");
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const result = await provider.invoke(
+      {
+        connectionId: "conn-webhook",
+        orgId: "org-1",
+        providerKind: "webhook-token",
+        displayName: "Webhook",
+        secretRef: "vault://integration/token",
+        webhookUrl: "https://example.com/webhook",
+        config: {},
+        status: "connected",
+      },
+      "webhook-token_trigger_Webhook",
+      { payload: { ok: true } },
+    );
+    expect(result.ok).toBe(true);
+    expect(authHeader).toBe("Bearer real-secret-token");
+    expect(authHeader).not.toContain("vault://");
+  });
+
+  it("webhook automation fails closed when a secret ref cannot be resolved", async () => {
+    let called = false;
+    const provider = new WebhookAutomationProvider("webhook-token", {
+      fetchImpl: async () => {
+        called = true;
+        return new Response("{}", { status: 200 });
+      },
+    });
+    const result = await provider.invoke(
+      {
+        connectionId: "conn-no-vault",
+        orgId: "org-1",
+        providerKind: "webhook-token",
+        displayName: "Webhook",
+        secretRef: "vault://integration/token",
+        webhookUrl: "https://example.com/webhook",
+        config: {},
+        status: "connected",
+      },
+      "webhook-token_trigger_Webhook",
+      { payload: { ok: true } },
+    );
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("secret_resolution_not_configured");
+    expect(called).toBe(false);
+  });
 });

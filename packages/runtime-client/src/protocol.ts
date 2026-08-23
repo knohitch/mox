@@ -6,9 +6,8 @@ import { AgentDefinition, AgentEvent } from "@mox/contracts";
  *
  * The only contract between the Control Plane and any agent runtime process.
  * Transport-agnostic: framed JSON-RPC 2.0 over stdio today; the same messages
- * may ride any byte-stream transport later. Runtime internals (DSH or
- * otherwise) never appear here — this package is the entire surface the
- * Control Plane may depend on.
+ * may ride any byte-stream transport later. Runtime internals never appear
+ * here — this package is the entire surface the Control Plane may depend on.
  */
 
 // ---- Envelope (JSON-RPC 2.0 subset) ----
@@ -87,6 +86,8 @@ export const RunStartRequest = z.object({
   threadId: z.string().min(1),
   /** Full AgentDefinition snapshot; the runtime never reads agent storage. */
   definition: AgentDefinition,
+  /** The user/system input that starts this turn. */
+  userInput: z.unknown(),
   /**
    * Opaque runtime config blob assembled by the host from its own provider
    * seams. The client treats it as bytes; the runtime validates its shape.

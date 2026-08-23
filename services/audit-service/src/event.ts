@@ -1,8 +1,7 @@
 /** 
- * Audit event shape. Every externally visible action in Mox produces one 
- * of these. Adapted from OpenBot audit event types (agent.invoked, 
- * computer.action_*, channel.message_*) with actor/tenant/action/resource/ 
- * result/correlation fields and secret-safe before/after snapshots. 
+ * Audit event shape. Every externally visible action in Mox produces one
+ * of these, with actor/tenant/action/resource/result/correlation fields and
+ * secret-safe before/after snapshots.
  */ 
 export interface AuditEvent { 
   id: string; 

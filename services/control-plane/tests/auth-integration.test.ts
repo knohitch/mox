@@ -55,6 +55,10 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       sessionTtlMs: 60 * 60_000,
       corsOrigins: [],
       platformAdminUserIds: [],
+      platformAdminCapabilities: {},
+      runtimeMode: "disabled",
+      runtimeArgs: [],
+      runtimeRequestTimeoutMs: 60_000,
     };
     const services = await composeControlPlane(config);
     const running = await startControlPlane(services);
@@ -162,6 +166,19 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     const me = await call("/api/me", { headers: { cookie: cookieFrom(login.headers) } });
     expect((me.body as { userId: string }).userId).not.toBe(userAId);
     expect((me.body as { email: string }).email).toBe(email);
+  });
+
+  it("CLI engine catalogue fails honestly instead of returning a silent empty list", async () => {
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "cli-engine-password" }),
+    });
+    expect(signup.status).toBe(200);
+
+    const engines = await call("/api/cli-engines", { headers: { cookie: cookieFrom(signup.headers) } });
+    expect(engines.status).toBe(501);
+    expect(engines.body).toMatchObject({ code: "not_configured" });
   });
 
   it("logout revokes the session; expired sessions fail (§I)", async () => {
@@ -1451,6 +1468,20 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     const { a, b } = await twoUsers();
     // Platform authority is explicit.
     const meAdmin = (await (await call("/api/me", { headers: { cookie: a.cookie } })).body) as { userId: string };
+    server.services.config.platformAdminCapabilities[meAdmin.userId] = ["admin.read"];
+
+    const capabilityDenied = await call("/api/admin/notifications/send", {
+      method: "POST",
+      headers: { ...CSRF, cookie: a.cookie },
+      body: JSON.stringify({
+        idempotencyKey: `cap-deny-${randomUUID()}`,
+        audience: { type: "users", userIds: [a.userId] },
+        payload: { title: "No capability", body: "Should not send" },
+      }),
+    });
+    expect(capabilityDenied.status).toBe(403);
+    expect(JSON.stringify(capabilityDenied.body)).toContain("capability_denied");
+
     server.services.config.platformAdminUserIds.push(meAdmin.userId);
 
     const deny = await call("/api/admin/notifications/send", {

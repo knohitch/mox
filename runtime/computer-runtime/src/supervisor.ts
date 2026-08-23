@@ -2,11 +2,10 @@ import { scrubLogLine } from "@mox/security";
 import { checkPortBindings, type PortBindingCheck } from "@mox/security";
 
 /**
- * Mox runtime supervisor (Prompt 04): OpenBot Supervisor concepts re-owned by
- * Mox, ready to embed into Mox Node later. Deterministic container names,
- * per-agent/per-session isolation, health/restart with a bounded budget,
- * resource limits, and per-session workspaces — no shared browser or login
- * state across tenants.
+ * Mox runtime supervisor, ready to embed into Mox Node later. Deterministic
+ * container names, per-agent/per-session isolation, health/restart with a
+ * bounded budget, resource limits, and per-session workspaces — no shared
+ * browser or login state across tenants.
  *
  * The supervisor never assumes Docker is present: the container driver is an
  * interface. The in-repo driver is an in-memory simulator whose lifecycle

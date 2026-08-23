@@ -80,6 +80,8 @@ echo ============================================================
 echo [Mox workspace] pnpm 10.x, Node ^>=24 (8 workspace projects)
 echo ============================================================
 pushd "%ROOT%"
+echo --- pnpm public-branding-scan ---
+call pnpm public-branding-scan
 echo --- pnpm -r run build ---
 call pnpm -r run build
 echo --- pnpm -r run typecheck ---

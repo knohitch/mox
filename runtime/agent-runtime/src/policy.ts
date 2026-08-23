@@ -2,11 +2,10 @@ import { randomUUID } from "node:crypto";
 import { DecisionId, PolicyRuleId, ToolName, type PolicyDecision } from "@mox/contracts";
 
 /**
- * Policy boundary (Prompt 03): DSH approval/question flows remain interaction
- * seams, but the authority for "may this tool run" is Mox policy — never
- * local DSH configuration. Tool executions capable of side effects must be
- * decided here (and later routed through Mox Policy/Computer/Integration
- * gateways, Prompt 04+).
+ * Policy boundary: runtime approval/question flows remain interaction seams,
+ * but the authority for "may this tool run" is Mox policy — never local
+ * runtime configuration. Tool executions capable of side effects must be
+ * decided here and routed through Mox Policy/Computer/Integration gateways.
  *
  * Fail-closed: a missing engine, a missing rule, or an engine error denies.
  */

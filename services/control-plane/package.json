@@ -18,6 +18,7 @@
     "start": "node ./dist/main.js"
   },
   "dependencies": {
+    "@mox/agent-runtime": "workspace:*",
     "@mox/billing": "workspace:*",
     "@mox/compute-orchestrator": "workspace:*",
     "@mox/contracts": "workspace:*",
@@ -25,7 +26,8 @@
     "@mox/database": "workspace:*",
     "@mox/entitlements": "workspace:*",
     "@mox/notification-service": "workspace:*",
-    "drizzle-orm": "^0.44.5"
+    "@mox/runtime-client": "workspace:*",
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@mox/compute-providers": "workspace:*",

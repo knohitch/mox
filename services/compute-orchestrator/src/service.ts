@@ -169,16 +169,19 @@ export class ComputeOrchestrator {
    */
   private async selectCandidate(
     candidates: ComputeClassSkuCandidate[],
-  ): Promise<{ candidate: ComputeClassSkuCandidate; account?: ProviderAccountRecord }> {
-    const eligible: Array<{ candidate: ComputeClassSkuCandidate; account?: ProviderAccountRecord }> = [];
+  ): Promise<{ candidate: ComputeClassSkuCandidate; account: ProviderAccountRecord }> {
+    const eligible: Array<{ candidate: ComputeClassSkuCandidate; account: ProviderAccountRecord }> = [];
     for (const candidate of candidates) {
       const provider = this.providers.get(candidate.providerName);
       if (!provider || !provider.configured) continue;
       // Commercial gate: verify/disabled providers take no production traffic.
       if (provider.commercialStatus === "verify" || provider.commercialStatus === "disabled") continue;
-      const accounts = (await this.store.listProviderAccounts(candidate.providerName)).filter((a) => a.enabled);
+      const accounts = (await this.store.listProviderAccounts(candidate.providerName)).filter(
+        (a) => a.enabled && (!a.regionCode || a.regionCode === candidate.regionCode),
+      );
       const account =
         accounts.find((a) => a.commercialStatus === "approved" || a.commercialStatus === "active") ?? accounts[0];
+      if (!account) continue;
       eligible.push({ candidate, account });
     }
     if (eligible.length === 0) {

@@ -1,18 +1,12 @@
 # Mox Architecture — Hard Rules
 
-Status: **Baseline (Step 1 of consolidation).** These rules are binding for all
-future Mox work. They were written before any consolidation code exists, so that
-later steps can be checked against them rather than argued into them.
+Status: **Binding architecture rules.** These rules are binding for all future
+Mox work and are checked against active Mox authorities, not historical
+implementation sources.
 
-The three imported source trees currently live untouched at the repository root:
-
-- `OpenBot-main/` — control plane / computer / security donor (MIT, CopilotKit)
-- `deepseek-harness-master/` — runtime kernel donor (MIT, DeepSeek)
-- `OpenMausBot-main/` — GrokBot UX / provider / voice / device donor (Apache-2.0, Milind Soni)
-
-See `docs/consolidation/BASELINE.md`, `docs/consolidation/PROVENANCE.md`, and
-`docs/consolidation/SOURCE_CLASSIFICATION.md` for the inventory, license
-obligations, and per-directory disposition.
+Required third-party license, notice and provenance records live under
+`third_party/` and internal provenance documentation. Product and runtime
+surfaces use Mox names only.
 
 ---
 
@@ -34,7 +28,7 @@ Consequences:
 
 ## Rule 2 — Provider-specific code lives behind interfaces
 
-Model providers, agent runtimes (Claude Code, Codex, LangGraph, AG-UI bots),
+Model providers, agent runtimes (Claude Code, Codex, LangGraph, AG-UI),
 computer/browser backends, voice engines, channel transports, and payment
 processors are all **providers**. Mox code depends on Mox interfaces;
 provider SDKs and CLIs appear only inside adapter modules that implement
@@ -45,8 +39,9 @@ Consequences:
 - No provider import outside its adapter boundary.
 - Swapping or adding a provider must not require changes outside the adapter
   plus registration.
-- The imported trees are treated as adapter mines, not as the architecture:
-  code is ported *behind* interfaces, never wired in directly.
+- Reference implementations and provider SDKs are treated as adapter sources,
+  not as the architecture: code is ported *behind* interfaces, never wired in
+  directly.
 
 ## Rule 3 — The customer VPS is untrusted
 
@@ -111,23 +106,22 @@ same interfaces and never fork business logic.
 Consequences:
 
 - No business logic may exist only in a desktop/mobile code path.
-- The imported OpenMausBot Electron/UX code is a donor for experience and
-  device integration, to be re-hosted behind Mox's web-first APIs.
+- Secondary-client experience and device integration patterns must be
+  re-hosted behind Mox's web-first APIs.
 
-## Rule 7 — Imported source trees are not deleted until final retirement
+## Rule 7 — Reference/provenance material is not production
 
-`OpenBot-main/`, `OpenMausBot-main/`, and `deepseek-harness-master/` remain
-in the repository, unmodified in behavior, until a **final retirement
-prompt** is explicitly approved. Until then:
+Reference snapshots and provenance material remain non-production until a
+final retirement change is explicitly approved. Until then:
 
-- Do not delete, rename, or move the three trees.
 - Do not edit them to make Mox code work; port code *out* into Mox-owned
-  modules instead (record provenance per `PROVENANCE.md`).
+  modules instead and record provenance in the approved legal/provenance
+  locations.
 - Their package managers, lockfiles, and toolchains stay as-is; do not merge
   workspaces or hoist dependencies across trees.
 - Retirement happens only at the end of consolidation, as its own reviewed
-  change, after every KEEP/PORT/ADAPT item in `SOURCE_CLASSIFICATION.md`
-  has landed and its tests pass in their new home.
+  change, after every required adapted item has landed and its tests pass in
+  its new Mox-owned home.
 
 ---
 

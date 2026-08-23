@@ -2,10 +2,9 @@ import type { AgentEvent } from "@mox/contracts";
 import { redact } from "@mox/credentials";
 
 /**
- * Persistence boundary (Prompt 03): DSH's local session/credential/settings
- * stores are never authoritative in hosted Mox. The runtime host persists
- * through these seams instead; a Postgres event store replaces the bridge
- * implementation in Prompt 06.
+ * Persistence boundary: local session, credential and settings stores are
+ * never authoritative in hosted Mox. The runtime host persists through these
+ * seams instead; a Postgres event store replaces the in-memory implementation.
  */
 
 /** Append-only sink for canonical agent events, scoped by org. */

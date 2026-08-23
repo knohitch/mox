@@ -9,9 +9,8 @@ import type {
 /**
  * The web app's ONLY access to Mox backend capabilities (Prompt 05
  * acceptance: "UI consumes Mox contracts/APIs, not direct legacy internals").
- * Today a demo implementation backs this seam in-memory; the hosted product
- * swaps in the HTTP/SSE client against the Mox control plane without touching
- * views.
+ * The hosted product uses the HTTP/SSE client against the Mox control plane;
+ * there is no browser-side business logic fallback.
  */
 
 export interface ChatMessage {
@@ -84,6 +83,119 @@ export interface Entitlements {
   customModels: boolean;
 }
 
+export interface AdminOverview {
+  metrics: {
+    customers: number;
+    activeSubscriptions: number;
+    paymentFailures: number;
+    activeServers: number;
+    serverProvisioningFailures: number;
+    runtimeAgentHealth: { total: number; degraded: number };
+    providerIncidents: number;
+    notifications: number;
+    abuse: number;
+    costMargin: { currency: string; revenueMinor: string; costMinor: string };
+  };
+  incidents: Array<Record<string, unknown>>;
+  notifications: Array<Record<string, unknown>>;
+  abuse: Array<Record<string, unknown>>;
+}
+
+export interface AdminCustomer {
+  orgId: string;
+  slug: string;
+  displayName: string;
+  workspaceName?: string | null;
+  createdAt: string;
+  users: Array<Record<string, unknown>>;
+  memberships: Array<Record<string, unknown>>;
+  subscriptions: Array<Record<string, unknown>>;
+  servers: Array<Record<string, unknown>>;
+  agents: Array<Record<string, unknown>>;
+  supportNotes: Array<{ id: string; actorId?: string | null; note: string; at: string }>;
+}
+
+export interface AdminPlans {
+  products: Array<Record<string, unknown>>;
+  planVersions: Array<Record<string, unknown>>;
+  entitlementDefinitions: Array<Record<string, unknown>>;
+  entitlementValues: Array<Record<string, unknown>>;
+  currencies: Array<Record<string, unknown>>;
+  pricingRegions: Array<Record<string, unknown>>;
+  priceBooks: Array<Record<string, unknown>>;
+  priceVersions: Array<Record<string, unknown>>;
+  addons: Array<Record<string, unknown>>;
+}
+
+export interface AdminPaymentProvider {
+  providerName: string;
+  environment: "test" | "live" | string;
+  enabled: boolean;
+  displayName: string;
+  publicConfig: Record<string, unknown>;
+  supportedCurrencies: string[];
+  supportedRegions: string[];
+  priority: number;
+  maintenanceMode: boolean;
+  hasSecretRef: boolean;
+  hasWebhookSecretRef: boolean;
+  webhookStatus: string;
+  reconciliationStatus: string;
+  health: string;
+  updatedAt?: string | null;
+}
+
+export interface AdminCompute {
+  providers: string[];
+  accounts: Array<Record<string, unknown>>;
+  classes: Array<Record<string, unknown>>;
+  orders: Array<Record<string, unknown>>;
+  operations: Array<Record<string, unknown>>;
+  nodes: Array<Record<string, unknown>>;
+}
+
+export interface AdminIntelligence {
+  providers: Array<{
+    slug: string;
+    displayName: string;
+    kind: string;
+    configured: boolean;
+    credentialFingerprint?: string;
+    baseUrlConfigured: boolean;
+    settings: Record<string, unknown> | unknown[];
+    models: Array<Record<string, unknown>>;
+  }>;
+}
+
+export interface AdminRuntimeAgent {
+  agentId: string;
+  orgId: string;
+  slug: string;
+  displayName: string;
+  status: string;
+  deploymentState: string;
+  runtimeVersion?: string;
+  serverPlacement?: string;
+  failures: string[];
+  lastHeartbeatAt?: string;
+}
+
+export interface AdminOperations {
+  jobs: Array<Record<string, unknown>>;
+  queues: Array<Record<string, unknown>>;
+  incidents: Array<Record<string, unknown>>;
+  backups: Array<Record<string, unknown>>;
+  abuse: Array<Record<string, unknown>>;
+  audit: Array<Record<string, unknown>>;
+  featureFlags: Array<Record<string, unknown>>;
+  costLedger: Array<Record<string, unknown>>;
+}
+
+export interface AdminNotificationJobs {
+  jobs: Array<Record<string, unknown>>;
+  stats: { scheduled: number; completed: number; failed: number };
+}
+
 export interface ComputerSnapshot {
   sessionId: string;
   state: "pending" | "active" | "paused" | "closed";
@@ -148,6 +260,31 @@ export interface MoxApi {
   listInvoices(): Promise<InvoiceRow[]>;
   getEntitlements(): Promise<Entitlements>;
 
+  // Protected Mox Admin
+  adminOverview(): Promise<AdminOverview>;
+  adminCustomers(): Promise<AdminCustomer[]>;
+  adminCustomerAction(orgId: string, action: "suspend" | "reactivate", reason?: string): Promise<void>;
+  adminAddSupportNote(orgId: string, note: string): Promise<void>;
+  adminPlans(): Promise<AdminPlans>;
+  adminUpsertCurrency(input: { code: string; displayName: string; exponent: number }): Promise<void>;
+  adminUpsertPriceBook(input: Record<string, unknown>): Promise<void>;
+  adminPaymentProviders(): Promise<AdminPaymentProvider[]>;
+  adminSavePaymentProvider(providerName: string, input: Record<string, unknown>): Promise<void>;
+  adminCompute(): Promise<AdminCompute>;
+  adminSaveComputeAccount(providerName: string, accountLabel: string, input: Record<string, unknown>): Promise<void>;
+  adminSaveComputeClass(code: string, input: Record<string, unknown>): Promise<void>;
+  adminComputeOrderAction(orderId: string, action: "restart" | "redeploy" | "resize" | "cancel"): Promise<void>;
+  adminIntelligence(): Promise<AdminIntelligence>;
+  adminSaveIntelligenceProvider(slug: string, input: Record<string, unknown>): Promise<void>;
+  adminRuntime(): Promise<AdminRuntimeAgent[]>;
+  adminRuntimeAction(agentId: string, action: "restart" | "redeploy"): Promise<void>;
+  adminOperations(): Promise<AdminOperations>;
+  adminNotificationJobs(): Promise<AdminNotificationJobs>;
+  adminPreviewNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  adminSendNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  adminScheduleNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
+  adminCancelNotificationJob(jobId: string): Promise<void>;
+
   // Computer (through the Mox Computer Gateway contractually)
   computerSnapshot(agentId: string): Promise<ComputerSnapshot | undefined>;
   computerTakeover(agentId: string, take: boolean, takenBy: string): Promise<ComputerSnapshot>;
@@ -156,5 +293,6 @@ export interface MoxApi {
   // Files + logs (workspace-scoped)
   listFiles(agentId: string): Promise<Array<{ path: string; sizeBytes: number; updatedAt: string }>>;
   filePreview(agentId: string, path: string): Promise<string>;
+  runTerminalCommand(agentId: string, command: string): Promise<{ output: string }>;
   getLogs(agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>>;
 }
