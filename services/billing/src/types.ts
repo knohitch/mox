@@ -90,6 +90,14 @@ export interface Subscription {
   priceVersionId: string;
   state: SubscriptionState;
   providerRef?: string;
+  /** test/live — set from the provider configuration that owns the ref. */
+  providerEnvironment?: string;
+  /**
+   * Timestamp of the newest provider event APPLIED to this subscription
+   * (Prompt 01 §Event ordering): older events must never regress newer
+   * state.
+   */
+  lastEventAt?: string;
   currentPeriodStart?: string;
   currentPeriodEnd?: string;
   trialEndsAt?: string;
@@ -112,6 +120,8 @@ export interface CheckoutSession {
   priceVersionId: string;
   state: CheckoutSessionState;
   providerName: string;
+  /** test/live environment of the provider that owns the ref. */
+  environment?: string;
   /** Provider-side checkout reference returned by provider.createCheckout. */
   providerRef?: string;
   redirectUrl?: string;
@@ -168,4 +178,25 @@ export interface SubscriptionTransition {
   actorId?: string;
   idempotencyKey?: string;
   at: string;
+}
+
+/** Normalized provider payment/event ledger row (Prompt 01 §Durable). */
+export interface ProviderPaymentRecord {
+  id: string;
+  providerName: string;
+  environment: string;
+  externalEventId: string;
+  eventType: string;
+  orgId?: string;
+  providerSubscriptionRef?: string;
+  checkoutSessionRef?: string;
+  providerTransactionRef?: string;
+  invoiceRef?: string;
+  state: string;
+  currency?: string;
+  amountMinor?: bigint | number;
+  payloadDigest: string;
+  occurredAt?: string;
+  receivedAt: string;
+  reconciledAt?: string;
 }

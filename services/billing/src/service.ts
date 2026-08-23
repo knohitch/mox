@@ -9,6 +9,7 @@ import type { EntitlementService } from "@mox/entitlements";
 import {
   BillingProvider,
   digestPayload,
+  supportsReconciliation,
   UnconfiguredBillingProvider,
   WebhookVerificationError,
   type ProviderCheckoutResult,
@@ -402,7 +403,33 @@ export class BillingService {
     }
 
     try {
-      await this.applyProviderEvent(event.type, event.subjectRef, event.payload);
+      await this.applyProviderEvent(event.type, event.subjectRef, event.payload, {
+        providerName,
+        environment: provider.environment,
+        externalEventId: event.externalEventId,
+        subscriptionRef: event.subscriptionRef,
+        occurredAt: event.occurredAt,
+        amountMinor: event.amountMinor,
+        currency: event.currency,
+      });
+      // Normalized durable ledger (Prompt 01 §Durable): exactly-once per
+      // (provider, externalEventId), safe metadata only.
+      await this.store.recordProviderPayment({
+        id: newId(),
+        providerName,
+        environment: provider.environment,
+        externalEventId: event.externalEventId,
+        eventType: event.type,
+        providerSubscriptionRef: event.subscriptionRef ?? undefined,
+        checkoutSessionRef:
+          event.type === "checkout.completed" ? event.subjectRef : undefined,
+        state: "applied",
+        currency: event.currency,
+        amountMinor: event.amountMinor,
+        payloadDigest: digestPayload(rawBody),
+        occurredAt: event.occurredAt,
+        receivedAt: new Date().toISOString(),
+      });
       record.status = "applied";
       record.appliedAt = new Date().toISOString();
       await this.store.updateWebhook(record);
@@ -415,14 +442,84 @@ export class BillingService {
     }
   }
 
-  private async applyProviderEvent(type: string, subjectRef: string, payload: unknown): Promise<void> {
+  /**
+   * Reconciliation fallback (Prompt 01): when a webhook was missed, verify
+   * the checkout directly with the provider and apply the SAME guarded
+   * completion path — dedupe guarantees it repairs state exactly once.
+   */
+  async reconcileCheckoutSession(input: {
+    sessionId?: string;
+    orgId?: string;
+    providerName?: string;
+    providerRef?: string;
+  }): Promise<{ applied: boolean; reason?: string }> {
+    let session: CheckoutSession | undefined;
+    if (input.sessionId) session = await this.store.getCheckoutSession(input.sessionId);
+    if (!session && input.orgId) {
+      const sessions = await this.store.findCheckoutSessionsByOrg(input.orgId);
+      session = sessions
+        .filter((s) => s.providerName === input.providerName || !input.providerName)
+        .filter((s) => s.state !== "completed")
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    }
+    if (!session?.providerRef) return { applied: false, reason: "no pending checkout session" };
+
+    const provider = this.provider(session.providerName);
+    if (!supportsReconciliation(provider)) {
+      return { applied: false, reason: "provider does not support reconciliation" };
+    }
+    const verification = await provider.verifyCheckout({ providerRef: session.providerRef });
+    if (!verification.paid) return { applied: false, reason: "provider reports unpaid" };
+
+    // Amount/currency validation flows through the same completion path.
+    await this.applyCheckoutCompleted(session.providerRef, { checkoutSessionId: session.id }, {
+      occurredAt: verification.occurredAt,
+      amountMinor: verification.amountMinor,
+      currency: verification.currency,
+      environment: provider.environment,
+    });
+    await this.store.recordProviderPayment({
+      id: newId(),
+      providerName: session.providerName,
+      environment: provider.environment,
+      externalEventId: `reconciled:${session.providerRef}`,
+      eventType: "checkout.completed",
+      checkoutSessionRef: session.providerRef,
+      state: "reconciled",
+      currency: verification.currency,
+      amountMinor: verification.amountMinor,
+      payloadDigest: digestPayload(`${session.providerRef}:${verification.amountMinor ?? ""}`),
+      occurredAt: verification.occurredAt,
+      receivedAt: new Date().toISOString(),
+      reconciledAt: new Date().toISOString(),
+    });
+    return { applied: true };
+  }
+
+  private async applyProviderEvent(type: string, subjectRef: string, payload: unknown, event?: {
+    providerName?: string;
+    environment?: string;
+    externalEventId?: string;
+    subscriptionRef?: string;
+    occurredAt?: string;
+    amountMinor?: bigint | number;
+    currency?: string;
+  }): Promise<void> {
     switch (type) {
       case "checkout.completed":
-        await this.applyCheckoutCompleted(subjectRef, payload as { orgId?: string; checkoutSessionId?: string });
+        await this.applyCheckoutCompleted(subjectRef, payload as { orgId?: string; checkoutSessionId?: string }, event);
         break;
       case "payment.succeeded": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub =
+          (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
+          (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
         if (!sub) throw new BillingError(`payment.succeeded for unknown subject ${subjectRef}`);
+        // Out-of-order protection: older events never regress newer state.
+        if (!this.eventIsCurrent(sub, event)) return;
+        if (event?.subscriptionRef && sub.providerRef !== event.subscriptionRef) {
+          sub.providerRef = event.subscriptionRef;
+        }
+        this.touchSubscriptionEvent(sub, event);
         await this.markLatestOpenInvoicePaid(sub.id);
         if (sub.state === "past_due" || sub.state === "grace_period" || sub.state === "suspended") {
           await this.transition(sub.id, "active", "payment_recovered", {
@@ -433,13 +530,31 @@ export class BillingService {
           await this.store.updateSubscription(sub);
         } else if (sub.state === "trial") {
           await this.transition(sub.id, "active", "trial_converted", {});
+          await this.store.updateSubscription(sub);
+        } else if (sub.state === "active") {
+          // Provider-managed renewal success advances the period server-side.
+          const periodStart = sub.currentPeriodEnd ?? sub.currentPeriodStart ?? new Date().toISOString();
+          sub.currentPeriodStart = periodStart;
+          sub.currentPeriodEnd = new Date(
+            new Date(periodStart).getTime() + this.periodDays * 24 * 3600 * 1000,
+          ).toISOString();
+          await this.store.updateSubscription(sub);
+        } else {
+          await this.store.updateSubscription(sub);
         }
         break;
       }
       case "payment.failed": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub =
+          (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
+          (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
         if (!sub) throw new BillingError(`payment.failed for unknown subject ${subjectRef}`);
+        if (!this.eventIsCurrent(sub, event)) return;
+        if (event?.subscriptionRef && sub.providerRef !== event.subscriptionRef) {
+          sub.providerRef = event.subscriptionRef;
+        }
         sub.failedRenewals += 1;
+        this.touchSubscriptionEvent(sub, event);
         await this.store.updateSubscription(sub);
         if (sub.state === "active") {
           await this.transition(sub.id, "past_due", "payment_failed", {
@@ -449,8 +564,13 @@ export class BillingService {
         break;
       }
       case "subscription.canceled": {
-        const sub = await this.store.findSubscriptionByProviderRef(subjectRef);
+        const sub =
+          (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
+          (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
         if (!sub) throw new BillingError(`subscription.canceled for unknown subject ${subjectRef}`);
+        if (!this.eventIsCurrent(sub, event)) return;
+        this.touchSubscriptionEvent(sub, event);
+        await this.store.updateSubscription(sub);
         if (!["canceled", "retention", "deleted"].includes(sub.state)) {
           await this.cancelSubscription(sub.id, { actorType: "user", reason: "provider_canceled" });
         }
@@ -461,9 +581,33 @@ export class BillingService {
     }
   }
 
+  /** Older events must never regress newer state (Prompt 01 §Ordering). */
+  private eventIsCurrent(
+    sub: Subscription,
+    event?: { occurredAt?: string },
+  ): boolean {
+    if (!event?.occurredAt || !sub.lastEventAt) return true;
+    return Date.parse(event.occurredAt) >= Date.parse(sub.lastEventAt);
+  }
+
+  private touchSubscriptionEvent(
+    sub: Subscription,
+    event?: { occurredAt?: string; providerName?: string; environment?: string },
+  ): void {
+    if (event?.occurredAt) sub.lastEventAt = event.occurredAt;
+    if (event?.environment) sub.providerEnvironment = event.environment;
+  }
+
   private async applyCheckoutCompleted(
     providerCheckoutRef: string,
     payload: { orgId?: string; checkoutSessionId?: string },
+    event?: {
+      subscriptionRef?: string;
+      occurredAt?: string;
+      amountMinor?: bigint | number;
+      currency?: string;
+      environment?: string;
+    },
   ): Promise<void> {
     // Authoritative lookup: embedded id first, then the persisted provider
     // reference — never a process-local index (Prompt 00 §D2).
@@ -483,7 +627,21 @@ export class BillingService {
     this.applyingCheckouts.add(session.id);
     try {
       const priceVersion = await this.requirePriceVersion(session.priceVersionId);
+      // Wrong amount/currency guard (Prompt 01): the provider-reported money
+      // must match the server-pinned price exactly, or the event is rejected.
+      if (event?.amountMinor !== undefined) {
+        const expected = BigInt(priceVersion.amountMinor);
+        if (BigInt(event.amountMinor) !== expected) {
+          throw new BillingError(
+            `provider amount mismatch: got ${event.amountMinor} ${event.currency ?? ""}, expected ${expected}`,
+          );
+        }
+      }
+      if (event?.currency && event.currency !== priceVersion.currency) {
+        throw new BillingError(`provider currency mismatch: ${event.currency} != ${priceVersion.currency}`);
+      }
       session.state = "completed";
+      session.environment = event?.environment ?? session.environment;
       await this.store.updateCheckoutSession(session);
       await this.ensureBillingCustomer(session.orgId, session.providerName);
 
@@ -497,6 +655,9 @@ export class BillingService {
         existingSub.currentPeriodStart = now.toISOString();
         existingSub.currentPeriodEnd = periodEnd.toISOString();
         existingSub.failedRenewals = 0;
+        existingSub.providerEnvironment = event?.environment ?? existingSub.providerEnvironment;
+        if (event?.subscriptionRef) existingSub.providerRef = event.subscriptionRef;
+        this.touchSubscriptionEvent(existingSub, { occurredAt: event?.occurredAt });
         await this.store.updateSubscription(existingSub);
         await this.transition(existingSub.id, "active", "checkout_completed", {
           idempotencyKey: `checkout:${session.id}`,
@@ -504,13 +665,17 @@ export class BillingService {
         return;
       }
 
+      // History-preserving creation (§D1): a canceled prior subscription
+      // never blocks resubscribing — a NEW row starts here.
       const sub = await this.store.createSubscription({
         id: newId(),
         orgId: session.orgId,
         planVersionId: session.planVersionId,
         priceVersionId: session.priceVersionId,
         state: "trial",
-        providerRef: providerCheckoutRef,
+        providerRef: event?.subscriptionRef ?? providerCheckoutRef,
+        providerEnvironment: event?.environment,
+        lastEventAt: event?.occurredAt,
         failedRenewals: 0,
         cancelAtPeriodEnd: false,
         currentPeriodStart: now.toISOString(),

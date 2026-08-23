@@ -3,3 +3,8 @@ export * from "./provider.js";
 export * from "./store.js";
 export * from "./service.js";
 export * from "./seed.js";
+export * from "./providers/shared.js";
+export * from "./providers/paystack.js";
+export * from "./providers/flutterwave.js";
+export * from "./providers/stripe.js";
+export * from "./providers/paypal.js";

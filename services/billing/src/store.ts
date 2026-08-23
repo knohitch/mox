@@ -15,6 +15,7 @@ import type {
   PricingRegion,
   Product,
   PlanVersion,
+  ProviderPaymentRecord,
   Subscription,
   SubscriptionItem,
   SubscriptionTransition,
@@ -92,6 +93,14 @@ export interface BillingStore {
   recordWebhook(record: WebhookRecord): Promise<boolean>;
   getWebhook(providerName: string, externalEventId: string): Promise<WebhookRecord | undefined>;
   updateWebhook(record: WebhookRecord): Promise<void>;
+
+  /**
+   * Normalized provider-payment ledger (Prompt 01 §Durable). Returns false
+   * when this (provider, externalEventId) was already recorded — the
+   * PostgreSQL-backed guarantee that replays/restarts never duplicate value.
+   */
+  recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean>;
+  listProviderPayments(orgId: string): Promise<ProviderPaymentRecord[]>;
 }
 
 export class InMemoryBillingStore implements BillingStore {
@@ -365,6 +374,21 @@ export class InMemoryBillingStore implements BillingStore {
 
   async updateWebhook(record: WebhookRecord): Promise<void> {
     this.webhooks.set(`${record.providerName}:${record.externalEventId}`, record);
+  }
+
+  private readonly providerPayments = new Map<string, ProviderPaymentRecord>();
+
+  async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
+    const key = `${record.providerName}:${record.externalEventId}`;
+    if (this.providerPayments.has(key)) return false;
+    this.providerPayments.set(key, { ...record });
+    return true;
+  }
+
+  async listProviderPayments(orgId: string): Promise<ProviderPaymentRecord[]> {
+    return [...this.providerPayments.values()]
+      .filter((p) => p.orgId === orgId)
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
   }
 }
 

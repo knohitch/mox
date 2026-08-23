@@ -1,0 +1,244 @@
+/**
+ * PayPal adapter — Subscriptions REST (Prompt 01).
+ *
+ * - Auth: OAuth2 client-credentials, server-side only, token cached.
+ * - Checkout: POST /v1/billing/subscriptions requires an admin-mapped
+ *   plan (providerPlanRef) — PayPal has no ad-hoc price_data; without a
+ *   mapping the adapter fails honestly instead of inventing a plan.
+ * - Webhook: OFFICIAL postback verification — transmission headers + raw
+ *   event posted to /v1/notifications/verify-webhook-signature; SUCCESS is
+ *   required. Event ids dedupe via our PostgreSQL ledger.
+ * - Recurring is provider-managed: PAYMENT.SALE.COMPLETED /
+ *   BILLING.SUBSCRIPTION.* events normalize to Mox state.
+ */
+
+import type { BillingProvider, ProviderCheckoutInput, ProviderCheckoutResult, ProviderEvent } from "../provider.js";
+import { WebhookVerificationError } from "../provider.js";
+import { httpJson, majorToMinor, requireConfigured } from "./shared.js";
+
+export interface PayPalConfig {
+  environment: "test" | "live";
+  clientId?: string;
+  clientSecret?: string;
+  webhookId?: string;
+  baseUrl?: string;
+  fetchImpl?: typeof fetch;
+}
+
+interface PayPalLink {
+  rel: string;
+  href: string;
+}
+
+export class PayPalProvider implements BillingProvider {
+  readonly name = "paypal";
+  readonly capabilities = ["checkout", "webhook_verification", "charge", "cancel"] as const;
+  readonly environment: string;
+  readonly configured: boolean;
+  readonly blocker?: string;
+
+  private readonly clientId?: string;
+  private readonly clientSecret?: string;
+  private readonly webhookId?: string;
+  private readonly baseUrl: string;
+  private readonly fetchImpl: typeof fetch;
+  private cachedToken?: { value: string; expiresAt: number };
+
+  constructor(config: PayPalConfig) {
+    this.environment = config.environment;
+    this.clientId = config.clientId;
+    this.clientSecret = config.clientSecret;
+    this.webhookId = config.webhookId;
+    this.baseUrl = config.baseUrl ?? (config.environment === "live" ? "https://api-m.paypal.com" : "https://api-m.sandbox.paypal.com");
+    this.fetchImpl = config.fetchImpl ?? fetch.bind(globalThis);
+    if (!config.clientId || !config.clientSecret || !config.webhookId) {
+      this.configured = false;
+      this.blocker = `missing PayPal ${!config.clientId ? "client id" : !config.clientSecret ? "client secret" : "webhook id"} for ${config.environment}`;
+    } else {
+      this.configured = true;
+    }
+  }
+
+  private async accessToken(): Promise<string> {
+    const now = Date.now();
+    if (this.cachedToken && this.cachedToken.expiresAt > now + 30_000) return this.cachedToken.value;
+    const basic = Buffer.from(`${requireConfigured(this.clientId, "client id")}:${requireConfigured(this.clientSecret, "client secret")}`).toString("base64");
+    const res = await httpJson<{ access_token: string; expires_in: number }>({
+      url: `${this.baseUrl}/v1/oauth2/token`,
+      method: "POST",
+      headers: { authorization: `Basic ${basic}` },
+      rawBody: "grant_type=client_credentials",
+      fetchImpl: this.fetchImpl,
+    });
+    this.cachedToken = {
+      value: res.data.access_token,
+      expiresAt: now + res.data.expires_in * 1000,
+    };
+    return this.cachedToken.value;
+  }
+
+  async createCheckout(input: ProviderCheckoutInput & { providerPriceRef?: string }): Promise<ProviderCheckoutResult> {
+    const planId = input.providerPriceRef;
+    if (!planId) {
+      // PayPal Subscriptions REQUIRES a pre-created plan id. Ad-hoc prices
+      // are not supported — fail honestly rather than guessing.
+      throw new Error(
+        "paypal checkout requires an admin-configured provider plan mapping (provider_plan_mappings) for this price version",
+      );
+    }
+    const token = await this.accessToken();
+    const res = await httpJson<{ id: string; links: PayPalLink[] }>({
+      url: `${this.baseUrl}/v1/billing/subscriptions`,
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: {
+        plan_id: planId,
+        custom_id: input.checkoutSessionId,
+        application_context: {
+          brand_name: "Mox",
+          user_action: "SUBSCRIBE_NOW",
+          success_url: input.successUrl,
+          cancel_url: input.cancelUrl,
+        },
+      },
+      fetchImpl: this.fetchImpl,
+    });
+    const approve = res.data.links?.find((l) => l.rel === "approve")?.href;
+    if (!approve) throw new Error("paypal subscription response lacks approve link");
+    return { providerRef: res.data.id, redirectUrl: approve };
+  }
+
+  /** Provider-managed recurring — merchant charges are not faked. */
+  async charge(): Promise<{ ok: boolean; failureReason: string }> {
+    return { ok: false, failureReason: "unsupported: paypal subscriptions are provider-managed" };
+  }
+
+  async cancelRemote(subscriptionRef: string): Promise<void> {
+    const token = await this.accessToken();
+    await httpJson({
+      url: `${this.baseUrl}/v1/billing/subscriptions/${encodeURIComponent(subscriptionRef)}/cancel`,
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: { reason: "canceled via Mox" },
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  async verifyWebhook(headers: Record<string, string>, rawBody: string): Promise<ProviderEvent> {
+    let parsed: {
+      id?: string;
+      event_type?: string;
+      create_time?: string;
+      resource?: Record<string, unknown>;
+    };
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new WebhookVerificationError("payload is not JSON");
+    }
+    // OFFICIAL verification flow: postback to PayPal with the exact event
+    // plus transmission headers; SUCCESS is mandatory.
+    const token = await this.accessToken();
+    const verification = await httpJson<{ verification_status: string }>({
+      url: `${this.baseUrl}/v1/notifications/verify-webhook-signature`,
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: {
+        auth_algo: headers["paypal-auth-algo"],
+        cert_url: headers["paypal-cert-url"],
+        transmission_id: headers["paypal-transmission-id"],
+        transmission_sig: headers["paypal-transmission-sig"],
+        transmission_time: headers["paypal-transmission-time"],
+        webhook_id: requireConfigured(this.webhookId, "webhook id"),
+        webhook_event: parsed,
+      },
+      fetchImpl: this.fetchImpl,
+    });
+    if (verification.data.verification_status !== "SUCCESS") {
+      throw new WebhookVerificationError(`paypal verify-webhook-signature returned ${verification.data.verification_status}`);
+    }
+
+    const resource = parsed.resource ?? {};
+    const occurredAt = typeof resource.update_time === "string" ? resource.update_time : parsed.create_time;
+    switch (parsed.event_type) {
+      case "BILLING.SUBSCRIPTION.ACTIVATED":
+      case "BILLING.SUBSCRIPTION.RE-ACTIVATED":
+      case "CHECKOUT.ORDER.APPROVED":
+        return {
+          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
+          type: "checkout.completed",
+          subjectRef: String(resource.id ?? ""),
+          subscriptionRef: String(resource.id ?? ""),
+          occurredAt,
+          payload: parsed,
+        };
+      case "PAYMENT.SALE.COMPLETED": {
+        const amount = resource.amount as { total?: string; currency?: string } | undefined;
+        return {
+          externalEventId: parsed.id ?? `PAYMENT.SALE.COMPLETED:${String(resource.id)}`,
+          type: "payment.succeeded",
+          subjectRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
+          subscriptionRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
+          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          occurredAt,
+          amountMinor: amount?.total !== undefined ? majorToMinor(amount.total, amount?.currency ?? "USD") : undefined,
+          currency: amount?.currency,
+          payload: parsed,
+        };
+      }
+      case "PAYMENT.SALE.DENIED":
+      case "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
+      case "BILLING.SUBSCRIPTION.SUSPENDED": {
+        const suspended = parsed.event_type === "BILLING.SUBSCRIPTION.SUSPENDED";
+        return {
+          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
+          type: suspended ? "subscription.canceled" : "payment.failed",
+          subjectRef: String(resource.id ?? ""),
+          subscriptionRef: String(resource.id ?? ""),
+          occurredAt,
+          payload: parsed,
+        };
+      }
+      case "BILLING.SUBSCRIPTION.CANCELLED":
+      case "BILLING.SUBSCRIPTION.EXPIRED":
+        return {
+          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
+          type: "subscription.canceled",
+          subjectRef: String(resource.id ?? ""),
+          subscriptionRef: String(resource.id ?? ""),
+          occurredAt,
+          payload: parsed,
+        };
+      default:
+        throw new WebhookVerificationError(`unsupported paypal event ${parsed.event_type}`);
+    }
+  }
+
+  /** Reconciliation fallback: GET the subscription and check status. */
+  async verifyCheckout(input: { providerRef: string }): Promise<{
+    paid: boolean;
+    currency?: string;
+    occurredAt?: string;
+    transactionRef?: string;
+  }> {
+    const token = await this.accessToken();
+    const res = await httpJson<{
+      id: string;
+      status?: string;
+      start_time?: string;
+      billing_info?: { last_payment?: { amount?: { currency?: string } } };
+    }>({
+      url: `${this.baseUrl}/v1/billing/subscriptions/${encodeURIComponent(input.providerRef)}`,
+      headers: { authorization: `Bearer ${token}` },
+      fetchImpl: this.fetchImpl,
+    });
+    return {
+      paid: res.data.status === "ACTIVE" || res.data.status === "APPROVED",
+      currency: res.data.billing_info?.last_payment?.amount?.currency,
+      occurredAt: res.data.start_time,
+      transactionRef: res.data.id,
+    };
+  }
+}

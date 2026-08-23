@@ -205,6 +205,13 @@ export const subscriptions = pgTable(
     state: subscriptionState("state").notNull().default("trial"),
     /** Provider-side subscription reference, set only from verified webhooks. */
     providerRef: text("provider_ref"),
+    /** test/live environment owning the provider ref (Prompt 01). */
+    providerEnvironment: text("provider_environment"),
+    /**
+     * Newest applied provider event time (Prompt 01 §Ordering): older
+     * events must never regress newer state.
+     */
+    lastEventAt: timestamp("last_event_at", { withTimezone: true }),
     currentPeriodStart: timestamp("current_period_start", { withTimezone: true }),
     currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
     trialEndsAt: timestamp("trial_ends_at", { withTimezone: true }),
@@ -265,6 +272,8 @@ export const checkoutSessions = pgTable(
       .references(() => priceVersions.id, { onDelete: "restrict" }),
     state: checkoutState("state").notNull().default("created"),
     providerName: text("provider_name").notNull(),
+    /** test/live environment of the provider that owns the session. */
+    environment: text("environment"),
     /**
      * Provider-side checkout/session/order reference (Prompt 00 §D2).
      * Persisted at creation time so webhook application never depends on a

@@ -8,6 +8,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { ControlPlaneConfig } from "../src/config.js";
+import { signPayload } from "@mox/billing";
 import { composeControlPlane, type ControlPlaneServices } from "../src/composition.js";
 import { startControlPlane, type RunningControlPlane } from "../src/server.js";
 
@@ -53,6 +54,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       setupToken,
       sessionTtlMs: 60 * 60_000,
       corsOrigins: [],
+      platformAdminUserIds: [],
     };
     const services = await composeControlPlane(config);
     const running = await startControlPlane(services);
@@ -860,6 +862,471 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       body: JSON.stringify({ orgId: randomUUID() }),
     });
     expect(foreignSwitch.status).toBe(403);
+  });
+
+  // ==== Prompt 01 — payment providers =========================================
+
+  /** Scriptable provider driving the full HTTP webhook pipeline in tests. */
+  class ScriptedProvider {
+    readonly name = "scripted";
+    readonly capabilities = ["checkout", "webhook_verification", "charge", "cancel"] as const;
+    readonly environment = "test";
+    readonly configured = true;
+    private queue: Array<Record<string, unknown>> = [];
+    private seq = 0;
+
+    enqueue(event: Record<string, unknown>): void {
+      this.queue.push(event);
+    }
+
+    async createCheckout(input: { checkoutSessionId: string }): Promise<{ providerRef: string; redirectUrl: string }> {
+      return {
+        providerRef: `scripted_${input.checkoutSessionId}`,
+        redirectUrl: `https://pay.scripted/${input.checkoutSessionId}`,
+      };
+    }
+    async charge() {
+      return { ok: false, failureReason: "provider-managed" };
+    }
+    async cancelRemote(): Promise<void> {}
+
+    async verifyWebhook(_headers: Record<string, string>, rawBody: string) {
+      const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+      const expected = this.queue.shift();
+      this.seq += 1;
+      if (!expected || JSON.stringify(expected) !== JSON.stringify(parsed)) {
+        throw Object.assign(new Error("webhook verification failed: stale/unsolicited event"), {
+          name: "WebhookVerificationError",
+        });
+      }
+      const e = expected as {
+        eventId?: string;
+        type: "checkout.completed" | "payment.succeeded" | "payment.failed" | "subscription.canceled";
+        subjectRef: string;
+        subscriptionRef?: string;
+        occurredAt?: string;
+        amountMinor?: number;
+        currency?: string;
+      };
+      return {
+        externalEventId: String(e.eventId ?? `scripted:${this.seq}`),
+        type: e.type,
+        subjectRef: e.subjectRef,
+        sequence: this.seq,
+        subscriptionRef: e.subscriptionRef,
+        occurredAt: e.occurredAt,
+        amountMinor: e.amountMinor,
+        currency: e.currency,
+        payload: parsed,
+      };
+    }
+
+    async verifyCheckout(input: { providerRef: string }) {
+      return {
+        paid: true,
+        amountMinor: 1999n,
+        currency: "USD",
+        occurredAt: new Date().toISOString(),
+        transactionRef: `tx_${input.providerRef}`,
+      };
+    }
+  }
+
+  function signedWebhookCall(providerName: string, event: Record<string, unknown>) {
+    const raw = JSON.stringify(event);
+    const stamp = new Date().toISOString();
+    return call(`/webhooks/billing/${providerName}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-mox-timestamp": stamp,
+        "x-mox-signature": signPayload("whsec-int", raw, stamp),
+      },
+      rawBody: raw,
+    });
+  }
+
+  async function seedPlan(): Promise<{ planVersionId: string; productId: string }> {
+    const { PgBillingStore } = await import("@mox/database");
+    const store = new PgBillingStore(server.services.db);
+    const product = await store.createProduct({
+      id: randomUUID(),
+      code: `p01-${randomUUID().slice(0, 8)}`,
+      tier: "pro",
+      displayName: "Pro",
+    });
+    const planVersion = await store.createPlanVersion({
+      id: randomUUID(),
+      productId: product.id,
+      version: 1,
+      status: "active",
+      createdAt: new Date().toISOString(),
+    });
+    await store.definePricingRegion({
+      code: "GLOBAL",
+      displayName: "Global",
+      chargeCurrency: "USD",
+      displayCurrency: "USD",
+    });
+    const book = await store.upsertPriceBook({ id: randomUUID(), productId: product.id, pricingRegionCode: "GLOBAL", mode: "fixed" });
+    await store.createPriceVersion({
+      id: randomUUID(),
+      priceBookId: book.id,
+      version: 1,
+      amountMinor: 1999n,
+      currency: "USD",
+      effectiveFrom: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    return { planVersionId: planVersion.id, productId: product.id };
+  }
+
+  it("billing mutations require scope AND org owner/admin authority (Prompt 01)", async () => {
+    const ownerEmail = `${randomUUID()}@mox.test`;
+    const ownerSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "billing-auth-pass" }),
+    });
+    const ownerCookie = cookieFrom(ownerSignup.headers);
+    const ownerId = ((await (await call("/api/me", { headers: { cookie: ownerCookie } })).body) as { orgId: string })
+      .orgId;
+
+    const memberEmail = `${randomUUID()}@mox.test`;
+    await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: memberEmail, password: "billing-auth-pass" }),
+    });
+    await server.services.db.execute(
+      (await import("drizzle-orm")).sql`
+        INSERT INTO memberships (org_id, user_id, role)
+        SELECT ${ownerId}, id, 'member' FROM users WHERE email = ${memberEmail.toLowerCase()}
+      `,
+    );
+
+    // Member PAT with billing scope: reads OK, mutation DENIED.
+    const memberPat = (await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: memberEmail, password: "billing-auth-pass", name: "m", scopes: ["billing"] }),
+    })).body as { token: string };
+    const memberRead = await call("/api/billing/invoices", {
+      headers: { authorization: `Bearer ${memberPat.token}` },
+    });
+    expect(memberRead.status).toBe(200);
+    // Enter the OWNER's org (membership-checked switch) so role checks
+    // evaluate the right workspace.
+    await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${memberPat.token}` },
+      body: JSON.stringify({ orgId: ownerId }),
+    });
+    const memberMutation = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${memberPat.token}` },
+      body: JSON.stringify({
+        planVersionId: randomUUID(),
+        providerName: "scripted",
+        successUrl: "https://x/y",
+        cancelUrl: "https://x/z",
+      }),
+    });
+    expect(memberMutation.status).toBe(403);
+    expect(JSON.stringify(memberMutation.body)).toContain("role_denied");
+
+    // '*' PAT for the MEMBER also cannot mutate (no privilege creation).
+    const starPat = (await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: memberEmail, password: "billing-auth-pass", name: "star" }),
+    })).body as { token: string };
+    // Enter the OWNER's org so the role check evaluates the member seat.
+    await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${starPat.token}` },
+      body: JSON.stringify({ orgId: ownerId }),
+    });
+    const starMutation = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${starPat.token}` },
+      body: JSON.stringify({
+        planVersionId: randomUUID(),
+        providerName: "scripted",
+        successUrl: "https://x/y",
+        cancelUrl: "https://x/z",
+      }),
+    });
+    expect(starMutation.status).toBe(403);
+    expect(JSON.stringify(starMutation.body)).toContain("role_denied");
+
+    // PAT without billing scope is denied even READS.
+    const noScopePat = (await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "billing-auth-pass", name: "ns", scopes: ["agents"] }),
+    })).body as { token: string };
+    const deniedRead = await call("/api/billing/invoices", {
+      headers: { authorization: `Bearer ${noScopePat.token}` },
+    });
+    expect(deniedRead.status).toBe(403);
+    expect(JSON.stringify(deniedRead.body)).toContain("scope_denied");
+
+    // Owner COOKIE may mutate (org authority present).
+    server.services.billing.registerProvider(new ScriptedProvider() as never);
+    const catalog = await seedPlan();
+    const checkout = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({
+        planVersionId: catalog.planVersionId,
+        providerName: "scripted",
+        successUrl: "https://app.example/success",
+        cancelUrl: "https://app.example/cancel",
+      }),
+    });
+    expect(checkout.status).toBe(200);
+  });
+
+  it("redirect grants nothing; webhook activates; replay dedupes; out-of-order cannot regress (Prompt 01)", async () => {
+    const provider = new ScriptedProvider();
+    server.services.billing.registerProvider(provider as never);
+
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "pipeline-pass" }),
+    });
+    const cookie = cookieFrom(signup.headers);
+
+    const catalog = await seedPlan();
+
+    // Redirect WITHOUT webhook: nothing activates.
+    const created = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({
+        planVersionId: catalog.planVersionId,
+        providerName: "scripted",
+        successUrl: "https://x/s",
+        cancelUrl: "https://x/c",
+      }),
+    });
+    expect(created.status).toBe(200);
+    const sessionId = (created.body as { sessionId: string }).sessionId;
+    expect((await (await call("/api/billing/subscription", { headers: { cookie } })).body) ?? null).toBeNull();
+
+    // Verified webhook ACTIVATES.
+    const t0 = new Date(Date.now() - 60_000).toISOString();
+    const activationEvent = {
+      eventId: "evt_act_1",
+      type: "checkout.completed",
+      subjectRef: `scripted_${sessionId}`,
+      subscriptionRef: "scripted_sub_9",
+      occurredAt: t0,
+      amountMinor: 1999,
+      currency: "USD",
+    };
+    provider.enqueue(activationEvent);
+    const activation = await signedWebhookCall(provider.name, activationEvent);
+    expect(JSON.stringify(activation.body)).toContain('"applied":true');
+    const subAfter = (await (await call("/api/billing/subscription", { headers: { cookie } })).body) as {
+      state?: string;
+      providerRef?: string;
+    };
+    expect(subAfter?.state).toBe("active");
+
+    // Replay of the SAME event: deduped.
+    provider.enqueue({ ...activationEvent });
+    const replay = await signedWebhookCall(provider.name, { ...activationEvent });
+    expect(JSON.stringify(replay.body)).toContain('"duplicate":true');
+
+    // Out-of-order: an OLDER cancellation cannot regress newer active state.
+    provider.enqueue({
+      eventId: "evt_old_cancel",
+      type: "subscription.canceled",
+      subjectRef: "scripted_sub_9",
+      subscriptionRef: "scripted_sub_9",
+      occurredAt: new Date(Date.now() - 120_000).toISOString(),
+    });
+    const stale = await signedWebhookCall(provider.name, {
+      eventId: "evt_old_cancel",
+      type: "subscription.canceled",
+      subjectRef: "scripted_sub_9",
+      subscriptionRef: "scripted_sub_9",
+      occurredAt: new Date(Date.now() - 120_000).toISOString(),
+    });
+    expect(stale.status).toBe(200);
+    const stillActive = (await (await call("/api/billing/subscription", { headers: { cookie } })).body) as {
+      state?: string;
+    };
+    expect(stillActive?.state).toBe("active");
+  });
+
+  it("wrong amount/currency events are rejected (Prompt 01)", async () => {
+    const provider = new ScriptedProvider();
+    server.services.billing.registerProvider(provider as never);
+
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "amount-guard-pass" }),
+    });
+    const cookie = cookieFrom(signup.headers);
+    const catalog = await seedPlan();
+
+    const created = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({
+        planVersionId: catalog.planVersionId,
+        providerName: "scripted",
+        successUrl: "https://x/s",
+        cancelUrl: "https://x/c",
+      }),
+    });
+    const sessionId = (created.body as { sessionId: string }).sessionId;
+
+    provider.enqueue({
+      eventId: "evt_wrong_amount",
+      type: "checkout.completed",
+      subjectRef: `scripted_${sessionId}`,
+      subscriptionRef: "scripted_sub_bad",
+      occurredAt: new Date().toISOString(),
+      amountMinor: 999,
+      currency: "USD",
+    });
+    const res = await signedWebhookCall(provider.name, {
+      eventId: "evt_wrong_amount",
+      type: "checkout.completed",
+      subjectRef: `scripted_${sessionId}`,
+      subscriptionRef: "scripted_sub_bad",
+      occurredAt: new Date().toISOString(),
+      amountMinor: 999,
+      currency: "USD",
+    });
+    void signup;
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.body)).toContain('"rejected":true');
+    expect(JSON.stringify(res.body)).toMatch(/mismatch/i);
+  });
+
+  it("missed-webhook reconciliation repairs state exactly once; ids survive restart (Prompt 01)", async () => {
+    const provider = new ScriptedProvider();
+    server.services.billing.registerProvider(provider as never);
+
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "reconcile-pass" }),
+    });
+    const cookie = cookieFrom(signup.headers);
+    const me = (await (await call("/api/me", { headers: { cookie } })).body) as { orgId: string };
+    const catalog = await seedPlan();
+
+    const created = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({
+        planVersionId: catalog.planVersionId,
+        providerName: "scripted",
+        successUrl: "https://x/s",
+        cancelUrl: "https://x/c",
+      }),
+    });
+    const sessionId = (created.body as { sessionId: string }).sessionId;
+
+    // Webhook MISSED entirely -> reconciliation repairs.
+    const first = await call("/api/billing/reconcile", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({}),
+    });
+    expect(first.status).toBe(200);
+    expect(JSON.stringify(first.body)).toContain('"applied":true');
+
+    // Second run: already completed -> no duplicate repair.
+    const second = await call("/api/billing/reconcile", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({}),
+    });
+    expect(JSON.stringify(second.body)).not.toContain('"applied":true');
+
+    // Provider refs survive a process restart (fresh service, same DB).
+    const { BillingService } = await import("@mox/billing");
+    const { PgBillingStore } = await import("@mox/database");
+    const restarted = new BillingService(new PgBillingStore(server.services.db));
+    const sub = await restarted.getActiveSubscription(me.orgId);
+    expect(sub?.providerRef).toBe(`scripted_${sessionId}`);
+    expect(sub?.state).toBe("active");
+  });
+
+  it("admin provider configuration is Mox-admin only; secrets are never echoed (Prompt 01)", async () => {
+    const ownerEmail = `${randomUUID()}@mox.test`;
+    const ownerSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "prov-admin-pass" }),
+    });
+    const ownerCookie = cookieFrom(ownerSignup.headers);
+
+    const plainEmail = `${randomUUID()}@mox.test`;
+    const plainSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: plainEmail, password: "prov-admin-pass" }),
+    });
+
+    // Plain user denied.
+    const plainPut = await call("/api/admin/billing-providers/paystack", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: cookieFrom(plainSignup.headers) },
+      body: JSON.stringify({ displayName: "Paystack", enabled: true }),
+    });
+    expect(plainPut.status).toBe(403);
+
+    // Platform authority is EXPLICIT: even an org owner is denied until
+  // their user id is provisioned into the deployment admin list.
+    const meOwner = (await (await call("/api/me", { headers: { cookie: ownerCookie } })).body) as { userId: string };
+    const deniedBeforeGrant = await call("/api/admin/billing-providers/paystack", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({ displayName: "Paystack", enabled: true }),
+    });
+    expect(deniedBeforeGrant.status).toBe(403);
+    server.services.config.platformAdminUserIds.push(meOwner.userId);
+
+    // Owner (now platform-admin) configures with SECRET REF NAMES only.
+    const put = await call("/api/admin/billing-providers/paystack", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({
+        displayName: "Paystack",
+        enabled: true,
+        environment: "test",
+        secretRef: "MOX_PAYSTACK_SECRET_KEY",
+        webhookSecretRef: "MOX_PAYSTACK_WEBHOOK_SECRET",
+        supportedCurrencies: ["USD", "NGN"],
+      }),
+    });
+    expect(put.status).toBe(200);
+
+    const list = await call("/api/admin/billing-providers", { headers: { cookie: ownerCookie } });
+    const row = (list.body as Array<Record<string, unknown>>).find((r) => r.providerName === "paystack");
+    expect(row?.hasSecretRef).toBe(true);
+    expect(JSON.stringify(list.body)).not.toMatch(/sk_(test|live)_/);
+
+    // Public catalog shows safe fields only.
+    const publicList = await call("/api/billing/providers", { headers: { cookie: ownerCookie } });
+    const pubRow = (publicList.body as Array<{ providerName?: string; enabled?: boolean }>).find(
+      (r) => r.providerName === "paystack",
+    );
+    expect(pubRow?.enabled).toBe(true);
+    expect(JSON.stringify(publicList.body)).not.toContain("secretRef");
   });
 
   it("duplicate workspace names allocate distinct slugs safely (00C §F, test 11)", async () => {

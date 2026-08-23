@@ -20,6 +20,7 @@
 import { sql } from "drizzle-orm";
 import {
   createDb,
+  billingProviderConfigs,
   PgBillingStore,
   PgEntitlementStore,
   PgMemoryStore,
@@ -30,6 +31,13 @@ import {
   PgThreadStore,
 } from "@mox/database";
 import { BillingService } from "@mox/billing";
+import type { BillingProvider } from "@mox/billing";
+import {
+  FlutterwaveProvider,
+  PayPalProvider,
+  PaystackProvider,
+  StripeProvider,
+} from "@mox/billing";
 import { ComputeOrchestrator } from "@mox/compute-orchestrator";
 import { EntitlementService } from "@mox/entitlements";
 import { NotificationService } from "@mox/notification-service";
@@ -66,6 +74,11 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
   const entitlements = new EntitlementService(new PgEntitlementStore(db));
   const notifications = new NotificationService(new PgNotificationStore(db));
 
+  // Prompt 01: DB-driven payment-provider registration. Secrets resolve
+  // from environment variables NAMED by admin-configured refs — never
+  // stored in the database, never logged.
+  await registerBillingProvidersFromDb(db, billing);
+
   return {
     config,
     db,
@@ -79,6 +92,61 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     events: new PgSessionEventStore(db),
     memory: new PgMemoryStore(db),
   };
+}
+
+/**
+ * Builds configured BillingProvider instances from durable
+ * `billing_provider_configs` rows and registers them with the service.
+ * Secret refs name environment variables; missing secrets yield an
+ * UNCONFIGURED provider that fails honestly rather than a silent skip.
+ */
+export async function registerBillingProvidersFromDb(
+  db: ReturnType<typeof createDb>["db"],
+  billing: BillingService,
+): Promise<string[]> {
+  const rows = await db.select().from(billingProviderConfigs);
+  const registered: string[] = [];
+  for (const row of rows) {
+    if (!row.enabled) continue;
+    const env = row.environment === "live" ? "live" : "test";
+    const secret = row.secretRef ? process.env[row.secretRef] : undefined;
+    const webhookSecret = row.webhookSecretRef ? process.env[row.webhookSecretRef] : undefined;
+    let provider: BillingProvider;
+    switch (row.providerName) {
+      case "paystack":
+        provider = new PaystackProvider({ environment: env, secretKey: secret });
+        break;
+      case "flutterwave":
+        provider = new FlutterwaveProvider({
+          environment: env,
+          secretKey: secret,
+          secretHash: webhookSecret,
+        });
+        break;
+      case "stripe":
+        provider = new StripeProvider({ environment: env, secretKey: secret, webhookSecret });
+        break;
+      case "paypal":
+        provider = new PayPalProvider({
+          environment: env,
+          clientId: secret,
+          clientSecret: webhookSecret ?? undefined,
+          webhookId: process.env[`${row.secretRef ?? ""}_WEBHOOK_ID`] ?? process.env["PAYPAL_WEBHOOK_ID"],
+        });
+        break;
+      default:
+        // Unknown adapter names stay unregistered (honest no-op) until code
+        // support exists — configuration alone cannot conjure an adapter.
+        continue;
+    }
+    if (!provider.configured) {
+      billing.registerBlockedProvider(row.providerName, provider.blocker ?? "not configured");
+      continue;
+    }
+    billing.registerProvider(provider);
+    registered.push(row.providerName);
+  }
+  return registered;
 }
 
 /** Re-checks durable dependencies; used by /healthz and periodic probes. */

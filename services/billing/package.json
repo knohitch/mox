@@ -17,6 +17,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mox/compute-providers": "workspace:*",
     "@mox/contracts": "workspace:*",
     "@mox/entitlements": "workspace:*",
     "@mox/money": "workspace:*"

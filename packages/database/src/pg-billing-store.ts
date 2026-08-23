@@ -11,6 +11,7 @@ import type {
   PricingRegion,
   Product,
   PlanVersion,
+  ProviderPaymentRecord,
   Subscription,
   SubscriptionItem,
   SubscriptionTransition,
@@ -30,6 +31,7 @@ import {
   priceVersions,
   pricingRegions,
   products,
+  providerPayments,
   subscriptionItems,
   subscriptionTransitions,
   subscriptions,
@@ -605,6 +607,65 @@ export class PgBillingStore implements BillingStore {
         ),
       );
   }
+
+  private readonly providerPayments = new Map<string, ProviderPaymentRecord>();
+
+  /** Exactly-once ledger insert per (provider, externalEventId). */
+  async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
+    const inserted = await this.db
+      .insert(providerPayments)
+      .values({
+        providerName: record.providerName,
+        environment: record.environment,
+        externalEventId: record.externalEventId,
+        eventType: record.eventType,
+        orgId: record.orgId ?? null,
+        providerSubscriptionRef: record.providerSubscriptionRef ?? null,
+        checkoutSessionRef: record.checkoutSessionRef ?? null,
+        providerTransactionRef: record.providerTransactionRef ?? null,
+        invoiceRef: record.invoiceRef ?? null,
+        state: record.state,
+        currency: record.currency ?? null,
+        amountMinor:
+          record.amountMinor !== undefined ? BigInt(record.amountMinor) : null,
+        payloadDigest: record.payloadDigest,
+        occurredAt: date(record.occurredAt),
+        receivedAt: new Date(record.receivedAt),
+        reconciledAt: date(record.reconciledAt),
+      })
+      .onConflictDoNothing({
+        target: [providerPayments.providerName, providerPayments.externalEventId],
+      })
+      .returning({ id: providerPayments.id });
+    return inserted.length > 0;
+  }
+
+  async listProviderPayments(orgId: string): Promise<ProviderPaymentRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(providerPayments)
+      .where(eq(providerPayments.orgId, orgId))
+      .orderBy(asc(providerPayments.receivedAt));
+    return rows.map((row) => ({
+      id: row.id,
+      providerName: row.providerName,
+      environment: row.environment,
+      externalEventId: row.externalEventId,
+      eventType: row.eventType,
+      orgId: row.orgId ?? undefined,
+      providerSubscriptionRef: row.providerSubscriptionRef ?? undefined,
+      checkoutSessionRef: row.checkoutSessionRef ?? undefined,
+      providerTransactionRef: row.providerTransactionRef ?? undefined,
+      invoiceRef: row.invoiceRef ?? undefined,
+      state: row.state,
+      currency: row.currency ?? undefined,
+      amountMinor: row.amountMinor ?? undefined,
+      payloadDigest: row.payloadDigest,
+      occurredAt: iso(row.occurredAt),
+      receivedAt: row.receivedAt.toISOString(),
+      reconciledAt: iso(row.reconciledAt),
+    }));
+  }
 }
 
 // ---- Row mappers -----------------------------------------------------------
@@ -666,6 +727,8 @@ function toSubscriptionRow(sub: Subscription) {
     priceVersionId: asUuid(sub.priceVersionId),
     state: sub.state,
     providerRef: sub.providerRef ?? null,
+    providerEnvironment: sub.providerEnvironment ?? null,
+    lastEventAt: date(sub.lastEventAt),
     currentPeriodStart: date(sub.currentPeriodStart),
     currentPeriodEnd: date(sub.currentPeriodEnd),
     trialEndsAt: date(sub.trialEndsAt),
@@ -687,6 +750,8 @@ function toSubscription(row: SubscriptionRow): Subscription {
     priceVersionId: row.priceVersionId,
     state: row.state,
     providerRef: row.providerRef ?? undefined,
+    providerEnvironment: row.providerEnvironment ?? undefined,
+    lastEventAt: iso(row.lastEventAt),
     currentPeriodStart: iso(row.currentPeriodStart),
     currentPeriodEnd: iso(row.currentPeriodEnd),
     trialEndsAt: iso(row.trialEndsAt),

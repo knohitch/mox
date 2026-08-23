@@ -17,6 +17,8 @@ export interface ProviderCheckoutInput {
   currency: string;
   successUrl: string;
   cancelUrl: string;
+  /** Billing email when known; providers require one for receipts. */
+  customerEmail?: string;
 }
 
 export interface ProviderCheckoutResult {
@@ -35,6 +37,19 @@ export interface ProviderEvent {
   sequence?: number;
   /** Checkout session or subscription provider reference. */
   subjectRef: string;
+  /** Provider transaction/payment id when present (ledger enrichment). */
+  transactionRef?: string;
+  /**
+   * Canonical subscription ref when the event carries one directly (e.g.
+   * Stripe invoice events carry the subscription id). Lets the service
+   * bind/refresh subscription.providerRef (Prompt 01 §Durable).
+   */
+  subscriptionRef?: string;
+  /** Provider-side occurrence time; drives out-of-order protection. */
+  occurredAt?: string;
+  /** Integer minor units when the provider includes money in the event. */
+  amountMinor?: bigint | number;
+  currency?: string;
   payload: unknown;
 }
 
@@ -45,6 +60,16 @@ export class WebhookVerificationError extends Error {
   }
 }
 
+/** Honest capability flags — adapters never fake unsupported operations. */
+export interface BillingProviderCapabilities {
+  /** Provider-managed recurring renewals (Stripe/PayPal/Paystack plans). */
+  managedRenewals?: boolean;
+  /** Merchant-initiated charge of a stored authorization. */
+  merchantCharge?: boolean;
+  /** Checkout verification/reconciliation fallback. */
+  reconciliation?: boolean;
+}
+
 export const BILLING_PROVIDER_CAPABILITIES = [
   "checkout",
   "webhook_verification",
@@ -53,6 +78,49 @@ export const BILLING_PROVIDER_CAPABILITIES = [
 ] as const;
 
 export type BillingProviderCapability = (typeof BILLING_PROVIDER_CAPABILITIES)[number];
+
+export interface BillingProvider {
+  readonly name: string;
+  readonly capabilities: readonly BillingProviderCapability[];
+  /** test/live environment this configured instance operates in. */
+  readonly environment: string;
+  /** True when real credentials are configured; false means unusable. */
+  readonly configured: boolean;
+  /** Human-readable configuration blocker when configured is false. */
+  readonly blocker?: string;
+  createCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult>;
+  charge(input: {
+    providerRef: string;
+    amountMinor: bigint | number;
+    currency: string;
+    idempotencyKey: string;
+  }): Promise<{ ok: boolean; providerInvoiceRef?: string; failureReason?: string }>;
+  cancelRemote(providerRef: string): Promise<void>;
+  /**
+   * Verify an inbound webhook and normalize it. Throws
+   * WebhookVerificationError for bad signatures/replays.
+   */
+  verifyWebhook(headers: Record<string, string>, rawBody: string): Promise<ProviderEvent>;
+}
+
+/**
+ * Optional reconciliation seam (Prompt 01 §Reconciliation): providers that
+ * support server-side checkout verification implement this so missed
+ * webhooks can repair state exactly once.
+ */
+export interface ReconcilableBillingProvider extends BillingProvider {
+  verifyCheckout(input: { providerRef: string }): Promise<{
+    paid: boolean;
+    amountMinor?: bigint | number;
+    currency?: string;
+    occurredAt?: string;
+    transactionRef?: string;
+  }>;
+}
+
+export function supportsReconciliation(p: BillingProvider): p is ReconcilableBillingProvider {
+  return typeof (p as ReconcilableBillingProvider).verifyCheckout === "function";
+}
 
 export interface BillingProvider {
   readonly name: string;
@@ -99,6 +167,7 @@ export function safeEqual(a: string, b: string): boolean {
 export class FakeBillingProvider implements BillingProvider {
   readonly name: string;
   readonly capabilities = BILLING_PROVIDER_CAPABILITIES;
+  readonly environment: string;
   readonly configured = true;
 
   private readonly secret: string;
@@ -106,9 +175,10 @@ export class FakeBillingProvider implements BillingProvider {
   private failNextCharge = false;
   private readonly remoteRefs = new Set<string>();
 
-  constructor(name = "fake-gateway", secret = "test-webhook-secret") {
+  constructor(name = "fake-gateway", secret = "test-webhook-secret", environment = "test") {
     this.name = name;
     this.secret = secret;
+    this.environment = environment;
   }
 
   /** Test hook: force the next charge attempt to decline. */
@@ -180,6 +250,7 @@ export class FakeBillingProvider implements BillingProvider {
 export class UnconfiguredBillingProvider implements BillingProvider {
   readonly name: string;
   readonly capabilities = BILLING_PROVIDER_CAPABILITIES;
+  readonly environment = "test";
   readonly configured = false;
   readonly blocker: string;
 

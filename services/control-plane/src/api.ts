@@ -12,6 +12,7 @@ import {
   agentDeployments,
   agentRooms,
   agents,
+  billingProviderConfigs,
   channelConnections,
   channelProviders,
   integrationConnections,
@@ -670,7 +671,188 @@ export function buildApiRouter(deps: ApiDeps): Router {
     }));
   });
 
+  // ---- Mox-admin: payment provider configuration (Prompt 01 §Provider config) ----
+  // Provider enablement, test/live switching and secret refs are Mox-admin
+  // operations. Interim authority = authenticated session of an org
+  // owner/admin; secrets are NEVER accepted or returned — only vault/env
+  // REF names.
+
+  const requireAdminSession = async (ctx: RequestContext) => {
+    const auth = await requireSessionAuth(ctx);
+    // Prompt 01 §Provider config: provider administration is a PLATFORM
+    // authority — an explicit deployment-configured admin list, NOT merely
+    // org owner/admin. Empty list denies everyone (fail-closed).
+    if (!services.config.platformAdminUserIds.includes(auth.userId)) {
+      throw httpError("platform administrator authority required for provider configuration", 403, {
+        code: "role_denied",
+      });
+    }
+    return auth;
+  };
+
+  router.get("/api/admin/billing-providers", async (ctx) => {
+    await requireAdminSession(ctx);
+    const rows = await db().select().from(billingProviderConfigs);
+    return rows.map((row) => ({
+      providerName: row.providerName,
+      environment: row.environment,
+      enabled: row.enabled,
+      displayName: row.displayName,
+      publicConfig: row.publicConfig,
+      supportedCurrencies: row.supportedCurrencies ?? [],
+      supportedRegions: row.supportedRegions ?? [],
+      priority: row.priority,
+      maintenanceMode: row.maintenanceMode,
+      hasSecretRef: Boolean(row.secretRef),
+      hasWebhookSecretRef: Boolean(row.webhookSecretRef),
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  });
+
+  router.put("/api/admin/billing-providers/:name", async (ctx) => {
+    await requireAdminSession(ctx);
+    const name = ctx.params.name!;
+    if (!/^[a-z0-9-]{2,40}$/.test(name)) throw httpError("invalid provider name", 400);
+    const body = ctx.body as {
+      environment?: string;
+      enabled?: boolean;
+      displayName?: string;
+      publicConfig?: Record<string, unknown>;
+      secretRef?: string | null;
+      webhookSecretRef?: string | null;
+      supportedCurrencies?: string[];
+      supportedRegions?: string[];
+      priority?: number;
+      maintenanceMode?: boolean;
+    } | undefined;
+    if (!body?.displayName) throw httpError("displayName is required", 400);
+    const values = {
+      providerName: name,
+      environment: body.environment === "live" ? "live" : "test",
+      enabled: body.enabled === true,
+      displayName: body.displayName,
+      publicConfig: (body.publicConfig ?? {}) as object,
+      // REF NAMES ONLY — a literal secret here would be rejected downstream
+      // by the env resolver failing to find an env var named like a key.
+      secretRef: typeof body.secretRef === "string" ? body.secretRef : null,
+      webhookSecretRef: typeof body.webhookSecretRef === "string" ? body.webhookSecretRef : null,
+      supportedCurrencies: (body.supportedCurrencies ?? []) as unknown as object,
+      supportedRegions: (body.supportedRegions ?? []) as unknown as object,
+      priority: Number(body.priority ?? 100),
+      maintenanceMode: body.maintenanceMode === true,
+      updatedAt: new Date(),
+    };
+    const existing = await db()
+      .select({ id: billingProviderConfigs.id })
+      .from(billingProviderConfigs)
+      .where(eq(billingProviderConfigs.providerName, name))
+      .limit(1);
+    if (existing[0]) {
+      await db().update(billingProviderConfigs).set(values).where(eq(billingProviderConfigs.id, existing[0].id));
+    } else {
+      await db().insert(billingProviderConfigs).values(values);
+    }
+    return {
+      ok: true,
+      note: "provider registered; restart or reconciliation reload activates adapters",
+    };
+  });
+
   // ---- Usage / billing -----------------------------------------------------------
+
+  /**
+   * Prompt 01 §Auth: subscription-changing mutations require BOTH the
+   * `billing` API scope (when PAT) AND real organization billing authority
+   * (owner/admin role). A plain member with a scoped PAT can never alter
+   * the org's subscription; `*` never creates privilege.
+   */
+  const requireBillingManager = async (ctx: RequestContext) => {
+    const auth = await requireAuth(ctx, "billing");
+    if (auth.role !== "owner" && auth.role !== "admin") {
+      throw httpError("organization owner/admin authority required for billing mutations", 403, {
+        code: "role_denied",
+      });
+    }
+    return auth;
+  };
+
+  /** Safe public provider catalog — no secrets, ever. */
+  router.get("/api/billing/providers", async (ctx) => {
+    await requireAuth(ctx);
+    const rows = await db().select().from(billingProviderConfigs);
+    return rows.map((row) => ({
+      providerName: row.providerName,
+      displayName: row.displayName,
+      environment: row.environment,
+      enabled: row.enabled,
+      supportedCurrencies: row.supportedCurrencies ?? [],
+      maintenanceMode: row.maintenanceMode,
+    }));
+  });
+
+  /**
+   * Mox-owned checkout creation (Prompt 01 §Checkout): price/currency are
+   * resolved SERVER-side from PriceBook/PriceVersion; the client cannot
+   * supply amounts, and display-currency games cannot bypass the region.
+   */
+  router.post("/api/billing/checkout", async (ctx) => {
+    const auth = await requireBillingManager(ctx);
+    const body = ctx.body as {
+      planVersionId?: string;
+      pricingRegionCode?: string;
+      providerName?: string;
+      successUrl?: string;
+      cancelUrl?: string;
+    } | undefined;
+    if (!body?.planVersionId || !body?.providerName || !body?.successUrl || !body?.cancelUrl) {
+      throw httpError("planVersionId, providerName, successUrl and cancelUrl are required", 400);
+    }
+    const region = body.pricingRegionCode ?? "GLOBAL";
+    const version = await services.billing.store.getPlanVersion(body.planVersionId);
+    if (!version) throw httpError(`plan version ${body.planVersionId} not found`, 404);
+    const { session } = await services.billing.createCheckout({
+      orgId: auth.orgId,
+      productId: version.productId,
+      planVersionId: body.planVersionId,
+      pricingRegionCode: region,
+      successUrl: body.successUrl,
+      cancelUrl: body.cancelUrl,
+      providerName: body.providerName,
+    });
+    return {
+      sessionId: session.id,
+      providerRef: session.providerRef,
+      redirectUrl: session.redirectUrl,
+      state: session.state,
+    };
+  });
+
+  /** Cancellation is a billing mutation: scope + org authority required. */
+  router.post("/api/billing/cancel", async (ctx) => {
+    const auth = await requireBillingManager(ctx);
+    const sub = await services.billing.getActiveSubscription(auth.orgId);
+    if (!sub) throw httpError("no active subscription for this organization", 404);
+    await services.billing.cancelSubscription(sub.id, {
+      actorType: "user",
+      actorId: auth.userId,
+      reason: "customer_requested",
+    });
+    return { ok: true, subscriptionId: sub.id };
+  });
+
+  /**
+   * Reconciliation fallback for missed webhooks (Prompt 01): verifies with
+   * the provider and repairs state exactly once via the guarded pipeline.
+   */
+  router.post("/api/billing/reconcile", async (ctx) => {
+    const auth = await requireBillingManager(ctx);
+    const body = ctx.body as { sessionId?: string } | undefined;
+    const result = await services.billing.reconcileCheckoutSession({
+      sessionId: body?.sessionId,
+      orgId: auth.orgId,
+    });
+    return result;
+  });
 
   router.get("/api/usage", async (ctx) => {
     const identity = await requireAuth(ctx, "usage");

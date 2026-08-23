@@ -64,6 +64,13 @@
       "when": 1787481368803,
       "tag": "0008_programmatic_auth_00c",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1787493853261,
+      "tag": "0009_payment_providers_01",
+      "breakpoints": true
     }
   ]
 }

@@ -29,6 +29,13 @@ export interface ControlPlaneConfig {
   sessionTtlMs: number;
   /** Optional CORS allowlist for API origins (credentials excluded). */
   corsOrigins: string[];
+  /**
+   * Explicit platform-admin user ids (Prompt 01 §Provider config):
+   * payment-provider administration requires membership in this list.
+   * Org owner/admin alone is NOT platform authority. Empty list = no
+   * provider administration until an operator provisions ids explicitly.
+   */
+  platformAdminUserIds: string[];
 }
 
 function requireValue(env: Record<string, string | undefined>, key: string, purpose: string): string {
@@ -99,6 +106,10 @@ export function loadControlPlaneConfig(
     corsOrigins: (env["MOX_CORS_ORIGINS"] ?? "")
       .split(",")
       .map((o) => o.trim())
+      .filter(Boolean),
+    platformAdminUserIds: (env["MOX_PLATFORM_ADMIN_USER_IDS"] ?? "")
+      .split(",")
+      .map((id) => id.trim())
       .filter(Boolean),
     ...overrides,
   };
