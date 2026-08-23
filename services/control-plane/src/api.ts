@@ -32,8 +32,12 @@ import {
   extractSessionToken,
   hashToken,
   isCookieAuthenticated,
+  issueApiToken,
+  listApiTokens,
   login as loginAccount,
   logout as logoutSession,
+  programmaticLogin,
+  revokeApiToken,
   serializeClearSessionCookie,
   serializeSessionCookie,
   signup as signupAccount,
@@ -59,13 +63,25 @@ export function buildApiRouter(deps: ApiDeps): Router {
       authorization: ctx.req.headers.authorization,
       cookie: ctx.req.headers.cookie,
     });
-    // CSRF defense (Â§B): cookie-authenticated mutations must carry the
+    // CSRF defense (§B): cookie-authenticated mutations must carry the
     // custom header, which cross-site forms cannot set.
     const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes(ctx.req.method ?? "");
     if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
       throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
     }
     return { ...auth.identity, userId: auth.userId, sessionId: auth.sessionId, orgs: auth.orgs };
+  };
+
+  /** Node-channel auth (Prompt 00C §E): durable agent token per node. */
+  const requireNodeAuth = async (ctx: RequestContext) => {
+    const agentToken = bearer(ctx.req.headers.authorization ?? "");
+    if (!agentToken) throw httpError("node authentication required", 401, { code: "unauthenticated" });
+    const nodeId = ctx.params.nodeId!;
+    try {
+      return { node: await services.orchestrator.authenticateNode(nodeId, agentToken) };
+    } catch {
+      throw httpError("node authentication failed", 403, { code: "node_auth_failed" });
+    }
   };
 
   const sessionCookieOptions = () => ({
@@ -116,6 +132,11 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   // ---- Auth / identity ---------------------------------------------------------
 
+  /**
+   * Prompt 00C §A: browser signup/login return identity + expiry metadata
+   * ONLY. The reusable session credential travels exclusively in the
+   * HttpOnly cookie — never in JSON, for any client.
+   */
   router.post("/api/auth/signup", async (ctx) => {
     const body = ctx.body as { email?: string; password?: string; displayName?: string; orgName?: string } | undefined;
     if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
@@ -128,7 +149,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
       meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
     });
     ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
-    return toAuthResponse(result);
+    return toBrowserAuthResponse(result);
   });
 
   router.post("/api/auth/login", async (ctx) => {
@@ -141,7 +162,66 @@ export function buildApiRouter(deps: ApiDeps): Router {
       meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
     });
     ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
-    return toAuthResponse(result);
+    return toBrowserAuthResponse(result);
+  });
+
+  /**
+   * Prompt 00C §B: dedicated programmatic token-login — password → scoped
+   * personal API access token (bearer). Never sets a cookie and is the only
+   * password→bearer exchange.
+   */
+  router.post("/api/auth/token-login", async (ctx) => {
+    const body = ctx.body as { email?: string; password?: string; name?: string; scopes?: string[] } | undefined;
+    if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    const result = await programmaticLogin({
+      db: db(),
+      email: body.email,
+      password: body.password,
+      name: body.name,
+      scopes: body.scopes,
+    });
+    return toProgrammaticAuthResponse(result);
+  });
+
+  /** Personal access token management (authenticated; plaintext shown once at creation). */
+  router.post("/api/auth/tokens", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const body = ctx.body as { name?: string; scopes?: string[] } | undefined;
+    if (!body?.name) throw httpError("name is required", 400);
+    const issued = await issueApiToken({
+      db: db(),
+      userId: auth.userId,
+      activeOrgId: auth.orgId,
+      name: body.name,
+      scopes: body.scopes,
+    });
+    return {
+      token: issued.token,
+      tokenId: issued.tokenId,
+      scopes: issued.scopes,
+      expiresAt: issued.expiresAt.toISOString(),
+    };
+  });
+
+  router.get("/api/auth/tokens", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const tokens = await listApiTokens(db(), auth.userId);
+    return tokens.map((t) => ({
+      id: t.id,
+      name: t.name,
+      scopes: t.scopes,
+      expiresAt: t.expiresAt.toISOString(),
+      revokedAt: t.revokedAt?.toISOString(),
+      createdAt: t.createdAt.toISOString(),
+      lastUsedAt: t.lastUsedAt?.toISOString(),
+    }));
+  });
+
+  router.delete("/api/auth/tokens/:tokenId", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const revoked = await revokeApiToken(db(), auth.userId, ctx.params.tokenId!);
+    if (!revoked) throw httpError(`api token ${ctx.params.tokenId} not found or already revoked`, 404);
+    return { ok: true };
   });
 
   router.post("/api/auth/logout", async (ctx) => {
@@ -159,15 +239,20 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { ...auth, orgs: auth.orgs };
   });
 
-  /** Membership-verified active-org switch (Â§C). */
+  /** Membership-verified active-org switch (§C). */
   router.post("/api/auth/orgs/select", async (ctx) => {
-    await requireAuth(ctx);
+    const auth = await requireAuth(ctx);
+    void auth;
     const token = extractSessionToken({ authorization: ctx.req.headers.authorization, cookie: ctx.req.headers.cookie });
     if (!token) throw httpError("authentication required", 401);
     const body = ctx.body as { orgId?: string } | undefined;
     if (!body?.orgId) throw httpError("orgId is required", 400);
     const result = await switchActiveOrg(db(), token, body.orgId);
-    return toAuthResponse(result);
+    // Cookie-only contract here as well: no bearer material in the response.
+    return toBrowserAuthResponse({
+      ...result,
+      expiresAt: new Date(Date.now() + services.config.sessionTtlMs),
+    });
   });
 
   // ---- Agents ---------------------------------------------------------------
@@ -660,14 +745,27 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { ok: true };
   });
 
-  router.get("/node/:nodeId/commands", async (_ctx) => {
-    // Command dispatch arrives with the deployment reconciliation prompt;
-    // an authenticated empty queue is the honest current truth.
+  router.get("/node/:nodeId/commands", async (ctx) => {
+    // Prompt 00C §E: command polling requires the node's durable agent
+    // token; a token for another node grants nothing and no metadata leaks
+    // without authentication.
+    const auth = await requireNodeAuth(ctx);
+    if (auth.node.nodeId !== ctx.params.nodeId) {
+      throw httpError("node token does not match this node", 403, { code: "node_mismatch" });
+    }
+    // Durable command dispatch arrives with the deployment reconciliation
+    // prompt; an authenticated EMPTY queue is the honest current truth —
+    // no replay-protection claims are made for a queue that does not exist.
     return [];
   });
 
+  /**
+   * Payment provider webhook (Prompt 00C §D): signature verification runs
+   * over the EXACT original request bytes — the parsed JSON is never
+   * re-serialized. Raw bodies are never logged.
+   */
   router.post("/webhooks/billing/:provider", async (ctx) => {
-    const raw = typeof ctx.body === "string" ? ctx.body : JSON.stringify(ctx.body ?? {});
+    const raw = ctx.rawBody?.toString("utf8") ?? "";
     return services.billing.handleProviderWebhook(ctx.params.provider!, ctx.req.headers as Record<string, string>, raw);
   });
 
@@ -678,19 +776,39 @@ function bearer(header: string): string {
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
 }
 
-/** Maps an auth result onto the shared wire contract. */
-function toAuthResponse(result: {
+/**
+ * Browser auth response (Prompt 00C §A): identity, orgs and session expiry
+ * metadata ONLY — the type deliberately has no field that could carry the
+ * reusable credential, so a token can never leak back into JSON.
+ */
+function toBrowserAuthResponse(result: {
   identity: SessionIdentity;
   orgs: Array<{ orgId: string; slug: string; displayName: string; role: string }>;
-  sessionToken?: string;
   expiresAt?: Date;
 }) {
   return {
     ...result.identity,
     orgs: result.orgs,
-    ...(result.sessionToken
-      ? { sessionToken: result.sessionToken, expiresAt: (result.expiresAt ?? new Date()).toISOString() }
-      : {}),
+    expiresAt: (result.expiresAt ?? new Date(Date.now() + 12 * 3600_000)).toISOString(),
+  };
+}
+
+/** Programmatic auth response (00C §B): the ONLY shape bearing bearer material. */
+function toProgrammaticAuthResponse(result: {
+  identity: SessionIdentity;
+  orgs: Array<{ orgId: string; slug: string; displayName: string; role: string }>;
+  token: string;
+  tokenId: string;
+  scopes: string[];
+  expiresAt: Date;
+}) {
+  return {
+    ...result.identity,
+    orgs: result.orgs,
+    token: result.token,
+    tokenId: result.tokenId,
+    scopes: result.scopes,
+    expiresAt: result.expiresAt.toISOString(),
   };
 }
 

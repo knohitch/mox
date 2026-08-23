@@ -74,6 +74,35 @@ export const platformSetup = pgTable("platform_setup", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Personal/API access tokens for CLI and programmatic clients
+ * (Prompt 00C §B): a SEPARATE contract from browser cookie sessions.
+ * Only the sha256 hash is stored; tokens carry scopes, an explicit expiry
+ * and revocation, and never ride the browser login response.
+ */
+export const apiTokens = pgTable(
+  "api_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    /** Wildcard "*" grants full user authority; otherwise exact strings. */
+    scopes: jsonb("scopes").notNull().default(["*"]),
+    activeOrgId: uuid("active_org_id").references(() => organizations.id, { onDelete: "set null" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("api_tokens_token_hash_key").on(t.tokenHash),
+    index("api_tokens_user_idx").on(t.userId),
+  ],
+);
+
 export const externalIdentities = pgTable(
   "external_identities",
   {

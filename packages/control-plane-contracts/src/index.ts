@@ -29,14 +29,39 @@ export interface MeResponse extends SessionIdentity {
 }
 
 /**
- * POST /api/auth/login | /api/auth/signup — session establishment. The
- * session token rides an HttpOnly cookie; `sessionToken` is additionally
- * returned for non-browser clients (CLI, Mox Node tooling) and must never
- * be persisted by browsers.
+ * POST /api/auth/login | /api/auth/signup | /api/auth/orgs/select — the
+ * BROWSER auth contract (Prompt 00C §A). Identity + expiry metadata only:
+ * the reusable session credential travels exclusively in the HttpOnly
+ * cookie and can NEVER appear in this JSON.
  */
-export interface AuthSessionResponse extends MeResponse {
-  sessionToken: string;
+export type BrowserAuthResponse = MeResponse & { expiresAt: string };
+
+/**
+ * POST /api/auth/token-login and POST /api/auth/tokens — the PROGRAMMATIC
+ * contract (Prompt 00C §B): the only responses that carry bearer material.
+ * CLI/automation clients persist these themselves; browsers never call them.
+ */
+export interface ProgrammaticAuthResponse extends MeResponse {
+  token: string;
+  tokenId?: string;
+  scopes: string[];
   expiresAt: string;
+}
+
+/** POST /api/auth/tokens — create a personal access token. */
+export interface CreateApiTokenRequest {
+  name: string;
+  scopes?: string[];
+}
+
+export interface ApiTokenMetadata {
+  id: string;
+  name: string;
+  scopes: string[];
+  expiresAt: string;
+  revokedAt?: string;
+  createdAt: string;
+  lastUsedAt?: string;
 }
 
 export interface LoginRequest {
@@ -48,6 +73,12 @@ export interface SignupRequest {
   password: string;
   displayName?: string;
   orgName?: string;
+}
+
+/** POST /api/auth/token-login request (programmatic contract, 00C §B). */
+export interface TokenLoginRequest extends LoginRequest {
+  name?: string;
+  scopes?: string[];
 }
 
 /** POST /api/auth/orgs/select — membership-verified active-org switch. */
@@ -94,7 +125,7 @@ export interface OrgEventFrame {
 }
 
 /**
- * Standard header the control plane requires on every authenticated call.
- * Bearer <sessionToken>.
+ * Header the control plane requires on cookie-authenticated mutations
+ * (CSRF defense). Non-browser bearer clients may send it too.
  */
-export const SESSION_AUTH_HEADER = "authorization";
+export const CSRF_HEADER = "x-mox-csrf";

@@ -13,13 +13,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 $pgBin = Split-Path -Parent (Get-Command psql).Source
-$port = 5433
+# Pick a FREE ephemeral port: other local clusters may already occupy 5433.
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+$listener.Start()
+$port = $listener.LocalEndpoint.Port
+$listener.Stop()
 $dataDir = Join-Path $env:TEMP ("mox-pgverify-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $logFile = Join-Path $dataDir "pg.log"
 $pwFile = Join-Path $env:TEMP "mox-pgverify-pw.txt"
 
-Write-Host "== Prompt 00B PostgreSQL verification =="
+Write-Host "== Prompt 00B/00C PostgreSQL verification =="
 Write-Host "bin:      $pgBin"
+Write-Host "port:     $port"
 Write-Host "data dir: $dataDir"
 
 try {
@@ -29,7 +34,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "initdb failed" }
 
     & (Join-Path $pgBin "pg_ctl.exe") -D $dataDir -o "-p $port -c listen_addresses=127.0.0.1" -l $logFile start
-    if ($LASTEXITCODE -ne 0) { throw "pg_ctl start failed" }
+    if ($LASTEXITCODE -ne 0) { throw "pg_ctl start failed (see $logFile)" }
 
     # Wait for readiness.
     $ready = $false

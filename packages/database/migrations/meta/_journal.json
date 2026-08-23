@@ -57,6 +57,13 @@
       "when": 1787445125461,
       "tag": "0007_auth_security_00b",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787481368803,
+      "tag": "0008_programmatic_auth_00c",
+      "breakpoints": true
     }
   ]
 }

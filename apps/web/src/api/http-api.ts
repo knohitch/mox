@@ -13,7 +13,15 @@
  */
 
 import type { AgentDeployment, AgentEvent, AgentRoom, ApprovalRequest } from "@mox/contracts";
-import type { AuthSessionResponse, LoginRequest, MeResponse, SignupRequest } from "@mox/control-plane-contracts";
+import type {
+  ApiTokenMetadata,
+  BrowserAuthResponse,
+  CreateApiTokenRequest,
+  LoginRequest,
+  MeResponse,
+  ProgrammaticAuthResponse,
+  SignupRequest,
+} from "@mox/control-plane-contracts";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
 import type {
   AgentSummary,
@@ -32,12 +40,15 @@ import type {
 export interface HttpMoxApiOptions {
   baseUrl: string;
   /**
-   * Optional bearer-token source for non-browser clients. Browsers omit it
-   * and authenticate via the HttpOnly session cookie.
+   * Optional bearer-token source for non-browser clients (personal API
+   * access tokens, 00C §B). Browsers omit it and authenticate via the
+   * HttpOnly session cookie exclusively (00C §A).
    */
   tokenProvider?: () => Promise<string>;
   fetchImpl?: typeof fetch;
   realtime?: RealtimeTransport;
+  /** Injected in tests; defaults to the browser location when present. */
+  currentOrigin?: string;
 }
 
 interface ApiErrorBody {
@@ -51,6 +62,17 @@ export class ApiUnavailableError extends Error {}
 /** Header required on cookie-authenticated mutations (CSRF defense). */
 export const CSRF_HEADER = "x-mox-csrf";
 
+/**
+ * Prompt 00C §C: cross-origin is determined by comparing REAL origins —
+ * never by host-name heuristics like "is localhost".
+ */
+function detectCrossOrigin(baseUrl: string, injectedOrigin?: string): boolean {
+  const target = new URL(baseUrl).origin;
+  if (injectedOrigin !== undefined) return new URL(injectedOrigin).origin !== target;
+  if (typeof location !== "undefined" && location.origin) return location.origin !== target;
+  return false; // non-browser default: same-host tooling
+}
+
 export class HttpMoxApi implements MoxApi {
   readonly realtime: RealtimeTransport;
   private readonly baseUrl: string;
@@ -61,13 +83,17 @@ export class HttpMoxApi implements MoxApi {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.tokenProvider = options.tokenProvider;
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
-    const crossOrigin = !/^https?:\/\/[^/]*localhost(:\d+)?/i.test(this.baseUrl);
     this.realtime =
-      options.realtime ?? new SseRealtimeTransport(this.baseUrl, crossOrigin);
+      options.realtime ?? new SseRealtimeTransport(this.baseUrl, detectCrossOrigin(this.baseUrl, options.currentOrigin));
   }
 
   get isBrowserCookieAuth(): boolean {
     return this.tokenProvider === undefined;
+  }
+
+  /** True when the API lives on a different origin than the web app. */
+  get crossOrigin(): boolean {
+    return detectCrossOrigin(this.baseUrl, typeof location !== "undefined" ? location.origin : undefined);
   }
 
   private async call<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -111,21 +137,21 @@ export class HttpMoxApi implements MoxApi {
     return (await res.json()) as T;
   }
 
-  // ---- Account auth ------------------------------------------------------------
+  // ---- Account auth (browser contract: cookie-only, Prompt 00C §A) ---------------
 
   me(): Promise<MeResponse> {
     return this.call<MeResponse>("/api/me");
   }
 
-  login(input: LoginRequest): Promise<AuthSessionResponse> {
-    return this.call<AuthSessionResponse>("/api/auth/login", {
+  login(input: LoginRequest): Promise<BrowserAuthResponse> {
+    return this.call<BrowserAuthResponse>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ email: input.email, password: input.password }),
     });
   }
 
-  signup(input: SignupRequest): Promise<AuthSessionResponse> {
-    return this.call<AuthSessionResponse>("/api/auth/signup", {
+  signup(input: SignupRequest): Promise<BrowserAuthResponse> {
+    return this.call<BrowserAuthResponse>("/api/auth/signup", {
       method: "POST",
       body: JSON.stringify({
         email: input.email,
@@ -140,10 +166,37 @@ export class HttpMoxApi implements MoxApi {
     return this.call<{ ok: boolean }>("/api/auth/logout", { method: "POST", body: "{}" }).then(() => undefined);
   }
 
-  selectOrg(orgId: string): Promise<AuthSessionResponse> {
-    return this.call<AuthSessionResponse>("/api/auth/orgs/select", {
+  selectOrg(orgId: string): Promise<BrowserAuthResponse> {
+    return this.call<BrowserAuthResponse>("/api/auth/orgs/select", {
       method: "POST",
       body: JSON.stringify({ orgId }),
+    });
+  }
+
+  // ---- Personal access tokens (programmatic contract, Prompt 00C §B) --------------
+
+  createApiToken(input: CreateApiTokenRequest): Promise<ProgrammaticAuthResponse> {
+    return this.call<ProgrammaticAuthResponse>("/api/auth/tokens", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  listApiTokens(): Promise<ApiTokenMetadata[]> {
+    return this.call<ApiTokenMetadata[]>("/api/auth/tokens");
+  }
+
+  revokeApiToken(tokenId: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/auth/tokens/${encodeURIComponent(tokenId)}`, {
+      method: "DELETE",
+    }).then(() => undefined);
+  }
+
+  /** Programmatic login: the ONLY password→bearer exchange (00C §B). */
+  tokenLogin(input: { email: string; password: string; name?: string; scopes?: string[] }): Promise<ProgrammaticAuthResponse> {
+    return this.call<ProgrammaticAuthResponse>("/api/auth/token-login", {
+      method: "POST",
+      body: JSON.stringify(input),
     });
   }
 

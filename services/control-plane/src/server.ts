@@ -9,7 +9,7 @@ import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import { AuthError } from "./auth.js";
 import { buildApiRouter } from "./api.js";
-import { httpError, readJsonBody, requestLogLine, Router, sendJson } from "./http.js";
+import { httpError, readRawBody, requestLogLine, Router, sendJson, tryParseJson } from "./http.js";
 
 export interface RunningControlPlane {
   server: Server;
@@ -63,15 +63,19 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
         // Distinguish "unknown path" from "wrong method" honestly.
         throw httpError(`no route for ${req.method} ${parsed.pathname}`, 404);
       }
-      const body = ["POST", "PATCH", "PUT"].includes(req.method ?? "")
-        ? await readJsonBody(req)
-        : undefined;
+      let rawBody: Buffer | undefined;
+      if (["POST", "PATCH", "PUT"].includes(req.method ?? "")) {
+        // Prompt 00C §D: exact bytes captured BEFORE any parsing so webhook
+        // signature verification sees the untouched payload.
+        rawBody = await readRawBody(req);
+      }
       const result = await match.handler({
         req,
         res,
         params: match.params,
         query: parsed.searchParams,
-        body,
+        body: tryParseJson(rawBody),
+        rawBody,
       });
       if (result !== undefined && !res.writableEnded) {
         sendJson(res, 200, result);
@@ -84,18 +88,21 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
   }
 
   /**
-   * Narrow CORS (Prompt 00B §B): no cross-origin API access by default;
-   * explicit allowlist only. Credentials are never granted cross-origin —
-   * browser clients must be same-origin (cookie security model).
+   * Prompt 00C §C: explicit allowlisted-origin topology. For exact matches
+   * the server echoes the origin and grants credentials; there is no
+   * wildcard, ever. Subdomain splits (app./api. on one registrable domain)
+   * work with SameSite=Lax cookies because they are same-site.
    */
   function applyCors(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): void {
     const origin = req.headers.origin;
+    res.setHeader("vary", "Origin");
     if (!origin || services.config.corsOrigins.length === 0) return;
     if (services.config.corsOrigins.includes(origin)) {
       res.setHeader("access-control-allow-origin", origin);
+      res.setHeader("access-control-allow-credentials", "true");
       res.setHeader("access-control-allow-methods", "GET,POST,PATCH,DELETE,OPTIONS");
-      res.setHeader("access-control-allow-headers", "content-type,x-mox-csrf");
-      res.setHeader("vary", "Origin");
+      res.setHeader("access-control-allow-headers", "content-type,x-mox-csrf,authorization");
+      res.setHeader("access-control-max-age", "600");
     }
   }
 

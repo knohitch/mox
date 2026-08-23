@@ -11,7 +11,14 @@ export interface RequestContext {
   res: ServerResponse;
   params: Record<string, string>;
   query: URLSearchParams;
+  /** Parsed JSON when content-type is JSON and the body is valid JSON. */
   body: unknown;
+  /**
+   * EXACT original request bytes (Prompt 00C §D): signature verification
+   * (payment webhooks, provider callbacks) must run over the untouched
+   * payload — never over a re-serialization of parsed JSON.
+   */
+  rawBody?: Buffer;
 }
 
 export type Handler = (ctx: RequestContext) => Promise<unknown> | unknown;
@@ -76,7 +83,12 @@ export class Router {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
-export function readJsonBody(req: IncomingMessage): Promise<unknown> {
+/**
+ * Reads the EXACT raw body bytes with a hard size limit (Prompt 00C §D).
+ * JSON parsing happens separately so webhook handlers can verify
+ * signatures over byte-identical payloads.
+ */
+export function readRawBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -89,16 +101,19 @@ export function readJsonBody(req: IncomingMessage): Promise<unknown> {
       }
       chunks.push(chunk);
     });
-    req.on("end", () => {
-      if (chunks.length === 0) return resolve(undefined);
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch {
-        reject(Object.assign(new Error("invalid JSON body"), { status: 400 }));
-      }
-    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+/** Best-effort JSON parse; never throws for non-JSON bodies. */
+export function tryParseJson(raw: Buffer | undefined): unknown {
+  if (!raw || raw.length === 0) return undefined;
+  try {
+    return JSON.parse(raw.toString("utf8"));
+  } catch {
+    return undefined;
+  }
 }
 
 export function sendJson(res: ServerResponse, status: number, payload: unknown): void {

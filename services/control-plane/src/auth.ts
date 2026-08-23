@@ -1,24 +1,31 @@
 /**
- * Server-authoritative account authentication (Prompt 00B §A/§B/§C).
+ * Server-authoritative account authentication (Prompt 00B §A/§B/§C and
+ * 00C §A/§B).
  *
  * Design:
  * - Real per-user accounts: signup + password login (scrypt verifiers in
  *   `auth_credentials`), logout, expiry and explicit revocation.
  * - Browser sessions ride an HttpOnly cookie (Secure in production,
- *   SameSite=Lax). The random session token NEVER touches localStorage;
- *   only its sha256 hash is stored server-side.
+ *   SameSite=Lax). The random session token NEVER appears in a JSON
+ *   response (00C §A) and never touches client storage; only its sha256
+ *   hash is stored server-side.
+ * - CLI/programmatic clients use a SEPARATE contract: personal API access
+ *   tokens (`api_tokens`, hashed at rest, scoped, expiring, revocable)
+ *   issued via token-login or the authenticated token-management endpoints
+ *   — browser cookie login never returns bearer material (00C §B).
  * - One-time platform bootstrap: a server-side setup credential may create
  *   exactly the designated owner once; setup then closes permanently. It is
  *   never a reusable login path and never selects an "arbitrary first user".
- * - Multi-org: the active org lives ON the session row and changes only
- *   through a membership-verified switch endpoint. Client-supplied org ids
- *   are never trusted.
+ * - Multi-org: the active org lives ON the session/token row and changes
+ *   only through a membership-verified switch endpoint. Client-supplied org
+ *   ids are never trusted.
  */
 
 import { createHash, randomBytes } from "node:crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import type { MoxDb } from "@mox/database";
 import {
+  apiTokens,
   authCredentials,
   authSessions,
   memberships,
@@ -37,6 +44,9 @@ export class AuthError extends Error {
     super(message);
   }
 }
+
+/** The channel that authenticated the current request (Prompt 00C §B). */
+export type AuthKind = "session" | "api_token";
 
 export const SESSION_COOKIE = "mox_session";
 
@@ -93,6 +103,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export interface IdentityResult {
   userId: string;
   sessionId: string;
+  /** Which contract authenticated this request (00C §B). */
+  authKind: AuthKind;
+  /** Scopes for api_token auth; ["*"] for sessions. */
+  scopes: string[];
   identity: SessionIdentity;
   orgs: Array<{ orgId: string; slug: string; displayName: string; role: string }>;
 }
@@ -174,10 +188,14 @@ export const DEFAULT_SESSION_TTL_MS = 12 * 3600_000;
 function toIdentityResult(
   loaded: Awaited<ReturnType<typeof loadIdentity>>,
   sessionId: string,
+  authKind: AuthKind = "session",
+  scopes: string[] = ["*"],
 ): IdentityResult {
   return {
     userId: loaded.userId,
     sessionId,
+    authKind,
+    scopes,
     identity: {
       userId: loaded.userId,
       email: loaded.email,
@@ -189,6 +207,111 @@ function toIdentityResult(
     },
     orgs: loaded.orgs,
   };
+}
+
+// ---- Personal/API access tokens (Prompt 00C §B) --------------------------------
+
+export interface IssuedApiToken {
+  tokenId: string;
+  /** Plaintext, returned exactly once at creation. */
+  token: string;
+  expiresAt: Date;
+  scopes: string[];
+}
+
+export const DEFAULT_API_TOKEN_TTL_MS = 30 * 24 * 3600_000;
+
+/** Issues a personal/API access token for a user; plaintext shown once. */
+export async function issueApiToken(input: {
+  db: MoxDb;
+  userId: string;
+  activeOrgId: string;
+  name: string;
+  scopes?: string[];
+  ttlMs?: number;
+}): Promise<IssuedApiToken> {
+  if (!input.name || input.name.trim().length === 0) throw new AuthError("token name is required", 400);
+  const scopes = input.scopes && input.scopes.length > 0 ? [...new Set(input.scopes)] : ["*"];
+  for (const scope of scopes) {
+    if (!/^(\*|agents|threads|servers|billing|models|integrations|channels|usage|settings|approvals|admin)$/.test(scope)) {
+      throw new AuthError(`unknown scope: ${scope}`, 400);
+    }
+  }
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? DEFAULT_API_TOKEN_TTL_MS));
+  const token = `mox_pat_${randomBytes(32).toString("base64url")}`;
+  const inserted = await input.db
+    .insert(apiTokens)
+    .values({
+      userId: input.userId,
+      name: input.name.trim(),
+      tokenHash: hashToken(token),
+      scopes,
+      activeOrgId: input.activeOrgId,
+      expiresAt,
+    })
+    .returning({ id: apiTokens.id });
+  if (!inserted[0]) throw new AuthError("api token persistence failed", 500);
+  return { tokenId: inserted[0].id, token, expiresAt, scopes };
+}
+
+export interface ApiTokenMetadata {
+  id: string;
+  name: string;
+  scopes: string[];
+  expiresAt: Date;
+  revokedAt?: Date;
+  createdAt: Date;
+  lastUsedAt?: Date;
+}
+
+export async function listApiTokens(db: MoxDb, userId: string): Promise<ApiTokenMetadata[]> {
+  const rows = await db.select().from(apiTokens).where(eq(apiTokens.userId, userId));
+  return rows
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      scopes: (row.scopes ?? []) as string[],
+      expiresAt: row.expiresAt,
+      revokedAt: row.revokedAt ?? undefined,
+      createdAt: row.createdAt,
+      lastUsedAt: row.lastUsedAt ?? undefined,
+    }))
+    .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+}
+
+export async function revokeApiToken(db: MoxDb, userId: string, tokenId: string): Promise<boolean> {
+  const updated = await db
+    .update(apiTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(apiTokens.id, tokenId), eq(apiTokens.userId, userId), isNull(apiTokens.revokedAt)))
+    .returning({ id: apiTokens.id });
+  return updated.length > 0;
+}
+
+/**
+ * Dedicated programmatic login (00C §B): password → API access token.
+ * Never sets a cookie, never creates a browser session, and is the ONLY
+ * password→bearer exchange in the system.
+ */
+export async function programmaticLogin(input: {
+  db: MoxDb;
+  email: string;
+  password: string;
+  name?: string;
+  scopes?: string[];
+  ttlMs?: number;
+}): Promise<IdentityResult & IssuedApiToken> {
+  const credentials = await verifyCredentials(input.db, input.email, input.password);
+  const issued = await issueApiToken({
+    db: input.db,
+    userId: credentials.userId,
+    activeOrgId: credentials.activeOrgId,
+    name: input.name?.trim() || "programmatic",
+    scopes: input.scopes,
+    ttlMs: input.ttlMs,
+  });
+  const result = await authenticateByBearer(input.db, issued.token);
+  return { ...result, ...issued };
 }
 
 /**
@@ -276,11 +399,17 @@ export async function signup(input: {
       .values({ email: input.email.toLowerCase(), displayName: input.displayName ?? input.email.split("@")[0] })
       .returning();
     if (!user) throw new AuthError("signup failed", 500);
-    // Slug uniqueness without leaking existence via retries.
+    // Prompt 00C §F: PostgreSQL-safe bounded slug allocation —
+    // ON CONFLICT DO NOTHING ... RETURNING never aborts the transaction on
+    // a unique violation; collisions retry with a random suffix.
     let org: typeof organizations.$inferSelect | undefined;
     for (let attempt = 0; attempt < 5 && !org; attempt += 1) {
       const slug = attempt === 0 ? slugBase : `${slugBase}-${randomBytes(2).toString("hex")}`;
-      const insertedOrg = await tx.insert(organizations).values({ slug, displayName: orgName }).returning();
+      const insertedOrg = await tx
+        .insert(organizations)
+        .values({ slug, displayName: orgName })
+        .onConflictDoNothing({ target: organizations.slug })
+        .returning();
       org = insertedOrg[0];
     }
     if (!org) throw new AuthError("could not allocate workspace slug", 500);
@@ -298,47 +427,53 @@ export async function signup(input: {
   };
 }
 
+/** Precomputed verifier of an unrecordable random password (timing equalizer). */
+const DUMMY_HASH =
+  "scrypt$32768$8$1$74696d696e672d657175616c697a6572$" +
+  "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==";
+
+/** Shared credential verification with constant-shape unknown-email behavior. */
+async function verifyCredentials(
+  db: MoxDb,
+  email: string,
+  password: string,
+): Promise<{ userId: string; activeOrgId: string }> {
+  if (!email) throw new AuthError("email and password are required", 400);
+  const userRows = await db.select().from(users).where(eq(users.email, email.toLowerCase())).limit(1);
+  const user = userRows[0];
+  // Constant-shape behavior: unknown emails cost roughly one KDF run too.
+  const credentialRows = user
+    ? await db.select().from(authCredentials).where(eq(authCredentials.userId, user.id)).limit(1)
+    : [];
+  const encoded = credentialRows[0]?.passwordHash;
+  const ok = encoded ? await verifyPassword(password, encoded) : await verifyPassword(password, DUMMY_HASH);
+  if (!user || !ok) throw new AuthError("invalid credentials", 401);
+
+  const membershipRows = await db
+    .select({ orgId: memberships.orgId })
+    .from(memberships)
+    .where(eq(memberships.userId, user.id))
+    .limit(1);
+  if (!membershipRows[0]) throw new AuthError("user has no organization membership", 403);
+  return { userId: user.id, activeOrgId: membershipRows[0].orgId };
+}
+
+/** Browser login: password → HttpOnly cookie session (00C §A). */
 export async function login(input: {
   db: MoxDb;
   email: string;
   password: string;
   meta?: { ipAddress?: string; userAgent?: string };
 }): Promise<IdentityResult & { sessionToken: string; expiresAt: Date }> {
-  if (!input.email) throw new AuthError("email and password are required", 400);
-  const userRows = await input.db
-    .select()
-    .from(users)
-    .where(eq(users.email, input.email.toLowerCase()))
-    .limit(1);
-  const user = userRows[0];
-  // Constant-shape behavior: unknown emails cost roughly one KDF run too.
-  const credentialRows = user
-    ? await input.db.select().from(authCredentials).where(eq(authCredentials.userId, user.id)).limit(1)
-    : [];
-  const encoded = credentialRows[0]?.passwordHash;
-  const ok = encoded ? await verifyPassword(input.password, encoded) : await verifyPassword(input.password, DUMMY_HASH);
-  if (!user || !ok) throw new AuthError("invalid credentials", 401);
-
-  const membershipRows = await input.db
-    .select({ orgId: memberships.orgId })
-    .from(memberships)
-    .where(eq(memberships.userId, user.id))
-    .limit(1);
-  if (!membershipRows[0]) throw new AuthError("user has no organization membership", 403);
-
-  const session = await issueSession(input.db, user.id, membershipRows[0].orgId, input.meta ?? {});
-  const loaded = await loadIdentity(input.db, user.id, membershipRows[0].orgId);
+  const credentials = await verifyCredentials(input.db, input.email, input.password);
+  const session = await issueSession(input.db, credentials.userId, credentials.activeOrgId, input.meta ?? {});
+  const loaded = await loadIdentity(input.db, credentials.userId, credentials.activeOrgId);
   return {
     ...toIdentityResult(loaded, session.sessionId),
     sessionToken: session.sessionToken,
     expiresAt: session.expiresAt,
   };
 }
-
-/** Precomputed verifier of an unrecordable random password (timing equalizer). */
-const DUMMY_HASH =
-  "scrypt$32768$8$1$74696d696e672d657175616c697a6572$" +
-  "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==";
 
 export async function logout(db: MoxDb, sessionToken: string): Promise<void> {
   if (!sessionToken) return;
@@ -377,20 +512,61 @@ export function isCookieAuthenticated(headers: { authorization?: string | undefi
   return !bearerFrom(headers.authorization) && tokenFromCookieHeader(headers.cookie) !== "";
 }
 
+/**
+ * Resolves a bearer token from EITHER contract: a browser session token or
+ * a personal/API access token (00C §B). API tokens carry scopes and their
+ * own expiry/revocation; both record which channel authenticated.
+ */
+export async function authenticateByBearer(db: MoxDb, bearerToken: string): Promise<IdentityResult> {
+  if (!bearerToken) throw new AuthError("authentication required");
+  const tokenHash = hashToken(bearerToken);
+
+  const sessionRows = await db
+    .select()
+    .from(authSessions)
+    .where(
+      and(eq(authSessions.tokenHash, tokenHash), isNull(authSessions.revokedAt), gt(authSessions.expiresAt, new Date())),
+    )
+    .limit(1);
+  const session = sessionRows[0];
+  if (session) {
+    return toIdentityResult(await loadIdentity(db, session.userId, session.activeOrgId), session.id, "session", ["*"]);
+  }
+
+  const apiTokenRows = await db
+    .select()
+    .from(apiTokens)
+    .where(
+      and(eq(apiTokens.tokenHash, tokenHash), isNull(apiTokens.revokedAt), gt(apiTokens.expiresAt, new Date())),
+    )
+    .limit(1);
+  const apiToken = apiTokenRows[0];
+  if (apiToken) {
+    // Touch last_used_at without blocking identity resolution on failure.
+    await db.update(apiTokens).set({ lastUsedAt: new Date() }).where(eq(apiTokens.id, apiToken.id)).catch(() => undefined);
+    const scopes = ((apiToken.scopes ?? []) as string[]).length > 0 ? ((apiToken.scopes ?? []) as string[]) : ["*"];
+    return toIdentityResult(await loadIdentity(db, apiToken.userId, apiToken.activeOrgId), apiToken.id, "api_token", scopes);
+  }
+
+  throw new AuthError("credential invalid or expired");
+}
+
 /** Authenticates a request and loads authoritative user/org identity. */
 export async function authenticate(db: MoxDb, headers: {
   authorization?: string | undefined;
   cookie?: string | undefined;
 }): Promise<IdentityResult> {
-  const token = extractSessionToken(headers);
-  if (!token) throw new AuthError("authentication required");
+  const bearer = bearerFrom(headers.authorization);
+  if (bearer) return authenticateByBearer(db, bearer);
+  const cookieToken = tokenFromCookieHeader(headers.cookie);
+  if (!cookieToken) throw new AuthError("authentication required");
 
   const sessionRows = await db
     .select()
     .from(authSessions)
     .where(
       and(
-        eq(authSessions.tokenHash, hashToken(token)),
+        eq(authSessions.tokenHash, hashToken(cookieToken)),
         isNull(authSessions.revokedAt),
         gt(authSessions.expiresAt, new Date()),
       ),
@@ -402,27 +578,27 @@ export async function authenticate(db: MoxDb, headers: {
   return toIdentityResult(await loadIdentity(db, session.userId, session.activeOrgId), session.id);
 }
 
-/** Membership-verified active-org switch (§C). */
+/** Membership-verified active-org switch (§C of 00B; 00C §B for tokens). */
 export async function switchActiveOrg(
   db: MoxDb,
   sessionToken: string,
   targetOrgId: string,
 ): Promise<IdentityResult> {
-  const current = await authenticate(db, { authorization: `Bearer ${sessionToken}` });
+  const current = await authenticateByBearer(db, sessionToken);
   if (!current.orgs.some((o) => o.orgId === targetOrgId)) {
     throw new AuthError("not a member of that organization", 403);
   }
-  await db
-    .update(authSessions)
-    .set({ activeOrgId: targetOrgId, updatedAt: new Date() })
-    .where(eq(authSessions.id, current.sessionId));
+  if (current.authKind === "api_token") {
+    await db
+      .update(apiTokens)
+      .set({ activeOrgId: targetOrgId })
+      .where(eq(apiTokens.id, current.sessionId));
+  } else {
+    await db
+      .update(authSessions)
+      .set({ activeOrgId: targetOrgId, updatedAt: new Date() })
+      .where(eq(authSessions.id, current.sessionId));
+  }
   // Reload so the response reflects the switched context.
-  const sessionRows = await db
-    .select()
-    .from(authSessions)
-    .where(eq(authSessions.tokenHash, hashToken(sessionToken)))
-    .limit(1);
-  const session = sessionRows[0];
-  if (!session) throw new AuthError("session invalid or expired");
-  return toIdentityResult(await loadIdentity(db, session.userId, session.activeOrgId), session.id);
+  return authenticateByBearer(db, sessionToken);
 }

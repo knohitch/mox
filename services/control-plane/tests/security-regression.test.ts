@@ -117,6 +117,26 @@ describe("password KDF (§B)", () => {
   });
 });
 
+describe("web client credential handling (Prompt 00C)", () => {
+  it("web source never references sessionToken or bearer persistence", () => {
+    for (const file of listFilesRecursive(webSrc)) {
+      if (!/\.(ts|tsx)$/.test(file)) continue;
+      if (file.includes("demo-api.ts")) continue; // dev-only fixture
+      const content = readFileSync(file, "utf8");
+      expect(content.includes("sessionToken")).toBe(false);
+      expect(content).not.toMatch(/mox_pat_/);
+    }
+  });
+
+  it("cross-origin is decided by comparing real origins, not localhost heuristics", async () => {
+    // The decision logic lives in apps/web/src/api/http-api.ts; verify via
+    // source assertions since vitest runs in Node without DOM location.
+    const content = readFileSync(join(webSrc, "api", "http-api.ts"), "utf8");
+    expect(content).toContain("location.origin !== target");
+    expect(content).not.toMatch(/localhost(:\\d+)?\/i/);
+  });
+});
+
 describe("orchestrator store authority contract (§G)", () => {
   it("no longer pretends consumeNonce is real", () => {
     expect((InMemoryOrchestratorStore.prototype as unknown as Record<string, unknown>).consumeNonce).toBeUndefined();

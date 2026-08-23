@@ -657,16 +657,27 @@ export class ComputeOrchestrator {
     auth: { agentToken: string },
     options: { version?: string; now?: string } = {},
   ): Promise<void> {
-    const node = await this.store.getNode(nodeId);
-    if (!node) throw new NotFoundError(`unknown node ${nodeId}`);
-    if (!node.agentTokenHash || !hashesEqual(node.agentTokenHash, sha256Hex(auth.agentToken))) {
-      throw new OrchestratorError("node authentication failed");
-    }
+    await this.authenticateNode(nodeId, auth.agentToken);
+    const node = (await this.store.getNode(nodeId))!;
     node.metrics = metrics;
     node.lastHeartbeatAt = options.now ?? new Date().toISOString();
     if (options.version) node.version = options.version;
     if (node.status === "lost") node.status = "active";
     await this.store.updateNode(node);
+  }
+
+  /**
+   * Durable node-channel authentication (Prompt 00C §E): constant-time
+   * comparison of the presented agent token against the stored hash. Used
+   * by heartbeats and authenticated command polling.
+   */
+  async authenticateNode(nodeId: string, agentToken: string): Promise<MoxNodeRecord> {
+    const node = await this.store.getNode(nodeId);
+    if (!node) throw new NotFoundError(`unknown node ${nodeId}`);
+    if (!agentToken || !node.agentTokenHash || !hashesEqual(node.agentTokenHash, sha256Hex(agentToken))) {
+      throw new OrchestratorError("node authentication failed");
+    }
+    return node;
   }
 
   /** Marks nodes lost whose heartbeat exceeded the staleness threshold. */
