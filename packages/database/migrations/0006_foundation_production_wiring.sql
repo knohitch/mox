@@ -91,7 +91,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "in_app_notifications" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" text PRIMARY KEY NOT NULL,
 	"org_id" uuid NOT NULL,
 	"user_id" uuid,
 	"event_type" text NOT NULL,
@@ -123,7 +123,7 @@ CREATE INDEX IF NOT EXISTS "notification_prefs_org_user_idx"
 	ON "notification_preferences" USING btree ("org_id","user_id");
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "dispatched_messages" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"id" text PRIMARY KEY NOT NULL,
 	"org_id" uuid NOT NULL,
 	"user_id" uuid,
 	"event_type" text NOT NULL,

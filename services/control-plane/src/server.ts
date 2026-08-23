@@ -9,7 +9,7 @@ import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import { AuthError } from "./auth.js";
 import { buildApiRouter } from "./api.js";
-import { httpError, readJsonBody, Router, sendJson } from "./http.js";
+import { httpError, readJsonBody, requestLogLine, Router, sendJson } from "./http.js";
 
 export interface RunningControlPlane {
   server: Server;
@@ -30,10 +30,12 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, () => {
+      const address = server.address();
+      const boundPort = typeof address === "object" && address ? address.port : port;
       void url;
       resolve({
         server,
-        port,
+        port: boundPort,
         close: () =>
           new Promise<void>((resolveClose) => {
             server.close(() => resolveClose());
@@ -48,6 +50,13 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
     try {
       if (!req.url) throw httpError("missing request target", 400);
       const parsed = new URL(req.url, `http://localhost:${port}`);
+
+      applyCors(req, res);
+      if (req.method === "OPTIONS") {
+        res.writeHead(204).end();
+        return;
+      }
+
       const match = router.match(req.method ?? "GET", parsed.pathname);
 
       if (!match) {
@@ -74,6 +83,22 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
     }
   }
 
+  /**
+   * Narrow CORS (Prompt 00B §B): no cross-origin API access by default;
+   * explicit allowlist only. Credentials are never granted cross-origin —
+   * browser clients must be same-origin (cookie security model).
+   */
+  function applyCors(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse): void {
+    const origin = req.headers.origin;
+    if (!origin || services.config.corsOrigins.length === 0) return;
+    if (services.config.corsOrigins.includes(origin)) {
+      res.setHeader("access-control-allow-origin", origin);
+      res.setHeader("access-control-allow-methods", "GET,POST,PATCH,DELETE,OPTIONS");
+      res.setHeader("access-control-allow-headers", "content-type,x-mox-csrf");
+      res.setHeader("vary", "Origin");
+    }
+  }
+
   function respondWithError(res: import("node:http").ServerResponse, error: unknown): void {
     if (res.writableEnded) return;
     if (error instanceof AuthError) {
@@ -90,9 +115,9 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
   }
 
   function logRequest(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse, started: number): void {
-    // Audit line without secrets: path only, never headers or bodies.
-    const durationMs = Date.now() - started;
-    process.stdout.write(`${new Date().toISOString()} ${req.method} ${req.url} -> ${res.statusCode} (${durationMs}ms)\n`);
+    // Prompt 00B §D: pathname ONLY — query strings may carry secrets and
+    // are never logged; headers/bodies never logged either.
+    process.stdout.write(requestLogLine(req.method ?? "GET", req.url ?? "-", res.statusCode, Date.now() - started) + "\n");
   }
 }
 

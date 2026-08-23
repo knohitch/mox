@@ -20,6 +20,17 @@ function iso(value: Date | null | undefined): string | undefined {
   return value ? value.toISOString() : undefined;
 }
 
+/** Prompt 00B §E: value type must agree with the entitlement definition. */
+function assertValueMatchesType(key: string, valueType: string, value: boolean | number | string): void {
+  const valid =
+    (valueType === "boolean" && typeof value === "boolean") ||
+    (valueType === "integer" && typeof value === "number" && Number.isInteger(value)) ||
+    (valueType === "text" && typeof value === "string");
+  if (!valid) {
+    throw new Error(`entitlement key ${key} expects ${valueType}`);
+  }
+}
+
 export class PgEntitlementStore implements EntitlementStore {
   constructor(private readonly db: MoxDb) {}
 
@@ -74,17 +85,31 @@ export class PgEntitlementStore implements EntitlementStore {
     return out;
   }
 
+  /**
+   * Transactional plan-values replacement (Prompt 00B §E): validate keys
+   * and types against durable definitions BEFORE deleting, then perform
+   * delete+insert in one transaction so failures leave old values intact.
+   */
   async setPlanValues(planVersionId: string, values: EntitlementValues): Promise<void> {
-    await this.db.delete(planEntitlementValues).where(eq(planEntitlementValues.planVersionId, planVersionId));
     const entries = Object.entries(values);
-    if (entries.length === 0) return;
-    await this.db.insert(planEntitlementValues).values(
-      entries.map(([key, value]) => ({
-        planVersionId,
-        key,
-        value: value as unknown as object,
-      })),
-    );
+    await this.db.transaction(async (tx) => {
+      const definitions = await tx.select().from(entitlementDefinitions);
+      const known = new Map(definitions.map((d) => [d.key as string, d.valueType]));
+      for (const [key, value] of entries) {
+        const valueType = known.get(key);
+        if (!valueType) throw new Error(`unknown entitlement key: ${key}`);
+        assertValueMatchesType(key, valueType, value);
+      }
+      await tx.delete(planEntitlementValues).where(eq(planEntitlementValues.planVersionId, planVersionId));
+      if (entries.length === 0) return;
+      await tx.insert(planEntitlementValues).values(
+        entries.map(([key, value]) => ({
+          planVersionId,
+          key,
+          value: value as unknown as object,
+        })),
+      );
+    });
   }
 
   async listOverrides(orgId: string): Promise<OrgOverride[]> {

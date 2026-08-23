@@ -1,12 +1,13 @@
-/**
- * Mox Control Plane HTTP API (Prompt 00 §A). Every screen-facing surface is
- * served from authoritative services/stores — never demo data. Endpoints
+﻿/**
+ * Mox Control Plane HTTP API (Prompt 00 Â§A). Every screen-facing surface is
+ * served from authoritative services/stores â€” never demo data. Endpoints
  * that have no backing capability yet return honest 501s with machine
  * readable codes instead of pretending.
  */
 
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
+import type { SessionIdentity } from "@mox/control-plane-contracts";
 import {
   agentDeployments,
   agentRooms,
@@ -19,27 +20,58 @@ import {
   modelProviders,
   models,
   modelUsageRefs,
+  platformSetup,
   sessionEvents,
   usageEvents,
 } from "@mox/database";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
-import { authenticate, createSessionFromBootstrap } from "./auth.js";
+import {
+  authenticate,
+  completePlatformSetup,
+  extractSessionToken,
+  hashToken,
+  isCookieAuthenticated,
+  login as loginAccount,
+  logout as logoutSession,
+  serializeClearSessionCookie,
+  serializeSessionCookie,
+  signup as signupAccount,
+  switchActiveOrg,
+} from "./auth.js";
 import { httpError, Router, sendJson, type RequestContext } from "./http.js";
 
 export interface ApiDeps {
   services: ControlPlaneServices;
 }
 
+/** Mutations authenticated via cookie require this client-set header (CSRF). */
+export const CSRF_HEADER = "x-mox-csrf";
+
 export function buildApiRouter(deps: ApiDeps): Router {
   const router = new Router();
   const { services } = deps;
   const db = () => services.db;
 
+  /** Authenticated context: flattened SessionIdentity plus org memberships. */
   const requireAuth = async (ctx: RequestContext) => {
-    const { identity } = await authenticate(db(), ctx.req.headers.authorization);
-    return identity;
+    const auth = await authenticate(db(), {
+      authorization: ctx.req.headers.authorization,
+      cookie: ctx.req.headers.cookie,
+    });
+    // CSRF defense (Â§B): cookie-authenticated mutations must carry the
+    // custom header, which cross-site forms cannot set.
+    const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes(ctx.req.method ?? "");
+    if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
+      throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
+    }
+    return { ...auth.identity, userId: auth.userId, sessionId: auth.sessionId, orgs: auth.orgs };
   };
+
+  const sessionCookieOptions = () => ({
+    secure: services.config.env === "production",
+    maxAgeSeconds: Math.floor(services.config.sessionTtlMs / 1000),
+  });
 
   // ---- Health ----------------------------------------------------------------
 
@@ -48,25 +80,94 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { ok: true };
   });
 
+  // ---- Setup (one-time owner provisioning; server-side credential only) -------
+
+  router.post("/api/setup/bootstrap", async (ctx) => {
+    // Setup-closed is evaluated before anything else so even well-formed
+    // requests cannot probe state after completion (§A).
+    const setupRows = await db().select().from(platformSetup).limit(1);
+    const setupRow = setupRows[0];
+    if (setupRow?.completedAt) throw httpError("platform setup is closed", 403);
+    const body = ctx.body as {
+      setupToken?: string;
+      ownerEmail?: string;
+      ownerPassword?: string;
+      orgSlug?: string;
+      orgDisplayName?: string;
+    } | undefined;
+    if (!body?.ownerEmail || !body?.ownerPassword || !body?.orgSlug) {
+      throw httpError("ownerEmail, ownerPassword and orgSlug are required", 400);
+    }
+    await completePlatformSetup({
+      db: db(),
+      setupTokenHash: setupRow?.setupTokenHash ?? undefined,
+      setupCompleted: false,
+      presentedSetupToken: body.setupToken ?? "",
+      expectedSetupTokenHash: services.config.setupToken
+        ? hashToken(services.config.setupToken)
+        : undefined,
+      ownerEmail: body.ownerEmail,
+      ownerPassword: body.ownerPassword,
+      orgSlug: body.orgSlug,
+      orgDisplayName: body.orgDisplayName,
+    });
+    return { ok: true, note: "setup closed permanently" };
+  });
+
   // ---- Auth / identity ---------------------------------------------------------
 
-  router.post("/api/auth/session", async (ctx) => {
-    const body = ctx.body as { bootstrapToken?: string } | undefined;
-    if (!body?.bootstrapToken) throw httpError("bootstrapToken is required", 400);
-    const issued = await createSessionFromBootstrap({
+  router.post("/api/auth/signup", async (ctx) => {
+    const body = ctx.body as { email?: string; password?: string; displayName?: string; orgName?: string } | undefined;
+    if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    const result = await signupAccount({
       db: db(),
-      bootstrapApiToken: services.config.bootstrapApiToken,
-      presentedToken: body.bootstrapToken,
-      ttlMs: services.config.sessionTtlMs,
+      email: body.email,
+      password: body.password,
+      displayName: body.displayName,
+      orgName: body.orgName,
+      meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
     });
-    // Identity comes straight from the database (never hard-coded org_demo).
-    const { identity } = await authenticate(db(), `Bearer ${issued.sessionToken}`);
-    return { sessionToken: issued.sessionToken, expiresAt: issued.expiresAt.toISOString(), identity };
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
+    return toAuthResponse(result);
+  });
+
+  router.post("/api/auth/login", async (ctx) => {
+    const body = ctx.body as { email?: string; password?: string } | undefined;
+    if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    const result = await loginAccount({
+      db: db(),
+      email: body.email,
+      password: body.password,
+      meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
+    });
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
+    return toAuthResponse(result);
+  });
+
+  router.post("/api/auth/logout", async (ctx) => {
+    // requireAuth enforces authentication + the cookie-channel CSRF check.
+    const auth = await requireAuth(ctx);
+    void auth;
+    const token = extractSessionToken({ authorization: ctx.req.headers.authorization, cookie: ctx.req.headers.cookie });
+    await logoutSession(db(), token);
+    ctx.res.setHeader("set-cookie", serializeClearSessionCookie());
+    return { ok: true };
   });
 
   router.get("/api/me", async (ctx) => {
-    const identity = await requireAuth(ctx);
-    return identity;
+    const auth = await requireAuth(ctx);
+    return { ...auth, orgs: auth.orgs };
+  });
+
+  /** Membership-verified active-org switch (Â§C). */
+  router.post("/api/auth/orgs/select", async (ctx) => {
+    await requireAuth(ctx);
+    const token = extractSessionToken({ authorization: ctx.req.headers.authorization, cookie: ctx.req.headers.cookie });
+    if (!token) throw httpError("authentication required", 401);
+    const body = ctx.body as { orgId?: string } | undefined;
+    if (!body?.orgId) throw httpError("orgId is required", 400);
+    const result = await switchActiveOrg(db(), token, body.orgId);
+    return toAuthResponse(result);
   });
 
   // ---- Agents ---------------------------------------------------------------
@@ -196,12 +297,17 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   /** Server-sent events: ordered replay of durable org events (realtime abstraction). */
   router.get("/api/streams/org-events", async (ctx) => {
-    // EventSource cannot set headers; read-only streams may pass the session
-    // token as a query parameter.
-    const header =
-      ctx.req.headers.authorization ??
-      (ctx.query.get("token") ? `Bearer ${ctx.query.get("token")}` : undefined);
-    const { identity } = await authenticate(db(), header);
+    // Prompt 00B Â§D: NO tokens in URLs. Browsers authenticate via the
+    // HttpOnly session cookie (EventSource sends it same-origin); non-
+    // browser clients use the Authorization header. Query parameters are
+    // never consulted for authentication.
+    if (ctx.query.get("token") || ctx.query.get("authorization")) {
+      throw httpError("stream authentication must use cookie or Authorization header", 400, { code: "no_token_in_url" });
+    }
+    const { identity } = await authenticate(db(), {
+      authorization: ctx.req.headers.authorization,
+      cookie: ctx.req.headers.cookie,
+    });
     let lastSeq = Number(ctx.query.get("sinceSeq") ?? "0");
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -272,7 +378,6 @@ export function buildApiRouter(deps: ApiDeps): Router {
       outcome: body.outcome,
     } as unknown as SessionEvent;
     await services.events.append(identity, { kind: "thread", id: identity.orgId }, event);
-    void sql;
     return { ok: true };
   });
 
@@ -519,7 +624,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
     throw httpError("log streaming is not configured on this deployment", 501, { code: "not_configured" });
   });
 
-  // ---- Mox Node endpoints (untrusted, §E) ----------------------------------------
+  // ---- Mox Node endpoints (untrusted, Â§E) ----------------------------------------
 
   router.post("/node/enroll", async (ctx) => {
     const body = ctx.body as {
@@ -571,6 +676,22 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
 function bearer(header: string): string {
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+}
+
+/** Maps an auth result onto the shared wire contract. */
+function toAuthResponse(result: {
+  identity: SessionIdentity;
+  orgs: Array<{ orgId: string; slug: string; displayName: string; role: string }>;
+  sessionToken?: string;
+  expiresAt?: Date;
+}) {
+  return {
+    ...result.identity,
+    orgs: result.orgs,
+    ...(result.sessionToken
+      ? { sessionToken: result.sessionToken, expiresAt: (result.expiresAt ?? new Date()).toISOString() }
+      : {}),
+  };
 }
 
 export { sendJson };

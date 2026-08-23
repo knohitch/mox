@@ -16,7 +16,7 @@
  *              proving physical durability. Skipped when unset.
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { BillingService, FakeBillingProvider, InMemoryBillingStore, type BillingStore } from "@mox/billing";
 import {
@@ -314,6 +314,29 @@ describe("restart/idempotency conformance (in-memory tier)", () => {
 const pgUrl = process.env["MOX_TEST_DATABASE_URL"];
 
 describe.skipIf(!pgUrl)("restart/idempotency conformance (PostgreSQL tier)", () => {
+  beforeAll(async () => {
+    // The durable schema enforces foreign keys; seed the shared test org.
+    const { createDb } = await import("@mox/database");
+    const { pool } = createDb({ connectionString: pgUrl! });
+    try {
+      await pool.query(
+        `insert into organizations (id, slug, display_name)
+         values ($1, 'restart-test', 'Restart Test')
+         on conflict do nothing`,
+        [ORG],
+      );
+      // The durable billing store validates entitlement keys against the
+      // definitions table (Prompt 00B §E); seed what the suites use.
+      await pool.query(
+        `insert into entitlement_definitions (key, value_type, description, default_value)
+         values ('max_agents', 'integer', 'Max agents', '3'::jsonb)
+         on conflict (key) do nothing`,
+      );
+    } finally {
+      await pool.end().catch(() => undefined);
+    }
+  });
+
   defineRestartSuite({
     kind: "postgres",
     async makeBillingStores() {

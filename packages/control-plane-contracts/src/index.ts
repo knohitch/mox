@@ -23,14 +23,49 @@ export interface SessionIdentity {
   role: string;
 }
 
-/** POST /api/auth/session — exchange a bootstrap credential for a session. */
-export interface CreateSessionRequest {
-  bootstrapToken: string;
+/** GET /api/me — full authenticated context including org memberships. */
+export interface MeResponse extends SessionIdentity {
+  orgs: Array<{ orgId: string; slug: string; displayName: string; role: string }>;
 }
-export interface CreateSessionResponse {
+
+/**
+ * POST /api/auth/login | /api/auth/signup — session establishment. The
+ * session token rides an HttpOnly cookie; `sessionToken` is additionally
+ * returned for non-browser clients (CLI, Mox Node tooling) and must never
+ * be persisted by browsers.
+ */
+export interface AuthSessionResponse extends MeResponse {
   sessionToken: string;
   expiresAt: string;
-  identity: SessionIdentity;
+}
+
+export interface LoginRequest {
+  email: string;
+  password: string;
+}
+export interface SignupRequest {
+  email: string;
+  password: string;
+  displayName?: string;
+  orgName?: string;
+}
+
+/** POST /api/auth/orgs/select — membership-verified active-org switch. */
+export interface SelectOrgRequest {
+  orgId: string;
+}
+
+/**
+ * POST /api/setup/bootstrap — one-time platform owner provisioning.
+ * Requires the server-side deployment setup credential; permanently closed
+ * after completion. Never a login path.
+ */
+export interface SetupBootstrapRequest {
+  setupToken: string;
+  ownerEmail: string;
+  ownerPassword: string;
+  orgSlug: string;
+  orgDisplayName?: string;
 }
 
 /** POST /node/enroll — first-time Mox Node enrollment (Prompt 00 §E). */

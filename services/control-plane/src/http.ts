@@ -120,3 +120,20 @@ export interface HttpError extends Error {
 export function httpError(message: string, status = 400, extra: { code?: string; unavailable?: boolean } = {}): HttpError {
   return Object.assign(new Error(message), { status, ...extra });
 }
+
+/**
+ * Request log line (Prompt 00B §D): PATHNAME ONLY — query strings can
+ * carry tickets/tokens and are never logged. Headers and bodies are never
+ * logged either, so Authorization/Cookie/session secrets cannot leak.
+ */
+export function requestLogLine(method: string, rawUrl: string, status: number, durationMs: number, at = new Date()): string {
+  let pathname = rawUrl;
+  try {
+    pathname = new URL(rawUrl, "http://localhost").pathname;
+  } catch {
+    // Malformed targets are logged verbatim minus any query marker.
+    const q = pathname.indexOf("?");
+    if (q >= 0) pathname = pathname.slice(0, q);
+  }
+  return `${at.toISOString()} ${method} ${pathname} -> ${status} (${durationMs}ms)`;
+}

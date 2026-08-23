@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { organizations } from "./identity-users.js";
 
 /**
@@ -224,6 +225,13 @@ export const nodeEnrollmentTokens = pgTable(
   (t) => [
     uniqueIndex("node_enrollment_tokens_hash_key").on(t.tokenHash),
     index("node_enrollment_tokens_order_idx").on(t.orderId, t.state),
+    /**
+     * Prompt 00B §F: at most one valid `issued` bootstrap token may exist
+     * per server order; retries must revoke/expire the prior token first.
+     */
+    uniqueIndex("node_enrollment_tokens_one_issued_per_order")
+      .on(t.orderId)
+      .where(sql`state = 'issued'`),
   ],
 );
 

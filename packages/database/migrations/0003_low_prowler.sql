@@ -99,7 +99,6 @@ CREATE TABLE "ssh_keys" (
 --> statement-breakpoint
 ALTER TABLE "mox_nodes" ADD CONSTRAINT "mox_nodes_org_id_organizations_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "mox_nodes" ADD CONSTRAINT "mox_nodes_order_id_server_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."server_orders"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "node_commands" ADD CONSTRAINT "node_commands_node_id_mox_nodes_node_id_fk" FOREIGN KEY ("node_id") REFERENCES "public"."mox_nodes"("node_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "server_operations" ADD CONSTRAINT "server_operations_order_id_server_orders_id_fk" FOREIGN KEY ("order_id") REFERENCES "public"."server_orders"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "server_orders" ADD CONSTRAINT "server_orders_org_id_organizations_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "server_orders" ADD CONSTRAINT "server_orders_compute_class_code_compute_classes_code_fk" FOREIGN KEY ("compute_class_code") REFERENCES "public"."compute_classes"("code") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
@@ -107,6 +106,7 @@ ALTER TABLE "server_orders" ADD CONSTRAINT "server_orders_provider_account_id_pr
 ALTER TABLE "server_orders" ADD CONSTRAINT "server_orders_ssh_key_id_ssh_keys_id_fk" FOREIGN KEY ("ssh_key_id") REFERENCES "public"."ssh_keys"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "ssh_keys" ADD CONSTRAINT "ssh_keys_org_id_organizations_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "mox_nodes_node_id_key" ON "mox_nodes" USING btree ("node_id");--> statement-breakpoint
+ALTER TABLE "node_commands" ADD CONSTRAINT "node_commands_node_id_mox_nodes_node_id_fk" FOREIGN KEY ("node_id") REFERENCES "public"."mox_nodes"("node_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "node_commands_nonce_key" ON "node_commands" USING btree ("nonce");--> statement-breakpoint
 CREATE UNIQUE INDEX "provider_accounts_label_key" ON "provider_accounts" USING btree ("provider_name","account_label");--> statement-breakpoint
 CREATE UNIQUE INDEX "server_operations_order_kind_key" ON "server_operations" USING btree ("order_id","kind","idempotency_key");--> statement-breakpoint

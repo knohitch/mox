@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import { useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { MoxProvider, useMox } from "./api/store.js";
 import { resolveParams, useRoute, Link } from "./router.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
@@ -53,19 +54,13 @@ export function App() {
 
 function Shell() {
   const { path } = useRoute();
-  const { error, ready } = useMox();
+  const { error, ready, needsAuth, signIn, signUp, signOut } = useMox();
   const match = resolveParams(Object.keys(ROUTES), path);
   const active = match?.pattern ?? null;
   const View = active ? ROUTES[active] : undefined;
 
   return (
     <div className="app">
-      {error ? (
-        <div className="backend-error" role="alert">
-          Backend unavailable: {error} — the Mox web app never falls back to demo data.
-        </div>
-      ) : null}
-      {!error && !ready ? <div className="backend-error">Connecting to the Mox control plane…</div> : null}
       <aside className="sidebar">
         <div className="brand">
           M<span>ox</span>
@@ -79,20 +74,102 @@ function Shell() {
         <Link to="/settings" className={`nav-item ${active === "/settings" ? "active" : ""}`}>
           Preferences
         </Link>
+        {ready ? (
+          <button type="button" className="nav-item signout" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        ) : null}
       </aside>
       <main className="main">
-        {View ? (
-          View(match?.params ?? {})
+        {needsAuth && !ready ? (
+          <AuthGate onSignIn={signIn} onSignUp={signUp} />
         ) : (
           <>
-            <h1>Not found</h1>
-            <p className="muted">
-              No route for <code>{path}</code>.
-            </p>
+            {error ? (
+              <div className="backend-error" role="alert">
+                Backend unavailable: {error} — the Mox web app never falls back to demo data.
+              </div>
+            ) : null}
+            {!error && !ready ? <div className="backend-error">Connecting to the Mox control plane…</div> : null}
+            {View ? (
+              View(match?.params ?? {})
+            ) : (
+              <>
+                <h1>Not found</h1>
+                <p className="muted">
+                  No route for <code>{path}</code>.
+                </p>
+              </>
+            )}
           </>
         )}
       </main>
     </div>
+  );
+}
+
+function AuthGate(props: {
+  onSignIn: (input: { email: string; password: string }) => Promise<void>;
+  onSignUp: (input: { email: string; password: string; orgName?: string }) => Promise<void>;
+}): ReactNode {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [orgName, setOrgName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setAuthError(null);
+    const action =
+      mode === "login"
+        ? props.onSignIn({ email, password })
+        : props.onSignUp({ email, password, orgName: orgName || undefined });
+    action.catch((error) => setAuthError(error instanceof Error ? error.message : String(error))).finally(() => setBusy(false));
+  };
+
+  return (
+    <form className="auth-gate" onSubmit={submit}>
+      <h1>{mode === "login" ? "Sign in to Mox" : "Create your Mox workspace"}</h1>
+      <label>
+        Email
+        <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" />
+      </label>
+      <label>
+        Password
+        <input
+          type="password"
+          required
+          minLength={8}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete={mode === "login" ? "current-password" : "new-password"}
+        />
+      </label>
+      {mode === "signup" ? (
+        <label>
+          Workspace name (optional)
+          <input type="text" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
+        </label>
+      ) : null}
+      {authError ? (
+        <div className="backend-error" role="alert">
+          {authError}
+        </div>
+      ) : null}
+      <button type="submit" disabled={busy}>
+        {busy ? "Working…" : mode === "login" ? "Sign in" : "Sign up"}
+      </button>
+      <button
+        type="button"
+        className="linklike"
+        onClick={() => setMode(mode === "login" ? "signup" : "login")}
+      >
+        {mode === "login" ? "Need an account? Sign up" : "Have an account? Sign in"}
+      </button>
+    </form>
   );
 }
 

@@ -49,9 +49,8 @@ export interface OrchestratorStore {
   getNode(nodeId: string): Promise<MoxNodeRecord | undefined>;
   updateNode(node: MoxNodeRecord): Promise<void>;
   listNodes(): Promise<MoxNodeRecord[]>;
-  consumeNonce(nonce: string): Promise<boolean>;
 
-  // Enrollment bootstrap tokens (Prompt 00 §E)
+  // Enrollment bootstrap tokens (Prompt 00 §E / 00B §F)
   /** Persists the expected hash BEFORE provisioning/cloud-init runs. */
   createEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void>;
   getEnrollmentToken(tokenHash: string): Promise<NodeEnrollmentTokenRecord | undefined>;
@@ -61,6 +60,12 @@ export interface OrchestratorStore {
    * Concurrent consumers race on the state transition; losers get false.
    */
   consumeEnrollmentToken(tokenHash: string, nowIso: string): Promise<boolean>;
+  /**
+   * Revokes every currently-issued token for an order (Prompt 00B §F):
+   * called before issuing a replacement on provisioning retries and when
+   * a provision attempt fails, so stale tokens never remain usable.
+   */
+  revokeIssuedEnrollmentTokensForOrder(orderId: string, nowIso: string): Promise<number>;
 }
 
 export class InMemoryOrchestratorStore implements OrchestratorStore {
@@ -72,7 +77,6 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   private readonly operations = new Map<string, ServerOperation>();
   private readonly opIndex = new Set<string>();
   private readonly nodes = new Map<string, MoxNodeRecord>();
-  private readonly nonces = new Set<string>();
   private readonly enrollmentTokens = new Map<string, NodeEnrollmentTokenRecord>();
 
   async upsertComputeClass(cls: ComputeClass): Promise<void> {
@@ -193,12 +197,6 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
     return [...this.nodes.values()];
   }
 
-  async consumeNonce(nonce: string): Promise<boolean> {
-    if (this.nonces.has(nonce)) return false;
-    this.nonces.add(nonce);
-    return true;
-  }
-
   async createEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void> {
     if (this.enrollmentTokens.has(record.tokenHash)) {
       throw new Error("enrollment token hash already exists");
@@ -233,6 +231,20 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
     record.consumedAt = nowIso;
     this.enrollmentTokens.set(tokenHash, record);
     return true;
+  }
+
+  /** Revokes every currently-issued token for an order (Prompt 00B §F). */
+  async revokeIssuedEnrollmentTokensForOrder(orderId: string, nowIso: string): Promise<number> {
+    let revoked = 0;
+    for (const record of this.enrollmentTokens.values()) {
+      if (record.orderId === orderId && record.state === "issued") {
+        record.state = "revoked";
+        record.consumedAt = nowIso;
+        this.enrollmentTokens.set(record.tokenHash, record);
+        revoked += 1;
+      }
+    }
+    return revoked;
   }
 }
 

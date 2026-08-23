@@ -64,24 +64,38 @@ describe("node impersonation", () => {
     const { InMemoryOrchestratorStore, sha256Hex } = await import("../../compute-orchestrator/src/store.js");
     const store = new InMemoryOrchestratorStore();
     const orch = new ComputeOrchestrator(store, { controlPlaneUrl: "https://control-plane.test" });
-    // Provisioning pre-persists ONLY the expected hash bound to org+order (§E).
+    // Provisioning pre-persists ONLY the expected hash bound to org+order (§E)
+    // and anchors enrollment to a provisioned server order (00B §F).
     const orderId = "11111111-1111-4111-8111-111111111111";
+    await store.insertOrder({
+      id: orderId,
+      orgId: "org-real",
+      computeClassCode: "COMPUTE_SMALL",
+      state: "running",
+      hostname: "ws-victim",
+      providerInstanceId: "inst-victim",
+      idempotencyKey: "k-impersonation",
+      attemptCount: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
     await store.createEnrollmentToken({
       id: "22222222-2222-4222-8222-222222222222",
       tokenHash: sha256Hex("real-secret"),
       orgId: "org-real",
       orderId,
+      providerInstanceId: "inst-victim",
       state: "issued",
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
       createdAt: new Date().toISOString(),
     });
-    // Forged token / forged org binding both fail.
+    // Forged token fails; forged org binding fails; nothing is created.
     await expect(
       orch.enrollNode({ orgId: "org-real", orderId, nodeId: "node-victim", enrollToken: "forged-token" }),
     ).rejects.toThrow(/unknown enrollment token/);
     await expect(
       orch.enrollNode({ orgId: "org-attacker", orderId, nodeId: "node-victim", enrollToken: "real-secret" }),
-    ).rejects.toThrow(/org mismatch/);
+    ).rejects.toThrow(/does not own this order|org mismatch/);
     await expect(orch.store.getNode("node-victim")).resolves.toBeUndefined();
   });
 

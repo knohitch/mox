@@ -67,6 +67,8 @@ export class PgOrchestratorStore implements OrchestratorStore {
   // ---- Provider accounts ----------------------------------------------------
 
   async upsertProviderAccount(account: ProviderAccountRecord): Promise<void> {
+    // On conflict, KEEP the existing row identity: server_orders references
+    // provider_accounts(id), so an upsert must never rotate the PK.
     const values = {
       id: account.id,
       providerName: account.providerName,
@@ -82,7 +84,13 @@ export class PgOrchestratorStore implements OrchestratorStore {
       .values(values)
       .onConflictDoUpdate({
         target: [providerAccounts.providerName, providerAccounts.accountLabel],
-        set: values,
+        set: {
+          regionCode: values.regionCode,
+          commercialStatus: values.commercialStatus,
+          healthScore: values.healthScore,
+          credentialRefId: values.credentialRefId,
+          enabled: values.enabled,
+        },
       });
   }
 
@@ -255,13 +263,6 @@ export class PgOrchestratorStore implements OrchestratorStore {
     return rows.map(toNode);
   }
 
-  async consumeNonce(nonce: string): Promise<boolean> {
-    // Nonce table reuse via node_commands uniqueness is handled at dispatch;
-    // advisory nonce consumption stays ephemeral by contract.
-    void nonce;
-    return true;
-  }
-
   // ---- Enrollment tokens (Prompt 00 �E) ---------------------------------------
 
   async createEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void> {
@@ -329,6 +330,16 @@ export class PgOrchestratorStore implements OrchestratorStore {
         ),
       );
     return false;
+  }
+
+  /** Revokes every currently-issued token for an order (Prompt 00B §F). */
+  async revokeIssuedEnrollmentTokensForOrder(orderId: string, nowIso: string): Promise<number> {
+    const revoked = await this.db
+      .update(nodeEnrollmentTokens)
+      .set({ state: "revoked", consumedAt: new Date(nowIso) })
+      .where(and(eq(nodeEnrollmentTokens.orderId, orderId), eq(nodeEnrollmentTokens.state, "issued")))
+      .returning({ id: nodeEnrollmentTokens.id });
+    return revoked.length;
   }
 }
 

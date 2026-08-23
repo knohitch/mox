@@ -1,12 +1,19 @@
 /**
- * Real authenticated HTTP client behind the MoxApi seam (Prompt 00 §A).
+ * Real authenticated HTTP client behind the MoxApi seam (Prompt 00 §A /
+ * 00B §B/§D).
  *
- * Every call goes to the Mox Control Plane with a durable server session.
+ * Browser authentication rides the HttpOnly session cookie set by
+ * /api/auth/login|signup; the session token never enters JS storage or any
+ * URL. Mutating requests carry the `x-mox-csrf` custom header (the
+ * control-plane's cookie-channel CSRF defense). A programmatic bearer
+ * token may still be injected for non-browser clients (CLI/tooling).
+ *
  * There is no local simulation: when the backend is unavailable the error
  * propagates honestly to the store, which surfaces it to the UI.
  */
 
 import type { AgentDeployment, AgentEvent, AgentRoom, ApprovalRequest } from "@mox/contracts";
+import type { AuthSessionResponse, LoginRequest, MeResponse, SignupRequest } from "@mox/control-plane-contracts";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
 import type {
   AgentSummary,
@@ -24,8 +31,11 @@ import type {
 
 export interface HttpMoxApiOptions {
   baseUrl: string;
-  /** Resolves the current session token; may exchange/refresh lazily. */
-  tokenProvider: () => Promise<string>;
+  /**
+   * Optional bearer-token source for non-browser clients. Browsers omit it
+   * and authenticate via the HttpOnly session cookie.
+   */
+  tokenProvider?: () => Promise<string>;
   fetchImpl?: typeof fetch;
   realtime?: RealtimeTransport;
 }
@@ -38,30 +48,48 @@ interface ApiErrorBody {
 
 export class ApiUnavailableError extends Error {}
 
+/** Header required on cookie-authenticated mutations (CSRF defense). */
+export const CSRF_HEADER = "x-mox-csrf";
+
 export class HttpMoxApi implements MoxApi {
   readonly realtime: RealtimeTransport;
   private readonly baseUrl: string;
-  private readonly tokenProvider: () => Promise<string>;
+  private readonly tokenProvider?: () => Promise<string>;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: HttpMoxApiOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, "");
     this.tokenProvider = options.tokenProvider;
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
-    this.realtime = options.realtime ?? new SseRealtimeTransport(this.baseUrl, this.tokenProvider);
+    const crossOrigin = !/^https?:\/\/[^/]*localhost(:\d+)?/i.test(this.baseUrl);
+    this.realtime =
+      options.realtime ?? new SseRealtimeTransport(this.baseUrl, crossOrigin);
+  }
+
+  get isBrowserCookieAuth(): boolean {
+    return this.tokenProvider === undefined;
   }
 
   private async call<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const token = await this.tokenProvider().catch(() => "");
+    const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes((init.method ?? "GET").toUpperCase());
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...(mutating ? { [CSRF_HEADER]: "1" } : {}),
+    };
+    if (this.tokenProvider) {
+      // Non-browser channel only; browsers rely on the HttpOnly cookie.
+      try {
+        headers["authorization"] = `Bearer ${await this.tokenProvider()}`;
+      } catch {
+        throw new ApiUnavailableError("not signed in");
+      }
+    }
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         ...init,
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...init.headers,
-        },
+        credentials: "include",
+        headers: { ...headers, ...init.headers },
       });
     } catch (cause) {
       throw new ApiUnavailableError(
@@ -75,10 +103,48 @@ export class HttpMoxApi implements MoxApi {
       if (res.status >= 500 || body.unavailable || body.code === "engine_not_configured") {
         throw new ApiUnavailableError(`Mox control plane request failed (${res.status}): ${detail}`);
       }
-      throw new Error(detail);
+      const error = new Error(detail) as Error & { status?: number };
+      error.status = res.status;
+      throw error;
     }
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
+  }
+
+  // ---- Account auth ------------------------------------------------------------
+
+  me(): Promise<MeResponse> {
+    return this.call<MeResponse>("/api/me");
+  }
+
+  login(input: LoginRequest): Promise<AuthSessionResponse> {
+    return this.call<AuthSessionResponse>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: input.email, password: input.password }),
+    });
+  }
+
+  signup(input: SignupRequest): Promise<AuthSessionResponse> {
+    return this.call<AuthSessionResponse>("/api/auth/signup", {
+      method: "POST",
+      body: JSON.stringify({
+        email: input.email,
+        password: input.password,
+        displayName: input.displayName,
+        orgName: input.orgName,
+      }),
+    });
+  }
+
+  logout(): Promise<void> {
+    return this.call<{ ok: boolean }>("/api/auth/logout", { method: "POST", body: "{}" }).then(() => undefined);
+  }
+
+  selectOrg(orgId: string): Promise<AuthSessionResponse> {
+    return this.call<AuthSessionResponse>("/api/auth/orgs/select", {
+      method: "POST",
+      body: JSON.stringify({ orgId }),
+    });
   }
 
   // ---- Roster / definitions ---------------------------------------------------
@@ -118,9 +184,9 @@ export class HttpMoxApi implements MoxApi {
   }
 
   /**
-   * Submits the turn durably and streams authoritative events over SSE. The
-   * current foundation deployment reports engine availability honestly via
-   * a turn.failed event instead of fabricating an assistant reply.
+   * Submits the turn durably. The current foundation deployment reports
+   * engine availability honestly via a turn.failed event instead of
+   * fabricating an assistant reply.
    */
   async send(
     agentId: string,
@@ -306,22 +372,4 @@ export class HttpMoxApi implements MoxApi {
   async getLogs(_agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>> {
     throw new ApiUnavailableError("log streaming is not configured on this deployment");
   }
-}
-
-/** Creates a durable server session from the bootstrap credential. */
-export async function exchangeBootstrapSession(
-  baseUrl: string,
-  bootstrapToken: string,
-  fetchImpl: typeof fetch = fetch.bind(globalThis),
-): Promise<{ sessionToken: string; expiresAt: string }> {
-  const res = await fetchImpl(`${baseUrl}/api/auth/session`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ bootstrapToken }),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as ApiErrorBody;
-    throw new ApiUnavailableError(body.error ?? `session bootstrap failed (${res.status})`);
-  }
-  return (await res.json()) as { sessionToken: string; expiresAt: string };
 }

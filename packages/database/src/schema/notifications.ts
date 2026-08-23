@@ -48,7 +48,8 @@ export const messageTemplates = pgTable(
 export const inAppNotifications = pgTable(
   "in_app_notifications",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    /** Opaque service-generated id (e.g. ntf_...); never a raw uuid. */
+    id: text("id").primaryKey(),
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
@@ -75,7 +76,8 @@ export const inAppNotifications = pgTable(
 export const dispatchedMessages = pgTable(
   "dispatched_messages",
   {
-    id: uuid("id").primaryKey().defaultRandom(),
+    /** Opaque service-generated id (e.g. msg_...); never a raw uuid. */
+    id: text("id").primaryKey(),
     orgId: uuid("org_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),

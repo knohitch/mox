@@ -200,3 +200,32 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   border-bottom: 1px solid var(--bad);
   font-size: 13px;
 }
+
+.auth-gate {
+  max-width: 360px;
+  margin: 8vh auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-gate h1 { font-size: 20px; }
+.auth-gate label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.auth-gate input {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.auth-gate button {
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  padding: 9px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.auth-gate button.linklike { background: transparent; color: var(--text-dim); }
+.signout { text-align: left; background: transparent; border: none; cursor: pointer; }

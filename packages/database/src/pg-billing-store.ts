@@ -22,6 +22,7 @@ import {
   billingCustomers,
   checkoutSessions,
   currencies,
+  entitlementDefinitions,
   invoices,
   planEntitlementValues,
   planVersions,
@@ -129,19 +130,32 @@ export class PgBillingStore implements BillingStore {
       .where(eq(planVersions.id, asUuid(version.id)));
   }
 
+  /**
+   * Transactional plan-entitlement replacement (Prompt 00B §E): keys and
+   * value types are validated BEFORE any destructive change, and the
+   * delete+insert runs in one PostgreSQL transaction so a failed insert
+   * leaves the previous values fully intact.
+   */
   async setPlanEntitlementValues(planVersionId: string, values: Record<string, boolean | number | string>): Promise<void> {
-    // Durable plan entitlement authority (Prompt 00 §D4): replace-all within
-    // one implicit transaction per statement batch keeps reads consistent.
-    await this.db.delete(planEntitlementValues).where(eq(planEntitlementValues.planVersionId, asUuid(planVersionId)));
     const entries = Object.entries(values);
-    if (entries.length === 0) return;
-    await this.db.insert(planEntitlementValues).values(
-      entries.map(([key, value]) => ({
-        planVersionId: asUuid(planVersionId),
-        key,
-        value: value as unknown as object,
-      })),
-    );
+    await this.db.transaction(async (tx) => {
+      const definitions = await tx.select().from(entitlementDefinitions);
+      const known = new Map(definitions.map((d) => [d.key, d.valueType]));
+      for (const [key, value] of entries) {
+        const valueType = known.get(key);
+        if (!valueType) throw new Error(`unknown entitlement key: ${key}`);
+        assertValueMatchesType(key, valueType, value);
+      }
+      await tx.delete(planEntitlementValues).where(eq(planEntitlementValues.planVersionId, asUuid(planVersionId)));
+      if (entries.length === 0) return;
+      await tx.insert(planEntitlementValues).values(
+        entries.map(([key, value]) => ({
+          planVersionId: asUuid(planVersionId),
+          key,
+          value: value as unknown as object,
+        })),
+      );
+    });
   }
 
   async getPlanEntitlementValues(planVersionId: string): Promise<Record<string, boolean | number | string>> {
@@ -759,4 +773,15 @@ function defaultExponent(code: string): number {
  */
 function asUuid(id: string): string {
   return id;
+}
+
+/** Prompt 00B §E: value type must agree with the entitlement definition. */
+function assertValueMatchesType(key: string, valueType: string, value: boolean | number | string): void {
+  const valid =
+    (valueType === "boolean" && typeof value === "boolean") ||
+    (valueType === "integer" && typeof value === "number" && Number.isInteger(value)) ||
+    (valueType === "text" && typeof value === "string");
+  if (!valid) {
+    throw new Error(`entitlement key ${key} expects ${valueType}`);
+  }
 }

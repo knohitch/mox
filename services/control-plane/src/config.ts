@@ -21,11 +21,14 @@ export interface ControlPlaneConfig {
   /** Redis is optional at the foundation stage; queues/cache only. */
   redisUrl?: string;
   /**
-   * Bootstrap credential exchange: a long-lived deployment secret that can
-   * create sessions. Required so authentication cannot be bypassed.
+   * Server-side ONLY one-time platform-setup credential (Prompt 00B §A).
+   * It may provision the designated owner exactly once and is never sent
+   * to browsers, never used as a login path, and never logged.
    */
-  bootstrapApiToken: string;
+  setupToken?: string;
   sessionTtlMs: number;
+  /** Optional CORS allowlist for API origins (credentials excluded). */
+  corsOrigins: string[];
 }
 
 function requireValue(env: Record<string, string | undefined>, key: string, purpose: string): string {
@@ -79,17 +82,6 @@ export function loadControlPlaneConfig(
     errors.push(error instanceof Error ? error.message : String(error));
   }
 
-  let bootstrapApiToken = "";
-  try {
-    bootstrapApiToken = requireValue(
-      env,
-      "MOX_BOOTSTRAP_API_TOKEN",
-      "long-lived credential allowed to mint authenticated sessions (provision out-of-band)",
-    );
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error));
-  }
-
   if (errors.length > 0) {
     throw new ConfigError(`control plane configuration invalid:\n- ${errors.join("\n- ")}`);
   }
@@ -100,8 +92,14 @@ export function loadControlPlaneConfig(
     databaseUrl,
     publicUrl,
     redisUrl: env["REDIS_URL"] || undefined,
-    bootstrapApiToken,
+    // Server-side only; absent setupToken means setup cannot run until an
+    // operator configures it — accounts are created via signup or setup.
+    setupToken: env["MOX_SETUP_TOKEN"] || undefined,
     sessionTtlMs: Number(env["MOX_SESSION_TTL_MS"] ?? 12 * 3600_000),
+    corsOrigins: (env["MOX_CORS_ORIGINS"] ?? "")
+      .split(",")
+      .map((o) => o.trim())
+      .filter(Boolean),
     ...overrides,
   };
 }

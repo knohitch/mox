@@ -1,7 +1,11 @@
 /**
- * Realtime abstraction (Prompt 00 §A): the UI subscribes to canonical
- * events through this seam; the transport (SSE today, WebSocket later)
- * is swappable without touching views.
+ * Realtime abstraction (Prompt 00 §A / 00B §D): the UI subscribes to
+ * canonical events through this seam; the transport (SSE today, WebSocket
+ * later) is swappable without touching views.
+ *
+ * Prompt 00B §D: NO reusable session tokens in URLs. Browser SSE rides the
+ * HttpOnly session cookie (sent automatically same-origin, or with
+ * credentials for the configured cross-origin API).
  */
 
 export interface RealtimeSubscription {
@@ -18,11 +22,10 @@ export interface RealtimeTransport {
   ): RealtimeSubscription;
 }
 
-/** SSE implementation over the control plane's durable event replay. */
 export class SseRealtimeTransport implements RealtimeTransport {
   constructor(
     private readonly baseUrl: string,
-    private readonly tokenProvider: () => Promise<string>,
+    private readonly crossOrigin: boolean,
   ) {}
 
   subscribe(
@@ -31,30 +34,19 @@ export class SseRealtimeTransport implements RealtimeTransport {
     onEvent: (frame: { seq: number; event: unknown }) => void,
     onError: (error: Error) => void,
   ): RealtimeSubscription {
-    let closed = false;
-    let source: EventSource | undefined;
-    void this.tokenProvider()
-      .then((token) => {
-        if (closed) return;
-        // EventSource cannot set headers; the control plane accepts the
-        // session token as a query parameter for this read-only stream.
-        const url = `${this.baseUrl}/api/streams/${channel}?sinceSeq=${sinceSeq}&token=${encodeURIComponent(token)}`;
-        source = new EventSource(url);
-        source.onmessage = (message) => {
-          try {
-            onEvent(JSON.parse(message.data) as { seq: number; event: unknown });
-          } catch {
-            onError(new Error("malformed realtime frame"));
-          }
-        };
-        source.onerror = () => onError(new Error("realtime stream disconnected"));
-      })
-      .catch(onError);
+    // Authentication is implicit via cookie — never a query parameter.
+    const url = `${this.baseUrl}/api/streams/${channel}?sinceSeq=${sinceSeq}`;
+    const source = new EventSource(url, { withCredentials: this.crossOrigin });
+    source.onmessage = (message) => {
+      try {
+        onEvent(JSON.parse(message.data) as { seq: number; event: unknown });
+      } catch {
+        onError(new Error("malformed realtime frame"));
+      }
+    };
+    source.onerror = () => onError(new Error("realtime stream disconnected"));
     return {
-      close: () => {
-        closed = true;
-        source?.close();
-      },
+      close: () => source.close(),
     };
   }
 }

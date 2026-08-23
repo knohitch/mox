@@ -246,7 +246,7 @@ describe("compute orchestrator", () => {
       orch.enrollNode({ ...enrollInput, nodeId: "node-c", enrollToken: "tok-evil" }),
     ).rejects.toThrow(/unknown enrollment token/);
 
-    // Org mismatch fails before consumption.
+    // Org binding is verified against the server ORDER itself (00B §F).
     const { order: order2 } = await orch.orderServer({
       orgId: "org-8b",
       computeClassCode: "COMPUTE_SMALL",
@@ -257,10 +257,10 @@ describe("compute orchestrator", () => {
     const secret2 = enrollSecrets(fake).at(-1)!;
     await expect(
       orch.enrollNode({ orgId: "org-OTHER", orderId: order2.id, nodeId: "node-d", enrollToken: secret2 }),
-    ).rejects.toThrow(/org mismatch/);
+    ).rejects.toThrow(/does not own this order/);
     await expect(
       orch.enrollNode({ orgId: "org-8b", orderId: order.id, nodeId: "node-d", enrollToken: secret2 }),
-    ).rejects.toThrow(/order mismatch/);
+    ).rejects.toThrow(/does not own this order/);
 
     // Expiry fails.
     const ttlOrch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {

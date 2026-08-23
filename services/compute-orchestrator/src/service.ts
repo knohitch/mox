@@ -393,23 +393,15 @@ export class ComputeOrchestrator {
         const { candidate, account } = await this.selectCandidate(cls.skuMap);
         const provider = this.provider(candidate.providerName);
         const sshKey = order.sshKeyId ? await this.store.getSshKey(order.sshKeyId) : undefined;
-        // Prompt 00 §E: the bootstrap secret is cryptographically strong and
-        // its hash is PERSISTED before provisioning/cloud-init runs. The
-        // plaintext exists only in the bootstrap payload below.
-        const enrollToken = randomBytes(32).toString("base64url");
-        const enrollTokenHash = sha256Hex(enrollToken);
-        await this.store.createEnrollmentToken({
-          id: newId(),
-          tokenHash: enrollTokenHash,
-          orgId: order.orgId,
-          orderId: order.id,
-          state: "issued",
-          expiresAt: new Date(Date.parse(at) + this.enrollTokenTtlMs).toISOString(),
-          createdAt: at,
-        });
+        // Prompt 00 §E + 00B §F: the bootstrap secret is cryptographically
+        // strong; its hash is PERSISTED before provisioning/cloud-init runs
+        // (plaintext exists only in the bootstrap payload below). Any prior
+        // issued token for this order is revoked first so retries never
+        // leave more than one usable expectation.
+        const enrollSecret = await this.issueEnrollmentToken(order, at);
         const cloudInit = buildMoxNodeCloudInit({
           controlPlaneUrl: this.controlPlaneUrl,
-          enrollToken,
+          enrollToken: enrollSecret.secret,
           orgId: order.orgId,
           orderId: order.id,
         });
@@ -441,12 +433,8 @@ export class ComputeOrchestrator {
           order.state = "running";
           await this.store.updateOrder(order);
           // Bind the pending enrollment expectation to the exact instance
-          // now that the provider id is known (§E3).
-          const expected = await this.store.getEnrollmentToken(enrollTokenHash);
-          if (expected && expected.state === "issued") {
-            expected.providerInstanceId = result.instance.providerInstanceId;
-            await this.store.updateEnrollmentToken(expected);
-          }
+          // now that the provider id is known (§E3/§F).
+          await this.bindEnrollmentInstance(enrollSecret.tokenHash, result.instance.providerInstanceId);
         } catch (error) {
           this.healthScorer?.record({
             providerName: candidate.providerName,
@@ -456,6 +444,8 @@ export class ComputeOrchestrator {
             latencyMs: Date.now() - startedAt,
             at: new Date().toISOString(),
           });
+          // A failed attempt must not leave a usable bootstrap token behind.
+          await this.store.revokeIssuedEnrollmentTokensForOrder(order.id, new Date().toISOString());
           throw error;
         }
         void at;
@@ -544,12 +534,43 @@ export class ComputeOrchestrator {
   // ---- Mox Node (untrusted) -----------------------------------------------------
 
   /**
-   * First-time enrollment (Prompt 00 §E). The presented bootstrap token is
-   * validated against the PRE-PERSISTED expected record: org/order binding,
-   * expiry, state, constant-time hash comparison, then an atomic single-use
-   * consume. Wrong, replayed or already-consumed tokens all fail. On success
-   * a durable node identity (agent token) is issued; its hash is stored and
-   * only the plaintext is returned in this one response.
+   * Issues the single valid bootstrap expectation for an order (00B §F):
+   * revokes any prior issued token first, then persists the new expected
+   * hash. Returns the plaintext secret for the bootstrap payload only.
+   */
+  private async issueEnrollmentToken(
+    order: ServerOrder,
+    at: string,
+  ): Promise<{ secret: string; tokenHash: string }> {
+    await this.store.revokeIssuedEnrollmentTokensForOrder(order.id, at);
+    const secret = randomBytes(32).toString("base64url");
+    const tokenHash = sha256Hex(secret);
+    await this.store.createEnrollmentToken({
+      id: newId(),
+      tokenHash,
+      orgId: order.orgId,
+      orderId: order.id,
+      state: "issued",
+      expiresAt: new Date(Date.parse(at) + this.enrollTokenTtlMs).toISOString(),
+      createdAt: at,
+    });
+    return { secret, tokenHash };
+  }
+
+  private async bindEnrollmentInstance(tokenHash: string, providerInstanceId: string): Promise<void> {
+    const expected = await this.store.getEnrollmentToken(tokenHash);
+    if (expected && expected.state === "issued") {
+      expected.providerInstanceId = providerInstanceId;
+      await this.store.updateEnrollmentToken(expected);
+    }
+  }
+
+  /**
+   * First-time enrollment (Prompt 00 §E + 00B §F). Validation chain:
+   * expected record → org binding → order binding → order provisioned →
+   * instance binding (rejects tokens from older provisioning attempts) →
+   * expiry/state → constant-time hash compare → atomic single-use consume.
+   * On success a durable node identity is issued; only its hash is stored.
    */
   async enrollNode(input: {
     orgId: string;
@@ -564,6 +585,14 @@ export class ComputeOrchestrator {
     if (!input.enrollToken || !input.orderId) {
       throw new EnrollmentError("enrollment requires orderId and enrollToken");
     }
+    // The server order anchors ownership and current provider reality.
+    const order = await this.store.getOrder(input.orderId);
+    if (!order) throw new EnrollmentError("unknown server order");
+    if (order.orgId !== input.orgId) throw new EnrollmentError("enrollment org does not own this order");
+    if (!order.providerInstanceId) {
+      throw new EnrollmentError("server order has no provisioned instance yet");
+    }
+
     const tokenHash = sha256Hex(input.enrollToken);
     const expected = await this.store.getEnrollmentToken(tokenHash);
     // Audit note: failures never echo token material.
@@ -573,6 +602,10 @@ export class ComputeOrchestrator {
     if (expected.expiresAt <= at) throw new EnrollmentError("enrollment token expired");
     if (expected.orgId !== input.orgId) throw new EnrollmentError("enrollment token org mismatch");
     if (expected.orderId !== input.orderId) throw new EnrollmentError("enrollment token order mismatch");
+    // A bound token from a superseded provisioning attempt must not work.
+    if (expected.providerInstanceId && expected.providerInstanceId !== order.providerInstanceId) {
+      throw new EnrollmentError("enrollment token belongs to an older provisioning attempt");
+    }
     // Constant-time comparison of the two digests (§E6).
     if (!hashesEqual(expected.tokenHash, tokenHash)) {
       throw new EnrollmentError("enrollment token mismatch");

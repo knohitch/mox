@@ -1,13 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AgentEvent, ApprovalRequest } from "@mox/contracts";
-import {
-  ApiUnavailableError,
-  HttpMoxApi,
-  exchangeBootstrapSession,
-} from "./http-api.js";
+import { ApiUnavailableError, HttpMoxApi } from "./http-api.js";
 import type { RealtimeSubscription } from "./realtime.js";
-import { resolveWebConfig, WebConfigError } from "../config.js";
+import { resolveWebConfig } from "../config.js";
 import type {
   AgentSummary,
   ChatMessage,
@@ -17,9 +13,11 @@ import type {
 
 /**
  * App-wide state over the MoxApi seam. Views never touch the API directly —
- * they consume hooks. Prompt 00 §A: production composes the authenticated
- * HTTP client against the control plane; the demo implementation is an
- * explicit dev-only escape hatch with no production fallback path.
+ * they consume hooks. Prompt 00 §A + 00B §B: production composes the
+ * authenticated HTTP client against the control plane using HttpOnly cookie
+ * sessions (no bootstrap secrets, no browser-persisted credentials); the demo
+ * implementation is an explicit dev-only escape hatch with no production
+ * fallback path.
  */
 
 interface MoxStore {
@@ -27,6 +25,11 @@ interface MoxStore {
   ready: boolean;
   /** Honest failure surface: configuration or backend unavailability. */
   error: string | null;
+  /** True when the server rejected the session (login required). */
+  needsAuth: boolean;
+  signIn(input: { email: string; password: string }): Promise<void>;
+  signUp(input: { email: string; password: string; orgName?: string }): Promise<void>;
+  signOut(): Promise<void>;
   agents: AgentSummary[];
   entitlements: Entitlements | undefined;
   approvals: ApprovalRequest[];
@@ -42,55 +45,17 @@ interface MoxStore {
 
 const Ctx = createContext<MoxStore | null>(null);
 
-const SESSION_STORAGE_KEY = "mox.session.v1";
-
-interface CachedSession {
-  sessionToken: string;
-  expiresAt: string;
-}
-
-function loadCachedSession(): CachedSession | undefined {
-  try {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (!raw) return undefined;
-    const parsed = JSON.parse(raw) as CachedSession;
-    if (!parsed.sessionToken || Date.parse(parsed.expiresAt) <= Date.now()) return undefined;
-    return parsed;
-  } catch {
-    return undefined;
-  }
-}
-
-function storeCachedSession(session: CachedSession): void {
-  try {
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-  } catch {
-    // Private-mode storage failures degrade to per-load sessions.
-  }
-}
-
 /** Explicit composition of the API seam (Prompt 00 §A). */
-function createMoxApi(): { api: MoxApi; error: string | null } {
+function createMoxApi(): { api: MoxApi; error: string | null; httpApi?: HttpMoxApi } {
   try {
     const config = resolveWebConfig(import.meta.env);
     if (config.mode === "demo") {
-      // Dev-only explicit escape hatch; unreachable from production builds
-      // because resolveWebConfig throws on VITE_DEMO_MODE in PROD.
-      void config;
-      throw new WebConfigError(
-        "demo mode requires wiring DemoMoxApi explicitly in a development build; it is never a production path",
+      throw new Error(
+        "demo mode requires explicit dev-only wiring in a development build; it is never a production path",
       );
     }
-    const bootstrapToken = config.bootstrapToken;
-    const tokenProvider = async (): Promise<string> => {
-      const cached = loadCachedSession();
-      if (cached) return cached.sessionToken;
-      if (!bootstrapToken) return "";
-      const session = await exchangeBootstrapSession(config.apiBaseUrl, bootstrapToken);
-      storeCachedSession(session);
-      return session.sessionToken;
-    };
-    return { api: new HttpMoxApi({ baseUrl: config.apiBaseUrl, tokenProvider }), error: null };
+    const httpApi = new HttpMoxApi({ baseUrl: config.apiBaseUrl });
+    return { api: httpApi, error: null, httpApi };
   } catch (error) {
     return {
       api: failingApi(error instanceof Error ? error.message : String(error)),
@@ -134,6 +99,10 @@ function failingApi(message: string): MoxApi {
   };
 }
 
+function isUnauthorized(error: unknown): boolean {
+  return (error as { status?: number })?.status === 401;
+}
+
 interface RunState {
   handle: { runId: string; cancel(): void };
   threadId: string;
@@ -142,7 +111,9 @@ interface RunState {
 export function MoxProvider({ children }: { children: ReactNode }) {
   const composed = useMemo(() => createMoxApi(), []);
   const api = composed.api;
+  const httpApi = composed.httpApi;
   const [ready, setReady] = useState(false);
+  const [needsAuth, setNeedsAuth] = useState(false);
   const [backendError, setBackendError] = useState<string | null>(composed.error);
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [entitlements, setEntitlements] = useState<Entitlements>();
@@ -172,10 +143,12 @@ export function MoxProvider({ children }: { children: ReactNode }) {
         setEntitlements(ents);
         setApprovals(open);
         setReady(true);
+        setNeedsAuth(false);
         setBackendError(null);
       } catch (error) {
         if (!alive) return;
         // Honest error surface — the app never pretends demo data is real.
+        setNeedsAuth(isUnauthorized(error));
         setBackendError(error instanceof Error ? error.message : String(error));
       }
     })();
@@ -185,18 +158,16 @@ export function MoxProvider({ children }: { children: ReactNode }) {
   }, [api, composed.error]);
 
   useEffect(() => {
-    if (composed.error || backendError?.includes("control plane")) return;
+    if (composed.error || !ready || !httpApi) return;
     let subscription: RealtimeSubscription | undefined;
-    if ("realtime" in api) {
-      subscription = (api as { realtime?: { subscribe: RealtimeTransportLike } }).realtime?.subscribe(
-        "org-events",
-        0,
-        () => setEventsVersion((v) => v + 1),
-        () => setBackendError("realtime stream disconnected"),
-      );
-    }
+    subscription = httpApi.realtime.subscribe(
+      "org-events",
+      0,
+      () => setEventsVersion((v) => v + 1),
+      () => undefined, // transient stream errors surface on next fetch
+    );
     return () => subscription?.close();
-  }, [api, composed.error, backendError]);
+  }, [httpApi, ready, composed.error]);
 
   const loadThread = useCallback(
     async (_agentId: string, threadId: string) => {
@@ -210,6 +181,46 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     },
     [api, messagesByThread],
   );
+
+  const authenticateAndLoad = useCallback(async (action: () => Promise<unknown>) => {
+    if (!httpApi) return;
+    await action();
+    const [list, ents, open] = await Promise.all([
+      httpApi.listAgents(),
+      httpApi.getEntitlements(),
+      httpApi.openApprovals(),
+    ]);
+    setAgents(list);
+    setEntitlements(ents);
+    setApprovals(open);
+    setReady(true);
+    setNeedsAuth(false);
+    setBackendError(null);
+  }, [httpApi]);
+
+  const signIn = useCallback(
+    async (input: { email: string; password: string }) => {
+      await authenticateAndLoad(() => httpApi!.login(input));
+    },
+    [authenticateAndLoad, httpApi],
+  );
+
+  const signUp = useCallback(
+    async (input: { email: string; password: string; orgName?: string }) => {
+      await authenticateAndLoad(() => httpApi!.signup(input));
+    },
+    [authenticateAndLoad, httpApi],
+  );
+
+  const signOut = useCallback(async () => {
+    if (!httpApi) return;
+    await httpApi.logout().catch(() => undefined);
+    setReady(false);
+    setNeedsAuth(true);
+    setAgents([]);
+    setApprovals([]);
+    setMessagesByThread(new Map());
+  }, [httpApi]);
 
   const send = useCallback(
     async (agentId: string, threadId: string, text: string) => {
@@ -337,6 +348,10 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     api,
     ready,
     error: backendError,
+    needsAuth,
+    signIn,
+    signUp,
+    signOut,
     agents,
     entitlements,
     approvals,
@@ -352,13 +367,6 @@ export function MoxProvider({ children }: { children: ReactNode }) {
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
-
-type RealtimeTransportLike = (
-  channel: "org-events",
-  sinceSeq: number,
-  onEvent: (frame: { seq: number; event: unknown }) => void,
-  onError: (error: Error) => void,
-) => RealtimeSubscription;
 
 export function useMox(): MoxStore {
   const ctx = useContext(Ctx);

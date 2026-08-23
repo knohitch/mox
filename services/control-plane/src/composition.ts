@@ -58,8 +58,10 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
   const billing = new BillingService(new PgBillingStore(db));
   // §F: the public URL is validated deployment configuration passed to node
   // bootstraps; https is enforced by the config validator in production.
+  // Non-production deployments may bind plain-http endpoints for tests.
   const orchestrator = new ComputeOrchestrator(new PgOrchestratorStore(db), {
     controlPlaneUrl: config.publicUrl,
+    allowInsecureControlPlaneUrl: config.env !== "production",
   });
   const entitlements = new EntitlementService(new PgEntitlementStore(db));
   const notifications = new NotificationService(new PgNotificationStore(db));
