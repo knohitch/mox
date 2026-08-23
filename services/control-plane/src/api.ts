@@ -115,6 +115,69 @@ export function buildApiRouter(deps: ApiDeps): Router {
     }
   };
 
+  /**
+   * Prompt 02 §Admin: real platform authority — explicit deployment
+   * admin list. A PAT `admin` scope NEVER confers this.
+   */
+  const requirePlatformAdmin = async (ctx: RequestContext) => {
+    const auth = await authenticate(db(), {
+      authorization: ctx.req.headers.authorization,
+      cookie: ctx.req.headers.cookie,
+    });
+    const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes(ctx.req.method ?? "");
+    if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
+      throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
+    }
+    if (!services.config.platformAdminUserIds.includes(auth.userId)) {
+      throw httpError("platform administrator authority required", 403, { code: "role_denied" });
+    }
+    return { ...auth.identity, userId: auth.userId };
+  };
+
+  function validateAdminSendBody(body: unknown): {
+    idempotencyKey: string;
+    audience: Parameters<typeof services.notifications.createJob>[0]["audience"];
+    payload: Parameters<typeof services.notifications.createJob>[0]["payload"];
+    scheduledAt?: string;
+  } {
+    const b = body as {
+      idempotencyKey?: string;
+      audience?: { type?: string; userIds?: string[]; orgId?: string; planTier?: string; regionCode?: string };
+      payload?: { title?: string; body?: string; severity?: string; category?: string; expiresAt?: string };
+      scheduledAt?: string;
+    } | undefined;
+    if (!b?.idempotencyKey || !b.audience?.type || !b.payload?.title || !b.payload?.body) {
+      throw httpError("idempotencyKey, audience.type, payload.title and payload.body are required", 400);
+    }
+    const allowedAudiences = ["user", "users", "org", "plan", "region", "all"];
+    if (!allowedAudiences.includes(b.audience.type)) throw httpError("invalid audience type", 400);
+    return {
+      idempotencyKey: b.idempotencyKey,
+      audience: {
+        type: b.audience.type as "org",
+        userIds: b.audience.userIds,
+        orgId: b.audience.orgId,
+        planTier: b.audience.planTier,
+        regionCode: b.audience.regionCode,
+      },
+      payload: {
+        title: b.payload.title,
+        body: b.payload.body,
+        severity: (b.payload.severity as never) ?? "info",
+        category: (b.payload.category as never) ?? "system",
+        expiresAt: b.payload.expiresAt,
+      },
+      scheduledAt: b.scheduledAt,
+    };
+  }
+
+  /** Emits a durable platform notification after committed state changes. */
+  const emitPlatformEvent = async (
+    event: Parameters<typeof services.notifications.consume>[0],
+  ): Promise<void> => {
+    await services.notifications.consume(event);
+  };
+
   const sessionCookieOptions = () => ({
     secure: services.config.env === "production",
     maxAgeSeconds: Math.floor(services.config.sessionTtlMs / 1000),
@@ -562,6 +625,20 @@ export function buildApiRouter(deps: ApiDeps): Router {
       idempotencyKey: crypto.randomUUID(),
       sshKeyId: body.sshKeyId,
     });
+    if (result.created) {
+      await emitPlatformEvent({
+        eventId: `server.ordered:${result.order.id}`,
+        type: "server.ordered",
+        orgId: identity.orgId,
+        userId: identity.userId,
+        severity: "info",
+        category: "servers",
+        resourceType: "server_order",
+        resourceId: result.order.id,
+        templateVars: { hostname: body.hostname },
+        at: new Date().toISOString(),
+      });
+    }
     return result.order;
   });
 
@@ -756,6 +833,139 @@ export function buildApiRouter(deps: ApiDeps): Router {
       ok: true,
       note: "provider registered; restart or reconciliation reload activates adapters",
     };
+  });
+
+  // ---- Prompt 02: user notification inbox (ownership-scoped) ---------------------
+
+  router.get("/api/notifications", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const rows = await services.notifications.listInbox(auth.orgId, auth.userId, {
+      unreadOnly: ctx.query.get("unread") === "1",
+      includeArchived: ctx.query.get("archived") === "1",
+      category: ctx.query.get("category") ?? undefined,
+      limit: Math.min(Number(ctx.query.get("limit") ?? 50), 100),
+      offset: Number(ctx.query.get("offset") ?? 0),
+    });
+    return rows;
+  });
+
+  router.get("/api/notifications/unread-count", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    return { count: await services.notifications.unreadCount(auth.orgId, auth.userId) };
+  });
+
+  /** Single fetch is ownership-checked inside the store: IDOR-safe. */
+  router.get("/api/notifications/:id", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const n = await services.notifications.getNotification(ctx.params.id!, auth.orgId, auth.userId);
+    if (!n) throw httpError(`notification ${ctx.params.id} not found`, 404);
+    return n;
+  });
+
+  const userNotificationAction = (
+    action: "read" | "unread" | "archive",
+  ): ((ctx: RequestContext) => Promise<unknown>) => {
+    return async (ctx) => {
+      const auth = await requireAuth(ctx);
+      let ok: boolean;
+      if (action === "read") ok = await services.notifications.markRead(ctx.params.id!, auth.orgId, auth.userId);
+      else if (action === "unread") ok = await services.notifications.markUnread(ctx.params.id!, auth.orgId, auth.userId);
+      else ok = await services.notifications.archive(ctx.params.id!, auth.orgId, auth.userId);
+      if (!ok) throw httpError(`notification ${ctx.params.id} not found`, 404);
+      return { ok: true };
+    };
+  };
+
+  router.post("/api/notifications/:id/read", userNotificationAction("read"));
+  router.post("/api/notifications/:id/unread", userNotificationAction("unread"));
+  router.post("/api/notifications/:id/archive", userNotificationAction("archive"));
+
+  router.post("/api/notifications/read-all", async (ctx) => {
+    const auth = await requireAuth(ctx);
+    const changed = await services.notifications.markAllRead(auth.orgId, auth.userId);
+    return { changed };
+  });
+
+  /**
+   * Per-user realtime stream (Prompt 02 §Realtime): cookie/bearer auth
+   * only, frames ONLY for the authenticated user. Persist-first ordering
+   * is guaranteed by the service.
+   */
+  router.get("/api/streams/user-notifications", async (ctx) => {
+    if (ctx.query.get("token") || ctx.query.get("authorization")) {
+      throw httpError("stream authentication must use cookie or Authorization header", 400, {
+        code: "no_token_in_url",
+      });
+    }
+    const auth = await authenticate(db(), {
+      authorization: ctx.req.headers.authorization,
+      cookie: ctx.req.headers.cookie,
+    });
+    ctx.res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+    });
+    ctx.res.write(`retry: 3000\n\n`);
+    const unsubscribe = services.notifications.onPublished((published) => {
+      // Isolation: only the intended recipient receives the frame.
+      if (published.audienceType === "user" && published.userId !== auth.userId) return;
+      if (published.audienceType !== "user") {
+        // Org/broadcast frames fan out per-recipient rows with userId set;
+        // anything without a recipient never reaches a user stream.
+        return;
+      }
+      ctx.res.write(`data: ${JSON.stringify({ notificationId: published.notificationId })}\n\n`);
+    });
+    ctx.req.on("close", unsubscribe);
+    return undefined;
+  });
+
+  // ---- Prompt 02: admin authoring (platform-admin gated) --------------------------
+
+  router.post("/api/admin/notifications/preview", async (ctx) => {
+    await requirePlatformAdmin(ctx);
+    const body = ctx.body as { title?: string; body?: string; templateVars?: Record<string, string> } | undefined;
+    return services.notifications.preview({ title: body?.title ?? "", body: body?.body ?? "", templateVars: body?.templateVars });
+  });
+
+  router.post("/api/admin/notifications/send", async (ctx) => {
+    const admin = await requirePlatformAdmin(ctx);
+    const input = validateAdminSendBody(ctx.body);
+    const { job } = await services.notifications.createJob({
+      ...input,
+      createdBy: admin.userId,
+      scheduledAt: undefined,
+    });
+    // Send-now jobs run through the same durable fan-out runner.
+    const result = await services.notifications.runDueJobs(new Date().toISOString());
+    void result;
+    return { jobId: job.id, status: "completed-or-running" };
+  });
+
+  router.post("/api/admin/notifications/schedule", async (ctx) => {
+    const admin = await requirePlatformAdmin(ctx);
+    const input = validateAdminSendBody(ctx.body);
+    if (!input.scheduledAt) throw httpError("scheduledAt is required", 400);
+    const { job } = await services.notifications.createJob({
+      ...input,
+      createdBy: admin.userId,
+    });
+    return { jobId: job.id, status: job.status, scheduledAt: job.scheduledAt };
+  });
+
+  router.post("/api/admin/notifications/jobs/:jobId/cancel", async (ctx) => {
+    await requirePlatformAdmin(ctx);
+    const canceled = await services.notifications.cancelJob(ctx.params.jobId!);
+    if (!canceled) throw httpError(`job ${ctx.params.jobId} not found or not cancelable`, 404);
+    return { ok: true };
+  });
+
+  router.get("/api/admin/notifications/jobs/:jobId", async (ctx) => {
+    await requirePlatformAdmin(ctx);
+    const job = await services.notifications.getJob(ctx.params.jobId!);
+    if (!job) throw httpError(`job ${ctx.params.jobId} not found`, 404);
+    return job;
   });
 
   // ---- Usage / billing -----------------------------------------------------------
@@ -983,9 +1193,42 @@ export function buildApiRouter(deps: ApiDeps): Router {
    * over the EXACT original request bytes — the parsed JSON is never
    * re-serialized. Raw bodies are never logged.
    */
+  const WEBHOOK_EVENT_NOTIFICATIONS: Record<
+    string,
+    { eventType: "subscription.activated" | "subscription.renewed" | "subscription.past_due" | "subscription.canceled"; title: string }
+  > = {
+    "checkout.completed": { eventType: "subscription.activated", title: "Subscription activated" },
+    "payment.succeeded": { eventType: "subscription.renewed", title: "Payment received" },
+    "payment.failed": { eventType: "subscription.past_due", title: "Payment failed - action required" },
+    "subscription.canceled": { eventType: "subscription.canceled", title: "Subscription canceled" },
+  };
+
   router.post("/webhooks/billing/:provider", async (ctx) => {
     const raw = ctx.rawBody?.toString("utf8") ?? "";
-    return services.billing.handleProviderWebhook(ctx.params.provider!, ctx.req.headers as Record<string, string>, raw);
+    const result = await services.billing.handleProviderWebhook(
+      ctx.params.provider!,
+      ctx.req.headers as Record<string, string>,
+      raw,
+    );
+    // Prompt 02 §Automatic events: committed billing state feeds the
+    // durable notification service (org-audience rows).
+    if (result.applied && result.eventType && result.orgId) {
+      const mapped = WEBHOOK_EVENT_NOTIFICATIONS[result.eventType];
+      if (mapped) {
+        await emitPlatformEvent({
+          eventId: `billing:${result.providerRef}:${result.eventType}`,
+          type: mapped.eventType,
+          orgId: result.orgId,
+          severity: result.eventType === "payment.failed" ? "warning" : "info",
+          category: "billing",
+          resourceType: "subscription",
+          resourceId: result.providerRef,
+          templateVars: {},
+          at: new Date().toISOString(),
+        });
+      }
+    }
+    return result;
   });
 
   return router;

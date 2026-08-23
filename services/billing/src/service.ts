@@ -351,7 +351,15 @@ export class BillingService {
     providerName: string,
     headers: Record<string, string>,
     rawBody: string,
-  ): Promise<{ applied: boolean; duplicate?: boolean; rejected?: boolean; reason?: string }> {
+  ): Promise<{
+    applied: boolean;
+    duplicate?: boolean;
+    rejected?: boolean;
+    reason?: string;
+    eventType?: string;
+    orgId?: string;
+    providerRef?: string;
+  }> {
     const provider = this.provider(providerName);
     let event;
     try {
@@ -433,7 +441,24 @@ export class BillingService {
       record.status = "applied";
       record.appliedAt = new Date().toISOString();
       await this.store.updateWebhook(record);
-      return { applied: true };
+      // Prompt 02 §Automatic events: expose committed facts so the caller
+      // can feed the durable notification service.
+      let orgId: string | undefined;
+      if (event.type === "checkout.completed") {
+        const session = await this.store.findCheckoutSessionByProviderRef(event.subjectRef);
+        orgId = session?.orgId;
+      } else {
+        const sub =
+          (await this.store.findSubscriptionByProviderRef(event.subscriptionRef ?? event.subjectRef)) ??
+          undefined;
+        orgId = sub?.orgId;
+      }
+      return {
+        applied: true,
+        eventType: event.type,
+        orgId,
+        providerRef: event.subscriptionRef ?? event.subjectRef,
+      } as { applied: boolean; eventType?: string; orgId?: string; providerRef?: string };
     } catch (error) {
       record.status = "rejected";
       record.rejectionReason = error instanceof Error ? error.message : String(error);

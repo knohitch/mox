@@ -85,7 +85,7 @@ describe("notification service", () => {
         templateVars: { agentSlug: "sales-helper", deploymentId: "dep_1", hostname: "ws-1" },
       }),
     );
-    const notification = await store.get(result.inAppId!);
+    const notification = await store.getForUser(result.inAppId!, "org-1", "u1");
     expect(notification?.title).toBe('Agent "sales-helper" crashed');
     expect(notification?.body).toContain("dep_1");
   });
@@ -99,7 +99,7 @@ describe("notification service", () => {
     expect(first.duplicate).toBe(false);
     expect(second.duplicate).toBe(true);
     expect(second.inAppId).toBe(first.inAppId);
-    expect(await store.list("org-1")).toHaveLength(1);
+    expect(await store.listForUser("org-1", "u1")).toHaveLength(1);
   });
 
   it("supports realtime unread updates, read state, archive and expiry", async () => {
@@ -111,19 +111,19 @@ describe("notification service", () => {
     const created = await svc.consume(event());
     expect(updates.at(-1)).toBe(1);
 
-    await svc.markRead("org-1", created.inAppId!);
+    await svc.markRead(created.inAppId!, "org-1", "u1");
     expect(updates.at(-1)).toBe(0);
-    expect(await svc.listUnread("org-1")).toBe(0);
+    expect(await svc.unreadCount("org-1", "u1")).toBe(0);
 
     const second = await svc.consume(event());
-    const n = await store.get(second.inAppId!);
-    await store.archive(n!.id, new Date().toISOString());
-    expect(await store.list("org-1")).toHaveLength(1); // archived hidden
+    const n = await store.getForUser(second.inAppId!, "org-1", "u1");
+    await store.archive(n!.id, "org-1", "u1", new Date().toISOString());
+    expect(await store.listForUser("org-1", "u1")).toHaveLength(1); // archived hidden
 
     // Expiry purge removes only expired notifications.
     const expiring = event({ eventId: "expiring" });
     const createdExpiring = await svc.consume(expiring);
-    await store.get(createdExpiring.inAppId!).then(async (row) => {
+    await store.getForUser(createdExpiring.inAppId!, "org-1", "u1").then(async (row) => {
       row!.expiresAt = "2026-01-01T00:00:00.000Z";
       await store.insert(row!);
     });

@@ -229,3 +229,77 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 }
 .auth-gate button.linklike { background: transparent; color: var(--text-dim); }
 .signout { text-align: left; background: transparent; border: none; cursor: pointer; }
+
+
+.topbar {
+  position: fixed;
+  top: 0; right: 0;
+  padding: 10px 14px;
+  z-index: 500;
+}
+.bell-wrap { position: relative; }
+.bell {
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 16px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.bell-badge {
+  position: absolute;
+  top: -6px; right: -6px;
+  background: var(--bad);
+  color: white;
+  font-size: 10px;
+  border-radius: 999px;
+  padding: 1px 5px;
+}
+.inbox {
+  position: fixed;
+  top: 52px; right: 14px;
+  width: min(420px, calc(100vw - 28px));
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  z-index: 600;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.inbox-head { display: flex; gap: 8px; align-items: center; }
+.inbox-head select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+  flex: 1;
+}
+.inbox-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.inbox-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.inbox-item.unread { border-left: 3px solid var(--accent); }
+.inbox-item.sev-warning { border-left-color: var(--warn); }
+.inbox-item.sev-critical { border-left-color: var(--bad); }
+.inbox-item.read { opacity: 0.65; }
+.inbox-item-main { display: flex; flex-direction: column; gap: 2px; }
+.inbox-item-actions { display: flex; flex-direction: column; gap: 4px; }
+.inbox-item-actions button, .inbox button {
+  background: var(--bg);
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 3px 7px;
+  cursor: pointer;
+}

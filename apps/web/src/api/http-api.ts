@@ -22,6 +22,7 @@ import type {
   ProgrammaticLoginResponse,
   SignupRequest,
 } from "@mox/control-plane-contracts";
+import type { NotificationItem } from "./notification-types.js";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
 import type {
   AgentSummary,
@@ -171,6 +172,49 @@ export class HttpMoxApi implements MoxApi {
       method: "POST",
       body: JSON.stringify({ orgId }),
     });
+  }
+
+  // ---- Notifications (Prompt 02) ----------------------------------------------------
+
+  listNotifications(
+    filters: { unread?: boolean; category?: string; limit?: number; offset?: number } = {},
+  ): Promise<NotificationItem[]> {
+    const params = new URLSearchParams();
+    if (filters.unread) params.set("unread", "1");
+    if (filters.category) params.set("category", filters.category);
+    if (filters.limit !== undefined) params.set("limit", String(filters.limit));
+    if (filters.offset !== undefined) params.set("offset", String(filters.offset));
+    const qs = params.toString();
+    return this.call<NotificationItem[]>(`/api/notifications${qs ? `?${qs}` : ""}`);
+  }
+
+  unreadCount(): Promise<{ count: number }> {
+    return this.call<{ count: number }>("/api/notifications/unread-count");
+  }
+
+  markNotificationRead(id: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
+  markNotificationUnread(id: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/unread`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
+  archiveNotification(id: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/archive`, {
+      method: "POST",
+      body: "{}",
+    }).then(() => undefined);
+  }
+
+  markAllNotificationsRead(): Promise<{ changed: number }> {
+    return this.call<{ changed: number }>("/api/notifications/read-all", { method: "POST", body: "{}" });
   }
 
   // ---- Personal access tokens (programmatic contract, 00C §B / 00D §B) ------------

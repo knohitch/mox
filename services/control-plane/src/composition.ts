@@ -17,7 +17,7 @@
  *      - production wiring   → forbidden here (lint/review gate).
  */
 
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   createDb,
   billingProviderConfigs,
@@ -29,6 +29,8 @@ import {
   PgOrchestratorStore,
   PgSessionEventStore,
   PgThreadStore,
+  memberships,
+  users,
 } from "@mox/database";
 import { BillingService } from "@mox/billing";
 import type { BillingProvider } from "@mox/billing";
@@ -72,7 +74,53 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     allowInsecureControlPlaneUrl: config.env !== "production",
   });
   const entitlements = new EntitlementService(new PgEntitlementStore(db));
-  const notifications = new NotificationService(new PgNotificationStore(db));
+  const notifications = new NotificationService(new PgNotificationStore(db), async (audience) => {
+    // Durable fan-out resolver (Prompt 02): resolves recipients from
+    // PostgreSQL according to the admin-selected audience.
+    const { users, subscriptions, planVersions, products, billingCustomers } = await import(
+      "@mox/database"
+    );
+    const base = () =>
+      db
+        .select({ orgId: memberships.orgId, userId: users.id })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId));
+    if (audience.type === "user" || audience.type === "users") {
+      const ids = audience.userIds ?? [];
+      if (ids.length === 0) return [];
+      return base().where(and(isNull(users.disabledAt), inArray(users.id, ids)));
+    }
+    if (audience.type === "org") {
+      if (!audience.orgId) return [];
+      return base().where(and(isNull(users.disabledAt), eq(memberships.orgId, audience.orgId)));
+    }
+    if (audience.type === "all") {
+      return base().where(isNull(users.disabledAt));
+    }
+    if (audience.type === "plan") {
+      if (!audience.planTier) return [];
+      const rows = await db
+        .select({ orgId: subscriptions.orgId, userId: memberships.userId })
+        .from(subscriptions)
+        .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
+        .innerJoin(products, eq(products.id, planVersions.productId))
+        .innerJoin(memberships, eq(memberships.orgId, subscriptions.orgId))
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(and(eq(products.tier, audience.planTier as "plus"), isNull(users.disabledAt)));
+      return rows;
+    }
+    if (audience.type === "region") {
+      if (!audience.regionCode) return [];
+      const rows = await db
+        .select({ orgId: billingCustomers.orgId, userId: memberships.userId })
+        .from(billingCustomers)
+        .innerJoin(memberships, eq(memberships.orgId, billingCustomers.orgId))
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(and(eq(billingCustomers.billingRegion, audience.regionCode), isNull(users.disabledAt)));
+      return rows;
+    }
+    return [];
+  });
 
   // Prompt 01: DB-driven payment-provider registration. Secrets resolve
   // from environment variables NAMED by admin-configured refs — never

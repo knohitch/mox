@@ -299,7 +299,7 @@ function defineRestartSuite(harness: Harness): void {
     const restarted = new NotificationService(second);
     const replay = await restarted.consume(event);
     expect(replay.duplicate).toBe(true);
-    const list = await restarted.store.list(ORG);
+    const list = await restarted.store.listForUser(ORG);
     expect(list).toHaveLength(1);
     expect(list[0]!.eventType).toBe("server.provisioned");
   });

@@ -1,13 +1,18 @@
-import { and, asc, desc, eq, isNull, lte, sql } from "drizzle-orm";
 import type {
+  AdminAudience,
+  AudienceType,
   DispatchedMessage,
   InAppNotification,
   MessageTemplate,
+  NotificationJobRecord,
   NotificationStore,
   NotificationPreferences,
+  Severity,
 } from "@mox/notification-service";
+import type { UserInboxFilters } from "@mox/notification-service";
 import type { MoxDb } from "./client.js";
-import { dispatchedMessages, inAppNotifications, messageTemplates, notificationPreferences } from "./schema/index.js";
+import { dispatchedMessages, inAppNotifications, messageTemplates, notificationJobs, notificationPreferences } from "./schema/index.js";
+import { and, asc, desc, eq, isNull, lte, sql, type SQL } from "drizzle-orm";
 
 /**
  * PostgreSQL notification store (Prompt 00 §C): in-app notification records
@@ -15,8 +20,22 @@ import { dispatchedMessages, inAppNotifications, messageTemplates, notificationP
  * unique (org, dedupe_key) index with ON CONFLICT DO NOTHING.
  */
 
+/**
+ * Visibility rule as SQL (Prompt 02): a row is visible when it belongs to
+ * the org AND either targets nobody exclusively (org/broadcast) or targets
+ * exactly this user. An absent/empty userId sees only org-wide rows.
+ */
+function visibleSql(userId: string | undefined): SQL {
+  const at = inAppNotifications.audienceType;
+  const uid = inAppNotifications.userId;
+  return userId
+    ? sql`(${at} <> 'user' OR ${uid} = ${userId})`
+    : sql`${at} <> 'user'`;
+}
+
 export class PgNotificationStore implements NotificationStore {
   constructor(private readonly db: MoxDb) {}
+
 
   async upsertPreferences(prefs: NotificationPreferences): Promise<void> {
     const values = {
@@ -142,20 +161,6 @@ export class PgNotificationStore implements NotificationStore {
     return rows.map(rowToNotification);
   }
 
-  async markRead(id: string, at: string): Promise<void> {
-    await this.db
-      .update(inAppNotifications)
-      .set({ readAt: new Date(at) })
-      .where(eq(inAppNotifications.id, id));
-  }
-
-  async archive(id: string, at: string): Promise<void> {
-    await this.db
-      .update(inAppNotifications)
-      .set({ archivedAt: new Date(at) })
-      .where(eq(inAppNotifications.id, id));
-  }
-
   async purgeExpired(nowIso: string): Promise<number> {
     const purged = await this.db
       .delete(inAppNotifications)
@@ -196,6 +201,167 @@ export class PgNotificationStore implements NotificationStore {
       at: row.at.toISOString(),
     }));
   }
+
+  // ---- Prompt 02: ownership-scoped inbox -------------------------------------
+
+  async getForUser(id: string, orgId: string, userId: string): Promise<InAppNotification | undefined> {
+    const rows = await this.db
+      .select()
+      .from(inAppNotifications)
+      .where(
+        and(
+          eq(inAppNotifications.id, id),
+          eq(inAppNotifications.orgId, orgId),
+          visibleSql(userId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? rowToNotification(rows[0]) : undefined;
+  }
+
+  async listForUser(orgId: string, userId: string | undefined, filters?: UserInboxFilters): Promise<InAppNotification[]> {
+    const conditions = [
+      eq(inAppNotifications.orgId, orgId),
+      visibleSql(userId),
+    ];
+    if (filters?.unreadOnly) conditions.push(isNull(inAppNotifications.readAt));
+    if (!filters?.includeArchived) conditions.push(isNull(inAppNotifications.archivedAt));
+    if (filters?.category) conditions.push(eq(inAppNotifications.category, filters.category));
+    const rows = await this.db
+      .select()
+      .from(inAppNotifications)
+      .where(and(...conditions))
+      .orderBy(desc(inAppNotifications.createdAt))
+      .limit(filters?.limit ?? 50)
+      .offset(filters?.offset ?? 0);
+    return rows.map(rowToNotification);
+  }
+
+  async unreadCount(orgId: string, userId: string): Promise<number> {
+    const result = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(inAppNotifications)
+      .where(
+        and(
+          eq(inAppNotifications.orgId, orgId),
+          visibleSql(userId),
+          isNull(inAppNotifications.readAt),
+          isNull(inAppNotifications.archivedAt),
+        ),
+      );
+    return Number(result[0]?.count ?? 0);
+  }
+
+  async markRead(id: string, orgId: string, userId: string, at: string): Promise<boolean> {
+    return this.markForUser(id, orgId, userId, { readAt: new Date(at), updatedAt: new Date(at) });
+  }
+
+  async markUnread(id: string, orgId: string, userId: string, at: string): Promise<boolean> {
+    return this.markForUser(id, orgId, userId, { readAt: null, updatedAt: new Date(at) });
+  }
+
+  private async markForUser(
+    id: string,
+    orgId: string,
+    userId: string,
+    patch: { readAt: Date | null; updatedAt: Date },
+  ): Promise<boolean> {
+    const updated = await this.db
+      .update(inAppNotifications)
+      .set(patch)
+      .where(
+        and(
+          eq(inAppNotifications.id, id),
+          eq(inAppNotifications.orgId, orgId),
+          visibleSql(userId),
+        ),
+      )
+      .returning({ id: inAppNotifications.id });
+    return updated.length > 0;
+  }
+
+  async markAllRead(orgId: string, userId: string, at: string): Promise<number> {
+    const updated = await this.db
+      .update(inAppNotifications)
+      .set({ readAt: new Date(at), updatedAt: new Date(at) })
+      .where(
+        and(
+          eq(inAppNotifications.orgId, orgId),
+          visibleSql(userId),
+          isNull(inAppNotifications.readAt),
+          isNull(inAppNotifications.archivedAt),
+        ),
+      )
+      .returning({ id: inAppNotifications.id });
+    return updated.length;
+  }
+
+  async archive(id: string, orgId: string, userId: string, at: string): Promise<boolean> {
+    const updated = await this.db
+      .update(inAppNotifications)
+      .set({ archivedAt: new Date(at), updatedAt: new Date(at) })
+      .where(
+        and(
+          eq(inAppNotifications.id, id),
+          eq(inAppNotifications.orgId, orgId),
+          visibleSql(userId),
+        ),
+      )
+      .returning({ id: inAppNotifications.id });
+    return updated.length > 0;
+  }
+
+  // ---- Prompt 02: durable admin jobs -----------------------------------------
+
+  async insertJob(job: NotificationJobRecord): Promise<{ created: boolean; existing?: NotificationJobRecord }> {
+    const inserted = await this.db
+      .insert(notificationJobs)
+      .values(toJobRow(job))
+      .onConflictDoNothing({ target: notificationJobs.idempotencyKey })
+      .returning({ id: notificationJobs.id });
+    if (inserted.length === 0) {
+      const existing = await this.getJobByIdempotencyKey(job.idempotencyKey);
+      return existing ? { created: false, existing } : { created: true };
+    }
+    const created = await this.getJobByIdempotencyKey(job.idempotencyKey);
+    return created ? { created: true, existing: created } : { created: true };
+  }
+
+  async getJob(id: string): Promise<NotificationJobRecord | undefined> {
+    const rows = await this.db.select().from(notificationJobs).where(eq(notificationJobs.id, id)).limit(1);
+    return rows[0] ? rowToJob(rows[0]) : undefined;
+  }
+
+  async getJobByIdempotencyKey(key: string): Promise<NotificationJobRecord | undefined> {
+    const rows = await this.db
+      .select()
+      .from(notificationJobs)
+      .where(eq(notificationJobs.idempotencyKey, key))
+      .limit(1);
+    return rows[0] ? rowToJob(rows[0]) : undefined;
+  }
+
+  async updateJob(job: NotificationJobRecord): Promise<void> {
+    await this.db
+      .update(notificationJobs)
+      .set({ ...toJobRow(job), updatedAt: new Date() })
+      .where(eq(notificationJobs.idempotencyKey, job.idempotencyKey));
+  }
+
+  async dueJobs(nowIso: string): Promise<NotificationJobRecord[]> {
+    const rows = await this.db
+      .select()
+      .from(notificationJobs)
+      .where(
+        and(
+          sql`status in ('draft','scheduled')`,
+          sql`(${notificationJobs.scheduledAt} IS NULL OR ${notificationJobs.scheduledAt} <= ${new Date(nowIso)})`,
+        ),
+      )
+      .orderBy(asc(notificationJobs.scheduledAt))
+      .limit(50);
+    return rows.map(rowToJob);
+  }
 }
 
 function toNotificationRow(n: InAppNotification) {
@@ -207,6 +373,11 @@ function toNotificationRow(n: InAppNotification) {
     severity: n.severity,
     title: n.title,
     body: n.body,
+    audienceType: n.audienceType ?? "user",
+    category: n.category ?? "system",
+    createdBy: n.createdBy ?? null,
+    scheduledAt: n.scheduledAt ? new Date(n.scheduledAt) : null,
+    deliveryState: n.deliveryState ?? "ready",
     resourceType: n.resourceType ?? null,
     resourceId: n.resourceId ?? null,
     dedupeKey: n.dedupeKey ?? null,
@@ -214,6 +385,7 @@ function toNotificationRow(n: InAppNotification) {
     archivedAt: n.archivedAt ? new Date(n.archivedAt) : null,
     expiresAt: n.expiresAt ? new Date(n.expiresAt) : null,
     createdAt: new Date(n.createdAt),
+    updatedAt: new Date(n.updatedAt ?? n.createdAt),
   };
 }
 
@@ -229,9 +401,65 @@ function rowToNotification(row: typeof inAppNotifications.$inferSelect): InAppNo
     resourceType: row.resourceType ?? undefined,
     resourceId: row.resourceId ?? undefined,
     dedupeKey: row.dedupeKey ?? undefined,
+    audienceType: (row.audienceType ?? "user") as InAppNotification["audienceType"],
+    category: (row.category ?? "system") as InAppNotification["category"],
+    createdBy: row.createdBy ?? undefined,
+    scheduledAt: row.scheduledAt?.toISOString(),
+    deliveryState: (row.deliveryState ?? "ready") as InAppNotification["deliveryState"],
+    updatedAt: row.updatedAt?.toISOString?.() ?? row.createdAt.toISOString(),
     readAt: row.readAt?.toISOString(),
     archivedAt: row.archivedAt?.toISOString(),
     expiresAt: row.expiresAt?.toISOString(),
     createdAt: row.createdAt.toISOString(),
+  };
+}
+
+
+function toJobRow(job: NotificationJobRecord) {
+  return {
+    orgId: job.orgId ?? null,
+    audienceType: job.audienceType,
+    audiencePayload: job.audiencePayload as unknown as object,
+    title: job.title,
+    body: job.body,
+    severity: job.severity,
+    category: job.category,
+    resourceType: job.resourceType ?? null,
+    resourceId: job.resourceId ?? null,
+    status: job.status,
+    scheduledAt: job.scheduledAt ? new Date(job.scheduledAt) : null,
+    startedAt: job.startedAt ? new Date(job.startedAt) : null,
+    completedAt: job.completedAt ? new Date(job.completedAt) : null,
+    fanoutTotal: job.fanoutTotal,
+    fanoutDone: job.fanoutDone,
+    error: job.error ?? null,
+    createdBy: job.createdBy,
+    idempotencyKey: job.idempotencyKey,
+  };
+}
+
+function rowToJob(row: typeof notificationJobs.$inferSelect): NotificationJobRecord {
+  return {
+    id: row.id,
+    orgId: row.orgId ?? undefined,
+    audienceType: row.audienceType as AudienceType,
+    audiencePayload: (row.audiencePayload ?? {}) as Record<string, unknown>,
+    title: row.title,
+    body: row.body,
+    severity: row.severity as Severity,
+    category: row.category as NotificationJobRecord["category"],
+    resourceType: row.resourceType ?? undefined,
+    resourceId: row.resourceId ?? undefined,
+    status: row.status as NotificationJobRecord["status"],
+    scheduledAt: row.scheduledAt?.toISOString(),
+    startedAt: row.startedAt?.toISOString(),
+    completedAt: row.completedAt?.toISOString(),
+    fanoutTotal: row.fanoutTotal,
+    fanoutDone: row.fanoutDone,
+    error: row.error ?? undefined,
+    createdBy: row.createdBy,
+    idempotencyKey: row.idempotencyKey,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }

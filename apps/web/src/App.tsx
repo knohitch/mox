@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { MoxProvider, useMox } from "./api/store.js";
+import { NotificationBell } from "./views/NotificationCenter.js";
 import { resolveParams, useRoute, Link } from "./router.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import {
@@ -61,6 +62,9 @@ function Shell() {
 
   return (
     <div className="app">
+      <div className="topbar">
+        <NotificationBell />
+      </div>
       <aside className="sidebar">
         <div className="brand">
           M<span>ox</span>

@@ -33,11 +33,43 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       const address = server.address();
       const boundPort = typeof address === "object" && address ? address.port : port;
       void url;
+
+      // Prompt 02 background ticker: scheduled notification jobs, node
+      // offline sweeps (node.offline events) and expiry purges.
+      const ticker = setInterval(() => {
+        void (async () => {
+          try {
+            await services.notifications.runDueJobs();
+            const lost = await services.orchestrator.sweepLostNodes();
+            for (const nodeId of lost) {
+              const node = await services.orchestrator.store.getNode(nodeId).catch(() => undefined);
+              if (!node) continue;
+              await services.notifications.consume({
+                eventId: `node.offline:${nodeId}`,
+                type: "node.offline",
+                orgId: node.orgId,
+                severity: "warning",
+                category: "servers",
+                resourceType: "mox_node",
+                resourceId: nodeId,
+                templateVars: {},
+                at: new Date().toISOString(),
+              });
+            }
+            await services.notifications.store.purgeExpired(new Date().toISOString());
+          } catch {
+            // Ticker failures never crash the control plane; next tick retries.
+          }
+        })();
+      }, 60_000);
+      ticker.unref?.();
+
       resolve({
         server,
         port: boundPort,
         close: () =>
           new Promise<void>((resolveClose) => {
+            clearInterval(ticker);
             server.close(() => resolveClose());
             services.pool.end().finally(() => undefined);
           }),
