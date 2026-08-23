@@ -1,5 +1,3 @@
-# Mox Codex Build Pack
+# Mox Production Repair Pack
 
-Start with `MASTER_EXECUTION_GUIDE.md`, then run prompts `00` through `15` in order.
-
-This pack implements the **full Mox system**, not an MVP. The numbering is sequencing for safe repository consolidation only.
+Read `MASTER_REPAIR_GUIDE.md`, then run repair prompts 00 through 06 in order. These repair the full Mox system; they are not MVP prompts.

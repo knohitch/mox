@@ -10,7 +10,10 @@ import { ComputeOrchestrator } from "../src/service.js";
 import { InMemoryOrchestratorStore } from "../src/store.js";
 
 async function orchestratorWith(script: Parameters<FakeComputeProvider["setProvisionScript"]>[0]) {
-  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+    retryBaseMs: 1,
+    controlPlaneUrl: "https://control-plane.test",
+  });
   const fake = new FakeComputeProvider();
   fake.setProvisionScript(script);
   orch.registerProvider(fake);

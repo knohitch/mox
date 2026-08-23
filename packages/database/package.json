@@ -19,7 +19,13 @@
     "db:migrate": "node ./scripts/migrate.mjs"
   },
   "dependencies": {
+    "@mox/agent-control": "workspace:*",
+    "@mox/billing": "workspace:*",
+    "@mox/compute-orchestrator": "workspace:*",
     "@mox/contracts": "workspace:*",
+    "@mox/entitlements": "workspace:*",
+    "@mox/money": "workspace:*",
+    "@mox/notification-service": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "pg": "^8.16.3"
   },

@@ -7,8 +7,18 @@ function jsonRes(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** Extracts the one-time bootstrap secrets embedded in recorded cloud-init. */
+function enrollSecrets(fake: FakeComputeProvider): string[] {
+  return fake.provisionCalls.flatMap((c) =>
+    [...c.cloudInitUserData.matchAll(/MOX_ENROLL_TOKEN=(\S+)/g)].map((m) => m[1]!),
+  );
+}
+
 async function orchestrator(): Promise<{ orch: ComputeOrchestrator; fake: FakeComputeProvider }> {
-  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+  const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+    retryBaseMs: 1,
+    controlPlaneUrl: "https://control-plane.test",
+  });
   const fake = new FakeComputeProvider();
   orch.registerProvider(fake);
   await orch.registerProviderAccount({
@@ -156,38 +166,168 @@ describe("compute orchestrator", () => {
     expect((await orch.getOrder(order.id)).state).toBe("destroyed");
   });
 
-  it("enrolls nodes, accepts heartbeats, and flags lost nodes", async () => {
-    const { orch } = await orchestrator();
-    const node = await orch.enrollNode({
+  it("provisions with a pre-persisted enrollment expectation bound to the instance", async () => {
+    const { orch, fake } = await orchestrator();
+    const { order } = await orch.orderServer({
+      orgId: "org-enroll",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-enroll",
+      idempotencyKey: "enroll-1",
+    });
+    await orch.reconcile();
+    expect((await orch.getOrder(order.id)).state).toBe("running");
+    // The cloud-init payload carries the resolved control-plane URL (§F).
+    const cloudInit = fake.provisionCalls[0]?.cloudInitUserData ?? "";
+    expect(cloudInit).toContain("MOX_CONTROL_PLANE_URL=https://control-plane.test");
+    expect(cloudInit).not.toContain("control-plane.mox.internal");
+  });
+
+  it("enrolls nodes against the pre-persisted token and issues durable agent auth", async () => {
+    const { orch, fake } = await orchestrator();
+    const { order } = await orch.orderServer({
       orgId: "org-7",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-7",
+      idempotencyKey: "k7",
+    });
+    await orch.reconcile();
+    const secret = enrollSecrets(fake)[0]!;
+    const now = "2026-03-01T00:00:00.000Z";
+
+    const { node, agentToken } = await orch.enrollNode({
+      orgId: "org-7",
+      orderId: order.id,
       nodeId: "node-a",
-      enrollToken: "one-time-token",
+      enrollToken: secret,
       version: "0.1.0",
       capabilities: ["docker", "logs"],
-      now: "2026-03-01T00:00:00.000Z",
+      now,
     });
     expect(node.status).toBe("active");
-    expect(node.enrollTokenHash).toBe(sha256Hex("one-time-token"));
+    expect(node.enrollTokenHash).toBe(sha256Hex(secret));
+    expect(agentToken.length).toBeGreaterThan(30);
+    expect(node.agentTokenHash).toBe(sha256Hex(agentToken));
 
-    await orch.heartbeat("node-a", { cpu: 12, memPct: 40 }, undefined, "2026-03-01T00:30:00.000Z");
+    // Heartbeat requires the durable agent token, not the bootstrap secret.
+    await orch.heartbeat("node-a", { cpu: 12 }, { agentToken }, { now: "2026-03-01T00:30:00.000Z" });
+    await expect(
+      orch.heartbeat("node-a", { cpu: 12 }, { agentToken: "wrong-token" }),
+    ).rejects.toThrow(/authentication failed/);
+    await expect(
+      orch.heartbeat("node-a", { cpu: 12 }, { agentToken: secret }),
+    ).rejects.toThrow(/authentication failed/);
+
     const lost = await orch.sweepLostNodes("2026-03-01T00:36:00.000Z");
     expect(lost).toEqual(["node-a"]);
-
-    // A late heartbeat brings it back.
-    await orch.heartbeat("node-a", { cpu: 9 }, undefined, "2026-03-01T00:37:00.000Z");
+    // A late authenticated heartbeat brings it back.
+    await orch.heartbeat("node-a", { cpu: 9 }, { agentToken }, { now: "2026-03-01T00:37:00.000Z" });
     expect((await orch.store.getNode("node-a"))?.status).toBe("active");
   });
 
-  it("rejects enrollment token mismatch for an existing node id", async () => {
-    const { orch } = await orchestrator();
-    await orch.enrollNode({ orgId: "org-8", nodeId: "node-b", enrollToken: "tok-1" });
+  it("rejects wrong, replayed, expired and org/order-mismatched enrollment tokens", async () => {
+    const { orch, fake } = await orchestrator();
+    const { order } = await orch.orderServer({
+      orgId: "org-8",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-8",
+      idempotencyKey: "k8",
+    });
+    await orch.reconcile();
+    const secret = enrollSecrets(fake)[0]!;
+    const enrollInput = { orgId: "org-8", orderId: order.id, nodeId: "node-b", enrollToken: secret };
+
+    const first = await orch.enrollNode(enrollInput);
+    expect(first.node.nodeId).toBe("node-b");
+
+    // Replay of the consumed token fails.
+    await expect(orch.enrollNode({ ...enrollInput, nodeId: "node-b2" })).rejects.toThrow(/already used/);
+    // Wrong token fails.
     await expect(
-      orch.enrollNode({ orgId: "org-8", nodeId: "node-b", enrollToken: "tok-evil" }),
-    ).rejects.toThrow(/different token/);
+      orch.enrollNode({ ...enrollInput, nodeId: "node-c", enrollToken: "tok-evil" }),
+    ).rejects.toThrow(/unknown enrollment token/);
+
+    // Org mismatch fails before consumption.
+    const { order: order2 } = await orch.orderServer({
+      orgId: "org-8b",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-8b",
+      idempotencyKey: "k8b",
+    });
+    await orch.reconcile();
+    const secret2 = enrollSecrets(fake).at(-1)!;
+    await expect(
+      orch.enrollNode({ orgId: "org-OTHER", orderId: order2.id, nodeId: "node-d", enrollToken: secret2 }),
+    ).rejects.toThrow(/org mismatch/);
+    await expect(
+      orch.enrollNode({ orgId: "org-8b", orderId: order.id, nodeId: "node-d", enrollToken: secret2 }),
+    ).rejects.toThrow(/order mismatch/);
+
+    // Expiry fails.
+    const ttlOrch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+      retryBaseMs: 1,
+      controlPlaneUrl: "https://control-plane.test",
+      enrollTokenTtlMs: 1000,
+    });
+    ttlOrch.registerProvider(fake);
+    await ttlOrch.registerProviderAccount({
+      providerName: "fake-compute",
+      accountLabel: "primary",
+      commercialStatus: "active",
+      healthScore: 100,
+      enabled: true,
+    });
+    await ttlOrch.configureComputeClass({
+      code: "COMPUTE_SMALL",
+      displayName: "Small",
+      minVcpu: 2,
+      minRamGb: 4,
+      skuMap: [{ providerName: "fake-compute", regionCode: "fsn1", providerSku: "CX22" }],
+      active: true,
+    });
+    const { order: order3 } = await ttlOrch.orderServer({
+      orgId: "org-8c",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-8c",
+      idempotencyKey: "k8c",
+    });
+    await ttlOrch.reconcile(new Date(Date.now() + 60_000).toISOString());
+    const secret3 = enrollSecrets(fake).at(-1)!;
+    await expect(
+      ttlOrch.enrollNode({
+        orgId: "org-8c",
+        orderId: order3.id,
+        nodeId: "node-e",
+        enrollToken: secret3,
+        now: new Date(Date.now() + 120_000).toISOString(),
+      }),
+    ).rejects.toThrow(/expired/);
+  });
+
+  it("refuses to start without validated control-plane configuration (§F)", () => {
+    expect(() => new ComputeOrchestrator(new InMemoryOrchestratorStore(), {})).toThrow(
+      /controlPlaneUrl is required/,
+    );
+    expect(
+      () => new ComputeOrchestrator(new InMemoryOrchestratorStore(), { controlPlaneUrl: "http://insecure.test" }),
+    ).toThrow(/must use https/);
+    expect(
+      () => new ComputeOrchestrator(new InMemoryOrchestratorStore(), { controlPlaneUrl: "not a url" }),
+    ).toThrow(/not a valid URL/);
+    // Test override permits http explicitly.
+    expect(
+      () =>
+        new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+          controlPlaneUrl: "http://localhost:8080",
+          allowInsecureControlPlaneUrl: true,
+        }),
+    ).not.toThrow();
   });
 
   it("refuses candidates that are not commercially approved (Hetzner verify)", async () => {
-    const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), { retryBaseMs: 1 });
+    const orch = new ComputeOrchestrator(new InMemoryOrchestratorStore(), {
+      retryBaseMs: 1,
+      controlPlaneUrl: "https://control-plane.test",
+    });
     const hetzner = new HetznerProvider(
       { apiToken: "tok" },
       { commercialStatus: "verify", fetchImpl: async () => jsonRes(201, { server: { id: 1, name: "h", status: "initializing", server_type: { name: "cpx41" }, datacenter: { location: { name: "fsn1" } } } }) },

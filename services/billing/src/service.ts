@@ -152,12 +152,10 @@ export class BillingService {
     await entitlements.setPlanValues(planVersionId, values);
   }
 
-  async getPlanEntitlementValues(_planVersionId: string): Promise<Record<string, boolean | number | string>> {
-    // Values live with the entitlement authority; billing only forwards.
-    return this.planEntitlementValues.get(_planVersionId) ?? {};
+  /** Plan entitlement values live in the durable store (Prompt 00 §D4). */
+  async getPlanEntitlementValues(planVersionId: string): Promise<Record<string, boolean | number | string>> {
+    return this.store.getPlanEntitlementValues(planVersionId);
   }
-
-  private readonly planEntitlementValues = new Map<string, Record<string, boolean | number | string>>();
 
   async setPlanEntitlementValues(
     planVersionId: string,
@@ -168,7 +166,7 @@ export class BillingService {
     if (version.status !== "draft") {
       throw new BillingError("plan version is immutable once active; create a new version");
     }
-    this.planEntitlementValues.set(planVersionId, { ...values });
+    await this.store.setPlanEntitlementValues(planVersionId, { ...values });
     if (entitlements) await entitlements.setPlanValues(planVersionId, values);
   }
 
@@ -335,10 +333,11 @@ export class BillingService {
       cancelUrl: input.cancelUrl,
     });
 
+    // The provider-side reference is persisted with the session (§D2) so
+    // webhook application never depends on process-local state.
     session.providerRef = result.providerRef;
     session.redirectUrl = result.redirectUrl;
     await this.store.createCheckoutSession(session);
-    this.sessionIndex.set(result.providerRef, session);
     return { session, price: { priceVersionId, amount, mode: price?.mode ?? "fixed" } };
   }
 
@@ -466,14 +465,14 @@ export class BillingService {
     providerCheckoutRef: string,
     payload: { orgId?: string; checkoutSessionId?: string },
   ): Promise<void> {
-    // Locate the session either via embedded id or by scanning provider refs.
+    // Authoritative lookup: embedded id first, then the persisted provider
+    // reference — never a process-local index (Prompt 00 §D2).
     let session: CheckoutSession | undefined;
     if (payload.checkoutSessionId) {
       session = await this.store.getCheckoutSession(payload.checkoutSessionId);
     }
     if (!session) {
-      // Fall back: locate the created session via its provider checkout ref.
-      session = this.sessionIndex.get(providerCheckoutRef);
+      session = await this.store.findCheckoutSessionByProviderRef(providerCheckoutRef);
     }
     if (!session) throw new BillingError(`checkout.completed for unknown session ref ${providerCheckoutRef}`);
     if (session.state === "completed") return; // business-level dedupe
@@ -534,8 +533,6 @@ export class BillingService {
   }
 
   private readonly applyingCheckouts = new Set<string>();
-
-  private readonly sessionIndex = new Map<string, CheckoutSession>();
 
   // ---- Lifecycle engine ------------------------------------------------------
 

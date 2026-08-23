@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { MoxProvider } from "./api/store.js";
+import { MoxProvider, useMox } from "./api/store.js";
 import { resolveParams, useRoute, Link } from "./router.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import {
@@ -53,12 +53,19 @@ export function App() {
 
 function Shell() {
   const { path } = useRoute();
+  const { error, ready } = useMox();
   const match = resolveParams(Object.keys(ROUTES), path);
   const active = match?.pattern ?? null;
   const View = active ? ROUTES[active] : undefined;
 
   return (
     <div className="app">
+      {error ? (
+        <div className="backend-error" role="alert">
+          Backend unavailable: {error} — the Mox web app never falls back to demo data.
+        </div>
+      ) : null}
+      {!error && !ready ? <div className="backend-error">Connecting to the Mox control plane…</div> : null}
       <aside className="sidebar">
         <div className="brand">
           M<span>ox</span>

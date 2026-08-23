@@ -10,52 +10,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 /**
- * Platform operations schema (Prompt 12): notification preferences/templates
- * dispatch state, usage limits, cost ledger entries and incidents.
- * (In-app notifications, backups and abuse cases already have base tables
- * in operations.ts; these tables extend the operational model.)
+ * Platform operations schema (Prompt 12): usage limits, cost ledger entries
+ * and incidents. Notification preferences/templates/dispatch state live in
+ * schema/notifications.ts (Prompt 00 §C) as their durable authority.
  */
-
-export const notificationTemplates = pgTable(
-  "notification_templates",
-  {
-    eventType: text("event_type").notNull(),
-    locale: text("locale").notNull(),
-    title: text("title").notNull(),
-    body: text("body").notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [uniqueIndex("notification_templates_key").on(t.eventType, t.locale)],
-);
-
-export const notificationPreferences = pgTable(
-  "notification_preferences",
-  {
-    id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
-    routes: jsonb("routes").notNull().default({}),
-    mutedEventTypes: jsonb("muted_event_types").notNull().default([]),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index("notification_preferences_org_idx").on(t.orgId)],
-);
-
-/** Outbound dispatch audit: every message actually sent, per route. */
-export const notificationDispatches = pgTable(
-  "notification_dispatches",
-  {
-    id: text("id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
-    eventType: text("event_type").notNull(),
-    route: text("route").notNull(),
-    recipient: text("recipient").notNull(),
-    title: text("title").notNull(),
-    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [index("notification_dispatches_org_idx").on(t.orgId, t.at)],
-);
 
 /** Per-org usage limits feeding hard/soft enforcement. */
 export const usageLimits = pgTable(

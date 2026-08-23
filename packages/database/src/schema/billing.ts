@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { organizations } from "./identity-users.js";
 
 /**
@@ -130,7 +131,14 @@ export const priceBooks = pgTable(
       .references(() => pricingRegions.code),
     mode: priceBookMode("mode").notNull().default("fixed"),
     baseCurrency: text("base_currency").references(() => currencies.code),
-    fxRate: jsonb("fx_rate"),
+    /** Base price in minor units the FX derivation starts from (never a float). */
+    baseAmountMinor: bigint("base_amount_minor", { mode: "bigint" }),
+    /**
+     * FX rate as an integer scaled by 1e9 (rate × 10^9). Rates are
+     * dimensionless configuration, but they are stored as integers so that
+     * derived prices are reproducible and never depend on float parsing.
+     */
+    fxRateScaled: bigint("fx_rate_scaled", { mode: "bigint" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("price_books_product_region_key").on(t.productId, t.pricingRegion)],
@@ -211,7 +219,16 @@ export const subscriptions = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("subscriptions_org_active_key").on(t.orgId),
+    /**
+     * History-preserving uniqueness (Prompt 00 §D1): an org has at most one
+     * LIVE subscription, while canceled/deleted/retention rows stay as
+     * history so cancel → later resubscribe creates a new row instead of
+     * colliding with the old one.
+     */
+    uniqueIndex("subscriptions_org_live_key")
+      .on(t.orgId)
+      .where(sql`state in ('trial', 'active', 'past_due', 'grace_period', 'suspended')`),
+    index("subscriptions_org_idx").on(t.orgId),
     index("subscriptions_state_idx").on(t.state),
   ],
 );
@@ -248,11 +265,20 @@ export const checkoutSessions = pgTable(
       .references(() => priceVersions.id, { onDelete: "restrict" }),
     state: checkoutState("state").notNull().default("created"),
     providerName: text("provider_name").notNull(),
+    /**
+     * Provider-side checkout/session/order reference (Prompt 00 §D2).
+     * Persisted at creation time so webhook application never depends on a
+     * process-local index; unique across live sessions.
+     */
+    providerRef: text("provider_ref"),
     redirectUrl: text("redirect_url"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("checkout_sessions_org_idx").on(t.orgId, t.state)],
+  (t) => [
+    index("checkout_sessions_org_idx").on(t.orgId, t.state),
+    uniqueIndex("checkout_sessions_provider_ref_key").on(t.providerRef),
+  ],
 );
 
 export const invoices = pgTable(

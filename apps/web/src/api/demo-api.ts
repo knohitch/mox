@@ -36,11 +36,16 @@ import type {
 /**
  * DEMO DATA implementation of the MoxApi seam (Prompt 05).
  *
+ * Prompt 00 §B CLASSIFICATION — tests/dev only. This module is an explicit
+ * development escape hatch: production builds NEVER import it
+ * (`store.tsx` composes `HttpMoxApi` exclusively, and `resolveWebConfig`
+ * rejects VITE_DEMO_MODE in PROD builds). It is retained so local
+ * `vite` sessions without a control plane can exercise every view behavior
+ * — streaming turns, tool events, approval gates, entitlement gating,
+ * computer takeover state — against canonical contracts.
+ *
  * This is NOT a mock success story: it is an honest in-browser stand-in for
- * the control plane, clearly labeled in the UI ("demo data"). Every domain
- * behavior the views rely on — streaming turns, tool events, approval gates,
- * entitlement gating, computer takeover state — is exercised for real against
- * canonical contracts so swapping in the HTTP/SSE client later is mechanical.
+ * the control plane, clearly labeled in the UI ("demo data").
  */
 
 const now = (): string => new Date().toISOString();

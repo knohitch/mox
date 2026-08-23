@@ -115,11 +115,33 @@ export interface MoxNodeRecord {
   orgId: string;
   orderId?: string;
   nodeId: string;
+  /** Legacy field: hash of the consumed one-time bootstrap token. */
   enrollTokenHash: string;
+  /**
+   * Durable node identity (Prompt 00 §E8/E9): sha256 of the agent token
+   * issued after successful bootstrap enrollment. Heartbeats authenticate
+   * with the plaintext token; this stores only its hash.
+   */
+  agentTokenHash?: string;
   version?: string;
   capabilities: string[];
   metrics?: Record<string, number | string>;
   enrolledAt: string;
   lastHeartbeatAt: string;
   status: "active" | "lost" | "retired";
+}
+
+/** Pre-persisted expected bootstrap secret for first-time enrollment (§E). */
+export interface NodeEnrollmentTokenRecord {
+  id: string;
+  /** sha256 hex of the bootstrap secret; plaintext is never stored. */
+  tokenHash: string;
+  orgId: string;
+  orderId: string;
+  /** Bound once the provider instance id is known post-provision. */
+  providerInstanceId?: string;
+  state: "issued" | "consumed" | "expired" | "revoked";
+  expiresAt: string;
+  consumedAt?: string;
+  createdAt: string;
 }

@@ -3,10 +3,11 @@
  * Mirrors packages/database schema/compute.ts for Postgres deployment.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   ComputeClass,
   MoxNodeRecord,
+  NodeEnrollmentTokenRecord,
   OperationKind,
   ProviderAccountRecord,
   ServerOperation,
@@ -49,6 +50,17 @@ export interface OrchestratorStore {
   updateNode(node: MoxNodeRecord): Promise<void>;
   listNodes(): Promise<MoxNodeRecord[]>;
   consumeNonce(nonce: string): Promise<boolean>;
+
+  // Enrollment bootstrap tokens (Prompt 00 §E)
+  /** Persists the expected hash BEFORE provisioning/cloud-init runs. */
+  createEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void>;
+  getEnrollmentToken(tokenHash: string): Promise<NodeEnrollmentTokenRecord | undefined>;
+  updateEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void>;
+  /**
+   * Atomic single-use consume: returns true exactly once per token.
+   * Concurrent consumers race on the state transition; losers get false.
+   */
+  consumeEnrollmentToken(tokenHash: string, nowIso: string): Promise<boolean>;
 }
 
 export class InMemoryOrchestratorStore implements OrchestratorStore {
@@ -61,6 +73,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
   private readonly opIndex = new Set<string>();
   private readonly nodes = new Map<string, MoxNodeRecord>();
   private readonly nonces = new Set<string>();
+  private readonly enrollmentTokens = new Map<string, NodeEnrollmentTokenRecord>();
 
   async upsertComputeClass(cls: ComputeClass): Promise<void> {
     this.classes.set(cls.code, cls);
@@ -185,6 +198,42 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
     this.nonces.add(nonce);
     return true;
   }
+
+  async createEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void> {
+    if (this.enrollmentTokens.has(record.tokenHash)) {
+      throw new Error("enrollment token hash already exists");
+    }
+    this.enrollmentTokens.set(record.tokenHash, { ...record });
+  }
+
+  async getEnrollmentToken(tokenHash: string): Promise<NodeEnrollmentTokenRecord | undefined> {
+    const record = this.enrollmentTokens.get(tokenHash);
+    return record ? { ...record } : undefined;
+  }
+
+  async updateEnrollmentToken(record: NodeEnrollmentTokenRecord): Promise<void> {
+    this.enrollmentTokens.set(record.tokenHash, { ...record });
+  }
+
+  /**
+   * Synchronous check-and-set is atomic in single-threaded JS, mirroring the
+   * conditional UPDATE ... WHERE state='issued' used by the PG store.
+   */
+  async consumeEnrollmentToken(tokenHash: string, nowIso: string): Promise<boolean> {
+    const record = this.enrollmentTokens.get(tokenHash);
+    if (!record) return false;
+    const expired = record.expiresAt <= nowIso;
+    // Consume-on-sight of an expired token keeps replay attempts auditable.
+    if (expired && record.state === "issued") {
+      record.state = "expired";
+      this.enrollmentTokens.set(tokenHash, record);
+    }
+    if (record.state !== "issued" || expired) return false;
+    record.state = "consumed";
+    record.consumedAt = nowIso;
+    this.enrollmentTokens.set(tokenHash, record);
+    return true;
+  }
 }
 
 export function newId(): string {
@@ -193,4 +242,12 @@ export function newId(): string {
 
 export function sha256Hex(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/** Constant-time hex digest comparison; both inputs must be sha256 hex. */
+export function hashesEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
 }

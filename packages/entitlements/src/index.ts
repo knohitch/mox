@@ -186,6 +186,11 @@ export class EntitlementService {
     await this.store.setPlanValues(planVersionId, values);
   }
 
+  /** Reads durable plan-version values (Prompt 00 §D4). */
+  async planValuesFor(planVersionId: string): Promise<EntitlementValues> {
+    return this.store.getPlanValues(planVersionId);
+  }
+
   async grantOverride(input: Omit<OrgOverride, "createdAt"> & { createdAt?: string }): Promise<OrgOverride> {
     const override: OrgOverride = { ...input, createdAt: input.createdAt ?? new Date().toISOString() };
     await this.store.addOverride(override);

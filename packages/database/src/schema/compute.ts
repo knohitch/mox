@@ -169,6 +169,13 @@ export const moxNodes = pgTable(
     orderId: uuid("order_id").references(() => serverOrders.id, { onDelete: "set null" }),
     nodeId: text("node_id").notNull(),
     enrollTokenHash: text("enroll_token_hash").notNull(),
+    /**
+     * Durable node identity (Prompt 00 §E8/E9): hash of the long-lived agent
+     * token issued after successful bootstrap enrollment. Heartbeats and
+     * command channels authenticate with it — never with the one-time
+     * bootstrap secret. Nullable only for rows enrolled before this column.
+     */
+    agentTokenHash: text("agent_token_hash"),
     version: text("version"),
     capabilities: jsonb("capabilities").notNull().default([]),
     metrics: jsonb("metrics"),
@@ -176,7 +183,48 @@ export const moxNodes = pgTable(
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
     status: text("status").notNull().default("active"),
   },
-  (t) => [uniqueIndex("mox_nodes_node_id_key").on(t.nodeId)],
+  (t) => [
+    uniqueIndex("mox_nodes_node_id_key").on(t.nodeId),
+    index("mox_nodes_agent_token_key").on(t.agentTokenHash),
+  ],
+);
+
+/**
+ * Pre-persisted expected bootstrap secrets for first-time node enrollment
+ * (Prompt 00 §E). Only the hash is stored, BEFORE provisioning/cloud-init
+ * runs; the plaintext exists solely in the bootstrap payload delivered to
+ * the node. Enrollment atomically consumes the row so replay/races fail.
+ */
+export const enrollmentTokenState = pgEnum("enrollment_token_state", [
+  "issued",
+  "consumed",
+  "expired",
+  "revoked",
+]);
+
+export const nodeEnrollmentTokens = pgTable(
+  "node_enrollment_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** sha256 hex of the bootstrap secret; constant-time compared at use. */
+    tokenHash: text("token_hash").notNull(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    orderId: uuid("order_id")
+      .notNull()
+      .references(() => serverOrders.id, { onDelete: "cascade" }),
+    /** Bound when the provider instance id becomes known post-provision. */
+    providerInstanceId: text("provider_instance_id"),
+    state: enrollmentTokenState("state").notNull().default("issued"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("node_enrollment_tokens_hash_key").on(t.tokenHash),
+    index("node_enrollment_tokens_order_idx").on(t.orderId, t.state),
+  ],
 );
 
 /** Signed command dispatch log for audit and replay protection. */

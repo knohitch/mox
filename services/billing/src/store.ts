@@ -33,6 +33,13 @@ export interface BillingStore {
   listPlanVersions(productId: string): Promise<PlanVersion[]>;
   updatePlanVersion(version: PlanVersion): Promise<void>;
 
+  /**
+   * Durable plan entitlement values (Prompt 00 §D4). Values are persisted
+   * business data — never authoritative in a process Map.
+   */
+  setPlanEntitlementValues(planVersionId: string, values: Record<string, boolean | number | string>): Promise<void>;
+  getPlanEntitlementValues(planVersionId: string): Promise<Record<string, boolean | number | string>>;
+
   definePricingRegion(region: PricingRegion): Promise<PricingRegion>;
   getPricingRegion(code: string): Promise<PricingRegion | undefined>;
   listPricingRegions(): Promise<PricingRegion[]>;
@@ -70,6 +77,8 @@ export interface BillingStore {
   createCheckoutSession(session: CheckoutSession): Promise<CheckoutSession>;
   getCheckoutSession(id: string): Promise<CheckoutSession | undefined>;
   findCheckoutSessionsByOrg(orgId: string): Promise<CheckoutSession[]>;
+  /** Authoritative lookup by the persisted provider-side reference. */
+  findCheckoutSessionByProviderRef(providerRef: string): Promise<CheckoutSession | undefined>;
   updateCheckoutSession(session: CheckoutSession): Promise<void>;
 
   // Invoices
@@ -88,6 +97,7 @@ export interface BillingStore {
 export class InMemoryBillingStore implements BillingStore {
   private readonly products = new Map<string, Product>();
   private readonly planVersions = new Map<string, PlanVersion>();
+  private readonly planValues = new Map<string, Record<string, boolean | number | string>>();
   private readonly pricingRegions = new Map<string, PricingRegion>();
   private readonly priceBooks = new Map<string, PriceBook>();
   private readonly priceVersions = new Map<string, PriceVersion>();
@@ -98,6 +108,7 @@ export class InMemoryBillingStore implements BillingStore {
   private readonly transitions = new Map<string, SubscriptionTransition[]>();
   private readonly transitionKeys = new Set<string>();
   private readonly checkoutSessions = new Map<string, CheckoutSession>();
+  private readonly checkoutByProviderRef = new Map<string, string>();
   private readonly invoices = new Map<string, Invoice>();
   private readonly webhooks = new Map<string, WebhookRecord>();
 
@@ -135,6 +146,14 @@ export class InMemoryBillingStore implements BillingStore {
 
   async updatePlanVersion(version: PlanVersion): Promise<void> {
     this.planVersions.set(version.id, version);
+  }
+
+  async setPlanEntitlementValues(planVersionId: string, values: Record<string, boolean | number | string>): Promise<void> {
+    this.planValues.set(planVersionId, { ...values });
+  }
+
+  async getPlanEntitlementValues(planVersionId: string): Promise<Record<string, boolean | number | string>> {
+    return { ...(this.planValues.get(planVersionId) ?? {}) };
   }
 
   async definePricingRegion(region: PricingRegion): Promise<PricingRegion> {
@@ -202,7 +221,20 @@ export class InMemoryBillingStore implements BillingStore {
     return this.billingCustomers.get(`${orgId}:${providerName}`);
   }
 
+  /** Live states mirrored from the PG partial unique index (§D1). */
+  static readonly LIVE_STATES = ["trial", "active", "past_due", "grace_period", "suspended"];
+
   async createSubscription(subscription: Subscription): Promise<Subscription> {
+    // Mirrors the durable partial unique index: one LIVE row per org;
+    // canceled/deleted history never blocks resubscription.
+    for (const existing of this.subscriptions.values()) {
+      if (
+        existing.orgId === subscription.orgId &&
+        InMemoryBillingStore.LIVE_STATES.includes(existing.state)
+      ) {
+        throw new Error(`org ${subscription.orgId} already has a live subscription (${existing.id})`);
+      }
+    }
     this.subscriptions.set(subscription.id, subscription);
     return subscription;
   }
@@ -212,9 +244,8 @@ export class InMemoryBillingStore implements BillingStore {
   }
 
   async getActiveSubscriptionForOrg(orgId: string): Promise<Subscription | undefined> {
-    const live = ["trial", "active", "past_due", "grace_period", "suspended"];
     for (const sub of this.subscriptions.values()) {
-      if (sub.orgId === orgId && live.includes(sub.state)) return sub;
+      if (sub.orgId === orgId && InMemoryBillingStore.LIVE_STATES.includes(sub.state)) return sub;
     }
     return undefined;
   }
@@ -262,6 +293,7 @@ export class InMemoryBillingStore implements BillingStore {
 
   async createCheckoutSession(session: CheckoutSession): Promise<CheckoutSession> {
     this.checkoutSessions.set(session.id, session);
+    if (session.providerRef) this.checkoutByProviderRef.set(session.providerRef, session.id);
     return session;
   }
 
@@ -273,8 +305,14 @@ export class InMemoryBillingStore implements BillingStore {
     return [...this.checkoutSessions.values()].filter((s) => s.orgId === orgId);
   }
 
+  async findCheckoutSessionByProviderRef(providerRef: string): Promise<CheckoutSession | undefined> {
+    const id = this.checkoutByProviderRef.get(providerRef);
+    return id ? this.checkoutSessions.get(id) : undefined;
+  }
+
   async updateCheckoutSession(session: CheckoutSession): Promise<void> {
     this.checkoutSessions.set(session.id, session);
+    if (session.providerRef) this.checkoutByProviderRef.set(session.providerRef, session.id);
   }
 
   async createInvoice(invoice: Invoice): Promise<Invoice> {

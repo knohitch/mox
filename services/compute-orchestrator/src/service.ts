@@ -11,6 +11,7 @@
  * - Provider-side lifecycle works even when the node is offline.
  */
 
+import { randomBytes } from "node:crypto";
 import type { ComputeProvider } from "@mox/compute-providers";
 import type { HealthReport } from "@mox/contracts";
 import { ProviderError } from "@mox/compute-providers";
@@ -18,6 +19,7 @@ import type { ProviderHealthScorer } from "@mox/provider-health";
 import { buildMoxNodeCloudInit } from "./cloudinit.js";
 import {
   InMemoryOrchestratorStore,
+  hashesEqual,
   newId,
   sha256Hex,
   type OrchestratorStore,
@@ -37,8 +39,20 @@ export class OrchestratorError extends Error {}
 export class NotFoundError extends OrchestratorError {}
 export class NotApprovedError extends OrchestratorError {}
 export class TerminalFailureError extends OrchestratorError {}
+/** Raised when a bootstrap enrollment attempt fails validation/consumption. */
+export class EnrollmentError extends OrchestratorError {}
 
 export interface OrchestratorOptions {
+  /**
+   * Public control-plane endpoint passed into node cloud-init (Prompt 00
+   * §F). Required validated deployment configuration — there is no default.
+   * Optional at the type level only so DI containers fail at construction.
+   */
+  controlPlaneUrl?: string;
+  /** Test/local override permitting non-https endpoints. Never in production. */
+  allowInsecureControlPlaneUrl?: boolean;
+  /** Bootstrap enrollment token lifetime; short by design. */
+  enrollTokenTtlMs?: number;
   /** Backoff base for operation retries. */
   retryBaseMs?: number;
   maxAttempts?: number;
@@ -57,22 +71,46 @@ interface ReconcileResult {
   abandoned: number;
 }
 
+function validateControlPlaneUrl(raw: string, allowInsecure: boolean): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new OrchestratorError(`controlPlaneUrl is not a valid URL: ${JSON.stringify(raw)}`);
+  }
+  if (parsed.protocol !== "https:" && !(allowInsecure && parsed.protocol === "http:")) {
+    throw new OrchestratorError(
+      `controlPlaneUrl must use https (got ${parsed.protocol}); set MOX_CONTROL_PLANE_URL to a valid https endpoint`,
+    );
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
+
 export class ComputeOrchestrator {
   readonly store: OrchestratorStore;
   private readonly providers = new Map<string, ComputeProvider>();
   private readonly healthScorer?: ProviderHealthScorer;
+  readonly controlPlaneUrl: string;
   private readonly retryBaseMs: number;
   private readonly defaultMaxAttempts: number;
   private readonly heartbeatLostMs: number;
   private readonly retentionDays: number;
+  private readonly enrollTokenTtlMs: number;
 
   constructor(store: OrchestratorStore = new InMemoryOrchestratorStore(), options: OrchestratorOptions = {}) {
+    if (!options.controlPlaneUrl) {
+      throw new OrchestratorError(
+        "controlPlaneUrl is required deployment configuration (MOX_CONTROL_PLANE_URL); refusing to start with a hard-coded endpoint",
+      );
+    }
+    this.controlPlaneUrl = validateControlPlaneUrl(options.controlPlaneUrl, options.allowInsecureControlPlaneUrl === true);
     this.store = store;
     this.healthScorer = options.healthScorer;
     this.retryBaseMs = options.retryBaseMs ?? 1000;
     this.defaultMaxAttempts = options.maxAttempts ?? 5;
     this.heartbeatLostMs = options.heartbeatLostMs ?? 5 * 60_000;
     this.retentionDays = options.retentionDays ?? 14;
+    this.enrollTokenTtlMs = options.enrollTokenTtlMs ?? 30 * 60_000;
   }
 
   // ---- Registration ----------------------------------------------------------
@@ -355,9 +393,22 @@ export class ComputeOrchestrator {
         const { candidate, account } = await this.selectCandidate(cls.skuMap);
         const provider = this.provider(candidate.providerName);
         const sshKey = order.sshKeyId ? await this.store.getSshKey(order.sshKeyId) : undefined;
-        const enrollToken = newId(); // one-time; exchanged by node over TLS
+        // Prompt 00 §E: the bootstrap secret is cryptographically strong and
+        // its hash is PERSISTED before provisioning/cloud-init runs. The
+        // plaintext exists only in the bootstrap payload below.
+        const enrollToken = randomBytes(32).toString("base64url");
+        const enrollTokenHash = sha256Hex(enrollToken);
+        await this.store.createEnrollmentToken({
+          id: newId(),
+          tokenHash: enrollTokenHash,
+          orgId: order.orgId,
+          orderId: order.id,
+          state: "issued",
+          expiresAt: new Date(Date.parse(at) + this.enrollTokenTtlMs).toISOString(),
+          createdAt: at,
+        });
         const cloudInit = buildMoxNodeCloudInit({
-          controlPlaneUrl: "https://control-plane.mox.internal",
+          controlPlaneUrl: this.controlPlaneUrl,
           enrollToken,
           orgId: order.orgId,
           orderId: order.id,
@@ -389,6 +440,13 @@ export class ComputeOrchestrator {
           order.ipv6 = result.instance.ipv6;
           order.state = "running";
           await this.store.updateOrder(order);
+          // Bind the pending enrollment expectation to the exact instance
+          // now that the provider id is known (§E3).
+          const expected = await this.store.getEnrollmentToken(enrollTokenHash);
+          if (expected && expected.state === "issued") {
+            expected.providerInstanceId = result.instance.providerInstanceId;
+            await this.store.updateEnrollmentToken(expected);
+          }
         } catch (error) {
           this.healthScorer?.record({
             providerName: candidate.providerName,
@@ -486,50 +544,94 @@ export class ComputeOrchestrator {
   // ---- Mox Node (untrusted) -----------------------------------------------------
 
   /**
-   * Enroll a node. The one-time enroll token must match its stored hash.
-   * Nodes can never grant themselves entitlements; this only records an
-   * advisory agent presence for the given org/order.
+   * First-time enrollment (Prompt 00 §E). The presented bootstrap token is
+   * validated against the PRE-PERSISTED expected record: org/order binding,
+   * expiry, state, constant-time hash comparison, then an atomic single-use
+   * consume. Wrong, replayed or already-consumed tokens all fail. On success
+   * a durable node identity (agent token) is issued; its hash is stored and
+   * only the plaintext is returned in this one response.
    */
   async enrollNode(input: {
     orgId: string;
-    orderId?: string;
+    orderId: string;
     nodeId: string;
     enrollToken: string;
     version?: string;
     capabilities?: string[];
     now?: string;
-  }): Promise<MoxNodeRecord> {
+  }): Promise<{ node: MoxNodeRecord; agentToken: string }> {
+    const at = input.now ?? new Date().toISOString();
+    if (!input.enrollToken || !input.orderId) {
+      throw new EnrollmentError("enrollment requires orderId and enrollToken");
+    }
+    const tokenHash = sha256Hex(input.enrollToken);
+    const expected = await this.store.getEnrollmentToken(tokenHash);
+    // Audit note: failures never echo token material.
+    if (!expected) throw new EnrollmentError("unknown enrollment token");
+    if (expected.state === "consumed") throw new EnrollmentError("enrollment token already used");
+    if (expected.state !== "issued") throw new EnrollmentError(`enrollment token ${expected.state}`);
+    if (expected.expiresAt <= at) throw new EnrollmentError("enrollment token expired");
+    if (expected.orgId !== input.orgId) throw new EnrollmentError("enrollment token org mismatch");
+    if (expected.orderId !== input.orderId) throw new EnrollmentError("enrollment token order mismatch");
+    // Constant-time comparison of the two digests (§E6).
+    if (!hashesEqual(expected.tokenHash, tokenHash)) {
+      throw new EnrollmentError("enrollment token mismatch");
+    }
+    // Atomic consume: exactly one concurrent enrollment can win (§E7/E11).
+    const consumed = await this.store.consumeEnrollmentToken(tokenHash, at);
+    if (!consumed) throw new EnrollmentError("enrollment token already used");
+
+    const agentToken = randomBytes(32).toString("base64url");
     const existing = await this.store.getNode(input.nodeId);
     if (existing) {
-      if (existing.enrollTokenHash === sha256Hex(input.enrollToken)) {
-        existing.lastHeartbeatAt = input.now ?? new Date().toISOString();
-        await this.store.updateNode(existing);
-        return existing;
-      }
-      throw new OrchestratorError("node id already enrolled with a different token");
+      // Durable identity rotation for a re-imaged node id.
+      existing.enrollTokenHash = tokenHash;
+      existing.agentTokenHash = sha256Hex(agentToken);
+      existing.orgId = input.orgId;
+      existing.orderId = input.orderId;
+      existing.version = input.version;
+      existing.capabilities = input.capabilities ?? [];
+      existing.lastHeartbeatAt = at;
+      existing.status = "active";
+      await this.store.updateNode(existing);
+      return { node: existing, agentToken };
     }
     const record: MoxNodeRecord = {
       id: newId(),
       orgId: input.orgId,
       orderId: input.orderId,
       nodeId: input.nodeId,
-      enrollTokenHash: sha256Hex(input.enrollToken),
+      enrollTokenHash: tokenHash,
+      agentTokenHash: sha256Hex(agentToken),
       version: input.version,
       capabilities: input.capabilities ?? [],
-      enrolledAt: input.now ?? new Date().toISOString(),
-      lastHeartbeatAt: input.now ?? new Date().toISOString(),
+      enrolledAt: at,
+      lastHeartbeatAt: at,
       status: "active",
     };
-    return this.store.upsertNode(record);
+    const node = await this.store.upsertNode(record);
+    return { node, agentToken };
   }
 
-  /** Heartbeats update advisory telemetry only. */
-  async heartbeat(nodeId: string, metrics: Record<string, number | string>, version?: string, now?: string): Promise<void> {
+  /**
+   * Heartbeats authenticate with the durable agent token issued at
+   * enrollment (§E9) — never with the one-time bootstrap secret.
+   * Updates advisory telemetry only.
+   */
+  async heartbeat(
+    nodeId: string,
+    metrics: Record<string, number | string>,
+    auth: { agentToken: string },
+    options: { version?: string; now?: string } = {},
+  ): Promise<void> {
     const node = await this.store.getNode(nodeId);
     if (!node) throw new NotFoundError(`unknown node ${nodeId}`);
+    if (!node.agentTokenHash || !hashesEqual(node.agentTokenHash, sha256Hex(auth.agentToken))) {
+      throw new OrchestratorError("node authentication failed");
+    }
     node.metrics = metrics;
-    node.lastHeartbeatAt = now ?? new Date().toISOString();
-    if (version) node.version = version;
+    node.lastHeartbeatAt = options.now ?? new Date().toISOString();
+    if (options.version) node.version = options.version;
     if (node.status === "lost") node.status = "active";
     await this.store.updateNode(node);
   }

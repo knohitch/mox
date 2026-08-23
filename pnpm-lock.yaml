@@ -95,6 +95,8 @@ importers:
         specifier: ^4.1.5
         version: 4.4.3
 
+  packages/control-plane-contracts: {}
+
   packages/credentials:
     dependencies:
       '@mox/contracts':
@@ -110,9 +112,27 @@ importers:
 
   packages/database:
     dependencies:
+      '@mox/agent-control':
+        specifier: workspace:*
+        version: link:../../services/agent-control
+      '@mox/billing':
+        specifier: workspace:*
+        version: link:../../services/billing
+      '@mox/compute-orchestrator':
+        specifier: workspace:*
+        version: link:../../services/compute-orchestrator
       '@mox/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@mox/entitlements':
+        specifier: workspace:*
+        version: link:../entitlements
+      '@mox/money':
+        specifier: workspace:*
+        version: link:../money
+      '@mox/notification-service':
+        specifier: workspace:*
+        version: link:../../services/notification-service
       drizzle-orm:
         specifier: ^0.44.5
         version: 0.44.7(@types/pg@8.23.1)(pg@8.23.0)
@@ -420,6 +440,43 @@ importers:
         specifier: workspace:*
         version: link:../../packages/provider-health
     devDependencies:
+      typescript:
+        specifier: ^5.9.2
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.11(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.28.2)(tsx@4.23.12))
+
+  services/control-plane:
+    dependencies:
+      '@mox/billing':
+        specifier: workspace:*
+        version: link:../billing
+      '@mox/compute-orchestrator':
+        specifier: workspace:*
+        version: link:../compute-orchestrator
+      '@mox/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@mox/control-plane-contracts':
+        specifier: workspace:*
+        version: link:../../packages/control-plane-contracts
+      '@mox/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@mox/entitlements':
+        specifier: workspace:*
+        version: link:../../packages/entitlements
+      '@mox/notification-service':
+        specifier: workspace:*
+        version: link:../notification-service
+      drizzle-orm:
+        specifier: ^0.44.5
+        version: 0.44.7(@types/pg@8.23.1)(pg@8.23.0)
+    devDependencies:
+      '@mox/compute-providers':
+        specifier: workspace:*
+        version: link:../../packages/compute-providers
       typescript:
         specifier: ^5.9.2
         version: 5.9.3

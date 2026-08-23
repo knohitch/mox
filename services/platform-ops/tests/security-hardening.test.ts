@@ -59,13 +59,30 @@ describe("tenant isolation", () => {
 });
 
 describe("node impersonation", () => {
-  it("a forged node identity cannot enroll over an existing id", async () => {
+  it("a forged node identity cannot enroll without the pre-persisted bootstrap secret", async () => {
     const { ComputeOrchestrator } = await import("../../compute-orchestrator/src/service.js");
-    const orch = new ComputeOrchestrator();
-    await orch.enrollNode({ orgId: "org-real", nodeId: "node-victim", enrollToken: "real-token" });
+    const { InMemoryOrchestratorStore, sha256Hex } = await import("../../compute-orchestrator/src/store.js");
+    const store = new InMemoryOrchestratorStore();
+    const orch = new ComputeOrchestrator(store, { controlPlaneUrl: "https://control-plane.test" });
+    // Provisioning pre-persists ONLY the expected hash bound to org+order (§E).
+    const orderId = "11111111-1111-4111-8111-111111111111";
+    await store.createEnrollmentToken({
+      id: "22222222-2222-4222-8222-222222222222",
+      tokenHash: sha256Hex("real-secret"),
+      orgId: "org-real",
+      orderId,
+      state: "issued",
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    // Forged token / forged org binding both fail.
     await expect(
-      orch.enrollNode({ orgId: "org-attacker", nodeId: "node-victim", enrollToken: "forged-token" }),
-    ).rejects.toThrow(/different token/);
+      orch.enrollNode({ orgId: "org-real", orderId, nodeId: "node-victim", enrollToken: "forged-token" }),
+    ).rejects.toThrow(/unknown enrollment token/);
+    await expect(
+      orch.enrollNode({ orgId: "org-attacker", orderId, nodeId: "node-victim", enrollToken: "real-secret" }),
+    ).rejects.toThrow(/org mismatch/);
+    await expect(orch.store.getNode("node-victim")).resolves.toBeUndefined();
   });
 
   it("commands signed with the wrong secret are rejected; replay blocked", () => {

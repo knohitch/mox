@@ -4,9 +4,13 @@
  * Installs Mox Node via cloud-init. Enrollment uses a one-time token that is
  * exchanged over HTTPS; no long-lived secret is baked into user-data.
  * Root credentials are never embedded here or logged anywhere.
+ *
+ * Prompt 00 §F: the control-plane URL is validated deployment configuration
+ * passed in by the orchestrator — never a hard-coded default.
  */
 
 export interface MoxNodeCloudInitInput {
+  /** Resolved, validated control-plane endpoint (https in production). */
   controlPlaneUrl: string;
   /** One-time enrollment token; short-lived, single use. */
   enrollToken: string;
@@ -34,7 +38,7 @@ export function buildMoxNodeCloudInit(input: MoxNodeCloudInitInput): string {
     `      MOX_ORDER_ID=${input.orderId}`,
     "runcmd:",
     "  - systemctl enable --now docker",
-    "  - curl -fsSL ${MOX_CONTROL_PLANE_URL:-https://control-plane.mox.internal}/node/install.sh | bash -s -- /etc/mox-node/enroll.env",
+    `  - curl -fsSL ${input.controlPlaneUrl}/node/install.sh | bash -s -- /etc/mox-node/enroll.env`,
     "  - systemctl enable --now mox-node",
     "",
   ].join("\n");
