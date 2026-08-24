@@ -54,7 +54,9 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       setupToken,
       sessionTtlMs: 60 * 60_000,
       corsOrigins: [],
+      trustedProxyIps: [],
       platformAdminUserIds: [],
+      platformAdminRoles: {},
       platformAdminCapabilities: {},
       runtimeMode: "disabled",
       runtimeArgs: [],
@@ -79,7 +81,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     const noToken = await call("/api/setup/bootstrap", {
       method: "POST",
       headers: CSRF,
-      body: JSON.stringify({ ownerEmail: "x@y.z", ownerPassword: "password123", orgSlug: "nope" }),
+      body: JSON.stringify({ ownerEmail: "x@y.z", ownerPassword: "password12345", orgSlug: "nope" }),
     });
     expect(noToken.status).toBe(403);
 
@@ -617,9 +619,42 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       body: JSON.stringify({ email: "owner@mox.test", password: "owner-password-1" }),
     });
     const ownerCookie = cookieFrom(ownerLogin.headers);
+    const ownerMe = (await (await call("/api/me", { headers: { cookie: ownerCookie } })).body) as { orgId: string };
+    const catalog = await seedPlan();
+    await server.services.entitlements.define({
+      key: "included_server_count",
+      valueType: "integer",
+      description: "Included server count",
+      defaultValue: 0,
+    });
+    await server.services.entitlements.define({
+      key: "included_compute_class",
+      valueType: "text",
+      description: "Included compute class",
+      defaultValue: "",
+    });
+    await server.services.entitlements.setPlanValues(catalog.planVersionId, {
+      included_server_count: 2,
+      included_compute_class: "COMPUTE_SMALL",
+    });
+    await server.services.billing.store.createSubscription({
+      id: randomUUID(),
+      orgId: ownerMe.orgId,
+      planVersionId: catalog.planVersionId,
+      priceVersionId: catalog.priceVersionId,
+      state: "active",
+      providerName: "scripted",
+      providerRef: `scripted_sub_${randomUUID()}`,
+      providerEnvironment: "test",
+      currentPeriodStart: new Date(Date.now() - 60_000).toISOString(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600_000).toISOString(),
+      failedRenewals: 0,
+      cancelAtPeriodEnd: false,
+      createdAt: new Date().toISOString(),
+    });
     const orderRes = await call("/api/servers/orders", {
       method: "POST",
-      headers: { ...CSRF, cookie: ownerCookie },
+      headers: { ...CSRF, cookie: ownerCookie, "Idempotency-Key": `node-cmd-1-${randomUUID()}` },
       body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "ws-cmd" }),
     });
     expect(orderRes.status).toBe(200);
@@ -636,7 +671,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     const enroll = await call("/node/enroll", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mox-org-id": orgRow.org_id },
-      body: JSON.stringify({ enrollToken: secret, orderId, nodeId: `node-cmd-${randomUUID()}` }),
+      body: JSON.stringify({ enrollToken: secret, orderId, nodeId: `node-${orderId}` }),
     });
     expect(enroll.status).toBe(200);
     const { nodeId, agentToken } = enroll.body as { nodeId: string; agentToken: string };
@@ -650,7 +685,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     // A DIFFERENT node's token cannot poll this node.
     const orderRes2 = await call("/api/servers/orders", {
       method: "POST",
-      headers: { ...CSRF, cookie: ownerCookie },
+      headers: { ...CSRF, cookie: ownerCookie, "Idempotency-Key": `node-cmd-2-${randomUUID()}` },
       body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "ws-cmd-2" }),
     });
     expect(orderRes2.status).toBe(200);
@@ -659,7 +694,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     const enroll2 = await call("/node/enroll", {
       method: "POST",
       headers: { "content-type": "application/json", "x-mox-org-id": orgRow.org_id },
-      body: JSON.stringify({ enrollToken: secretOf(fake.provisionCalls.length - 1), orderId: orderId2, nodeId: `node-cmd-${randomUUID()}` }),
+      body: JSON.stringify({ enrollToken: secretOf(fake.provisionCalls.length - 1), orderId: orderId2, nodeId: `node-${orderId2}` }),
     });
     expect(enroll2.status).toBe(200);
     const otherToken = (enroll2.body as { agentToken: string }).agentToken;
@@ -963,7 +998,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     });
   }
 
-  async function seedPlan(): Promise<{ planVersionId: string; productId: string }> {
+  async function seedPlan(): Promise<{ planVersionId: string; productId: string; priceVersionId: string }> {
     const { PgBillingStore } = await import("@mox/database");
     const store = new PgBillingStore(server.services.db);
     const product = await store.createProduct({
@@ -986,7 +1021,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       displayCurrency: "USD",
     });
     const book = await store.upsertPriceBook({ id: randomUUID(), productId: product.id, pricingRegionCode: "GLOBAL", mode: "fixed" });
-    await store.createPriceVersion({
+    const price = await store.createPriceVersion({
       id: randomUUID(),
       priceBookId: book.id,
       version: 1,
@@ -995,8 +1030,341 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       effectiveFrom: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     });
-    return { planVersionId: planVersion.id, productId: product.id };
+    return { planVersionId: planVersion.id, productId: product.id, priceVersionId: price.id };
   }
+
+  async function seedCommercialSubscription(
+    orgId: string,
+    values: Record<string, boolean | number | string>,
+  ): Promise<{ planVersionId: string; priceVersionId: string }> {
+    const catalog = await seedPlan();
+    for (const [key, value] of Object.entries(values)) {
+      await server.services.entitlements.define({
+        key: key as never,
+        valueType: typeof value === "boolean" ? "boolean" : typeof value === "number" ? "integer" : "text",
+        description: key,
+        defaultValue: typeof value === "boolean" ? false : typeof value === "number" ? 0 : "",
+      });
+    }
+    await server.services.entitlements.setPlanValues(catalog.planVersionId, values);
+    await server.services.billing.store.createSubscription({
+      id: randomUUID(),
+      orgId,
+      planVersionId: catalog.planVersionId,
+      priceVersionId: catalog.priceVersionId,
+      state: "active",
+      providerName: "scripted",
+      providerRef: `scripted_sub_${randomUUID()}`,
+      providerEnvironment: "test",
+      currentPeriodStart: new Date(Date.now() - 60_000).toISOString(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600_000).toISOString(),
+      failedRenewals: 0,
+      cancelAtPeriodEnd: false,
+      createdAt: new Date().toISOString(),
+    });
+    return { planVersionId: catalog.planVersionId, priceVersionId: catalog.priceVersionId };
+  }
+
+  async function loginAndSwitch(email: string, password: string, orgId: string): Promise<string> {
+    const login = await call("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const cookie = cookieFrom(login.headers);
+    const switched = await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({ orgId }),
+    });
+    expect(switched.status).toBe(200);
+    return cookie;
+  }
+
+  it("org role matrix enforces workspace, billing, infrastructure, approval, and PAT intersections (Security Repair 02)", async () => {
+    const ownerEmail = `${randomUUID()}@mox.test`;
+    const ownerSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "role-matrix-pass" }),
+    });
+    const ownerCookie = cookieFrom(ownerSignup.headers);
+    const ownerMe = (await (await call("/api/me", { headers: { cookie: ownerCookie } })).body) as { orgId: string; userId: string };
+    await seedCommercialSubscription(ownerMe.orgId, {
+      active_concurrent_agents: 5,
+      agent_rooms: 2,
+      included_server_count: 1,
+      included_compute_class: "COMPUTE_SMALL",
+    });
+
+    const { agents: agentsTable, approvalRequests: approvalRequestsTable } = await import("@mox/database");
+    const [agent] = await server.services.db.insert(agentsTable).values({
+      orgId: ownerMe.orgId,
+      slug: `role-agent-${randomUUID().slice(0, 8)}`,
+      displayName: "Role Agent",
+      status: "active",
+      definition: { agentId: "role-agent", model: { providerId: "old", modelId: "old" } },
+      createdByUserId: ownerMe.userId,
+    }).returning({ id: agentsTable.id });
+    const agentId = agent!.id;
+
+    const memberEmail = `${randomUUID()}@mox.test`;
+    const viewerEmail = `${randomUUID()}@mox.test`;
+    const adminEmail = `${randomUUID()}@mox.test`;
+    for (const [email, password] of [[memberEmail, "member-matrix-pass"], [viewerEmail, "viewer-matrix-pass"], [adminEmail, "admin-matrix-pass"]] as const) {
+      const signup = await call("/api/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      expect(signup.status).toBe(200);
+    }
+    await server.services.db.execute(
+      (await import("drizzle-orm")).sql`
+        INSERT INTO memberships (org_id, user_id, role)
+        SELECT ${ownerMe.orgId}, id,
+          CASE
+            WHEN email = ${memberEmail.toLowerCase()} THEN 'member'::membership_role
+            WHEN email = ${viewerEmail.toLowerCase()} THEN 'viewer'::membership_role
+            ELSE 'admin'::membership_role
+          END
+        FROM users
+        WHERE email in (${memberEmail.toLowerCase()}, ${viewerEmail.toLowerCase()}, ${adminEmail.toLowerCase()})
+      `,
+    );
+    const memberCookie = await loginAndSwitch(memberEmail, "member-matrix-pass", ownerMe.orgId);
+    const viewerCookie = await loginAndSwitch(viewerEmail, "viewer-matrix-pass", ownerMe.orgId);
+    const adminCookie = await loginAndSwitch(adminEmail, "admin-matrix-pass", ownerMe.orgId);
+
+    const viewerPatch = await call(`/api/agents/${agentId}/model`, {
+      method: "PATCH",
+      headers: { ...CSRF, cookie: viewerCookie },
+      body: JSON.stringify({ providerId: "openai", modelId: "gpt-test" }),
+    });
+    expect(viewerPatch.status).toBe(403);
+    expect(JSON.stringify(viewerPatch.body)).toContain("role_denied");
+
+    const viewerThread = await call("/api/threads", {
+      method: "POST",
+      headers: { ...CSRF, cookie: viewerCookie },
+      body: JSON.stringify({ agentId, title: "viewer denied" }),
+    });
+    expect(viewerThread.status).toBe(403);
+    expect(JSON.stringify(viewerThread.body)).toContain("role_denied");
+
+    const memberPatch = await call(`/api/agents/${agentId}/model`, {
+      method: "PATCH",
+      headers: { ...CSRF, cookie: memberCookie },
+      body: JSON.stringify({ providerId: "openai", modelId: "gpt-test" }),
+    });
+    expect(memberPatch.status).toBe(200);
+    const memberThread = await call("/api/threads", {
+      method: "POST",
+      headers: { ...CSRF, cookie: memberCookie },
+      body: JSON.stringify({ agentId, title: "member allowed" }),
+    });
+    expect(memberThread.status).toBe(200);
+    const threadId = (memberThread.body as { threadId: string }).threadId;
+
+    const memberServer = await call("/api/servers/orders", {
+      method: "POST",
+      headers: { ...CSRF, cookie: memberCookie, "Idempotency-Key": `member-deny-${randomUUID()}` },
+      body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "member-denied" }),
+    });
+    expect(memberServer.status).toBe(403);
+    expect(JSON.stringify(memberServer.body)).toContain("role_denied");
+
+    const starPat = (await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: memberEmail, password: "member-matrix-pass", name: "star" }),
+    })).body as { token: string };
+    await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${starPat.token}` },
+      body: JSON.stringify({ orgId: ownerMe.orgId }),
+    });
+    const starServer = await call("/api/servers/orders", {
+      method: "POST",
+      headers: { ...CSRF, authorization: `Bearer ${starPat.token}`, "Idempotency-Key": `star-deny-${randomUUID()}` },
+      body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "star-denied" }),
+    });
+    expect(starServer.status).toBe(403);
+    expect(JSON.stringify(starServer.body)).toContain("role_denied");
+
+    const approvalId = `appr_${randomUUID()}`;
+    await server.services.db.insert(approvalRequestsTable).values({
+      approvalRef: approvalId,
+      orgId: ownerMe.orgId,
+      agentId,
+      threadId,
+      correlationId: `approval:${approvalId}`,
+      payload: { type: "approval.requested", approvalId, kind: "spend", summary: "Approve spend" },
+      kind: "spend",
+      summary: "Approve spend",
+    });
+    const memberApproval = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: memberCookie },
+      body: JSON.stringify({ outcome: "approved" }),
+    });
+    expect(memberApproval.status).toBe(403);
+    const ownerApproval = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({ outcome: "approved" }),
+    });
+    expect(ownerApproval.status).toBe(200);
+    const replaySameApproval = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({ outcome: "approved" }),
+    });
+    expect(replaySameApproval.status).toBe(200);
+    const replayApproval = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({ outcome: "denied" }),
+    });
+    expect(replayApproval.status).toBe(409);
+    const adminReplayApproval = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie },
+      body: JSON.stringify({ outcome: "approved" }),
+    });
+    expect(adminReplayApproval.status).toBe(200);
+    expect((adminReplayApproval.body as { duplicate?: boolean }).duplicate).toBe(true);
+
+    const noEntitlementOwner = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "no-entitlement-pass" }),
+    });
+    const noEntitlementOrder = await call("/api/servers/orders", {
+      method: "POST",
+      headers: { ...CSRF, cookie: cookieFrom(noEntitlementOwner.headers), "Idempotency-Key": `owner-noent-${randomUUID()}` },
+      body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "owner-noent" }),
+    });
+    expect(noEntitlementOrder.status).toBe(402);
+
+    const adminOrder = await call("/api/servers/orders", {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie, "Idempotency-Key": `admin-entitled-${randomUUID()}` },
+      body: JSON.stringify({ computeClassCode: "COMPUTE_SMALL", hostname: "admin-entitled" }),
+    });
+    expect(adminOrder.status).not.toBe(403);
+  });
+
+  it("approval resolution is durable, org-scoped, and delivered to runtime once (Security Repair 03)", async () => {
+    const ownerEmail = `${randomUUID()}@mox.test`;
+    const ownerSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: ownerEmail, password: "approval-runtime-pass" }),
+    });
+    const ownerCookie = cookieFrom(ownerSignup.headers);
+    const ownerMe = (await (await call("/api/me", { headers: { cookie: ownerCookie } })).body) as { orgId: string; userId: string };
+    await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 2 });
+
+    const { agents: agentsTable, approvalRequests: approvalRequestsTable, sessionEvents: sessionEventsTable } = await import("@mox/database");
+    const [agent] = await server.services.db.insert(agentsTable).values({
+      orgId: ownerMe.orgId,
+      slug: `approval-agent-${randomUUID().slice(0, 8)}`,
+      displayName: "Approval Agent",
+      status: "active",
+      definition: { agentId: "approval-agent", model: { providerId: "openai", modelId: "test" } },
+      createdByUserId: ownerMe.userId,
+    }).returning({ id: agentsTable.id });
+    const agentId = agent!.id;
+    const thread = await call("/api/threads", {
+      method: "POST",
+      headers: { ...CSRF, cookie: ownerCookie },
+      body: JSON.stringify({ agentId, title: "approval runtime" }),
+    });
+    expect(thread.status).toBe(200);
+    const threadId = (thread.body as { threadId: string }).threadId;
+
+    const approvalId = `appr_${randomUUID()}`;
+    const runId = `run-${randomUUID()}`;
+    await server.services.db.insert(approvalRequestsTable).values({
+      approvalRef: approvalId,
+      orgId: ownerMe.orgId,
+      agentId,
+      threadId,
+      correlationId: runId,
+      requesterUserId: ownerMe.userId,
+      toolName: "computer.click",
+      action: "click",
+      policyReason: "computer control requires approval",
+      payload: { approvalId, runId, toolName: "computer.click", secret: "sk-should-not-leak" },
+      kind: "computer",
+      summary: "Approve computer control",
+    });
+    await server.services.db.insert(sessionEventsTable).values({
+      eventId: `forged-${randomUUID()}`,
+      orgId: ownerMe.orgId,
+      subjectKind: "thread",
+      subjectId: threadId,
+      agentId,
+      runId,
+      correlationId: runId,
+      type: "approval.resolved",
+      payload: { approvalId, outcome: "denied", forgedBy: "event-log" },
+    });
+
+    const open = await call("/api/approvals/open", { headers: { cookie: ownerCookie } });
+    expect(open.status).toBe(200);
+    expect((open.body as Array<{ approvalId: string }>).some((row) => row.approvalId === approvalId)).toBe(true);
+
+    const intruderSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "approval-intruder-pass" }),
+    });
+    const intruderResolve = await call(`/api/approvals/${approvalId}/resolve`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: cookieFrom(intruderSignup.headers) },
+      body: JSON.stringify({ outcome: "approved" }),
+    });
+    expect(intruderResolve.status).toBe(404);
+
+    const originalRuntime = server.services.runtime;
+    const delivered: Array<{ orgId: string; runId: string; approvalId: string; outcome: string }> = [];
+    server.services.runtime = {
+      respondApproval: async (request: { orgId: string; runId: string; approvalId: string; outcome: "approved" | "denied" }) => {
+        delivered.push(request);
+        return { approvalId: request.approvalId, delivered: true };
+      },
+    } as unknown as NonNullable<ControlPlaneServices["runtime"]>;
+    try {
+      const resolved = await call(`/api/approvals/${approvalId}/resolve`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: ownerCookie },
+        body: JSON.stringify({ outcome: "approved" }),
+      });
+      expect(resolved.status).toBe(200);
+      expect(delivered).toEqual([{ orgId: ownerMe.orgId, runId, approvalId, outcome: "approved" }]);
+
+      const replay = await call(`/api/approvals/${approvalId}/resolve`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: ownerCookie },
+        body: JSON.stringify({ outcome: "approved" }),
+      });
+      expect(replay.status).toBe(200);
+      expect((replay.body as { duplicate?: boolean }).duplicate).toBe(true);
+      expect(delivered).toHaveLength(1);
+
+      const conflict = await call(`/api/approvals/${approvalId}/resolve`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: ownerCookie },
+        body: JSON.stringify({ outcome: "denied" }),
+      });
+      expect(conflict.status).toBe(409);
+      expect(delivered).toHaveLength(1);
+    } finally {
+      server.services.runtime = originalRuntime;
+    }
+  });
 
   it("billing mutations require scope AND org owner/admin authority (Prompt 01)", async () => {
     const ownerEmail = `${randomUUID()}@mox.test`;
@@ -1315,7 +1683,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       body: JSON.stringify({ displayName: "Paystack", enabled: true }),
     });
     expect(deniedBeforeGrant.status).toBe(403);
-    server.services.config.platformAdminUserIds.push(meOwner.userId);
+    server.services.config.platformAdminRoles[meOwner.userId] = "superadmin";
 
     // Owner (now platform-admin) configures with SECRET REF NAMES only.
     const put = await call("/api/admin/billing-providers/paystack", {
@@ -1344,6 +1712,167 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     );
     expect(pubRow?.enabled).toBe(true);
     expect(JSON.stringify(publicList.body)).not.toContain("secretRef");
+  });
+
+  it("platform admin roles map to capabilities without PAT or legacy wildcard escalation (Security Repair 02)", async () => {
+    const makeAdmin = async (role: "support" | "billing_admin" | "ops_admin" | "superadmin") => {
+      const email = `${role}-${randomUUID()}@mox.test`;
+      const signup = await call("/api/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "platform-role-pass" }),
+      });
+      const cookie = cookieFrom(signup.headers);
+      const me = (await (await call("/api/me", { headers: { cookie } })).body) as { userId: string };
+      server.services.config.platformAdminRoles[me.userId] = role;
+      return { email, cookie };
+    };
+    const support = await makeAdmin("support");
+    const billing = await makeAdmin("billing_admin");
+    const ops = await makeAdmin("ops_admin");
+    const superadmin = await makeAdmin("superadmin");
+
+    const supportBillingConfig = await call("/api/admin/billing-providers/stripe", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: support.cookie },
+      body: JSON.stringify({ displayName: "Stripe", enabled: true }),
+    });
+    expect(supportBillingConfig.status).toBe(403);
+    expect(JSON.stringify(supportBillingConfig.body)).toContain("capability_denied");
+    const supportComputeRead = await call("/api/admin/compute", { headers: { cookie: support.cookie } });
+    expect(supportComputeRead.status).toBe(200);
+    expect(JSON.stringify(supportComputeRead.body)).not.toMatch(/credentialRefId|rootCredentialRefId|agentTokenHash|enrollTokenHash|requestFingerprint/);
+
+    const billingComputeCredential = await call("/api/admin/compute/accounts/hetzner/primary", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: billing.cookie },
+      body: JSON.stringify({ enabled: true, commercialStatus: "approved", credentialRefId: randomUUID() }),
+    });
+    expect(billingComputeCredential.status).toBe(403);
+    expect(JSON.stringify(billingComputeCredential.body)).toContain("capability_denied");
+
+    const opsPricing = await call("/api/admin/plans/price-books", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: ops.cookie },
+      body: JSON.stringify({ productId: randomUUID(), pricingRegion: "GLOBAL", mode: "fixed" }),
+    });
+    expect(opsPricing.status).toBe(403);
+    expect(JSON.stringify(opsPricing.body)).toContain("capability_denied");
+
+    const superBillingConfig = await call("/api/admin/billing-providers/stripe", {
+      method: "PUT",
+      headers: { ...CSRF, cookie: superadmin.cookie },
+      body: JSON.stringify({ displayName: "Stripe", enabled: true, environment: "test" }),
+    });
+    expect(superBillingConfig.status).toBe(200);
+
+    const ownerToken = (await call("/api/auth/token-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: support.email, password: "platform-role-pass", name: "admin-pat", scopes: ["admin"] }),
+    })).body as { token: string };
+    const patAdminAttempt = await call("/api/admin/billing-providers/paypal", {
+      method: "PUT",
+      headers: { ...CSRF, authorization: `Bearer ${ownerToken.token}` },
+      body: JSON.stringify({ displayName: "PayPal", enabled: true }),
+    });
+    expect(patAdminAttempt.status).toBe(403);
+    expect(JSON.stringify(patAdminAttempt.body)).toContain("session_only");
+  });
+
+  it("admin customer suspend/reactivate uses billing and compute state machines with target-org audit (Security Repair 02)", async () => {
+    const adminSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "customer-admin-pass" }),
+    });
+    const adminCookie = cookieFrom(adminSignup.headers);
+    const adminMe = (await (await call("/api/me", { headers: { cookie: adminCookie } })).body) as { userId: string; orgId: string };
+    server.services.config.platformAdminRoles[adminMe.userId] = "superadmin";
+
+    const targetSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "target-customer-pass" }),
+    });
+    const targetCookie = cookieFrom(targetSignup.headers);
+    const targetMe = (await (await call("/api/me", { headers: { cookie: targetCookie } })).body) as { orgId: string };
+    const catalog = await seedCommercialSubscription(targetMe.orgId, { active_concurrent_agents: 1 });
+    const activeSub = await server.services.billing.getActiveSubscription(targetMe.orgId);
+    expect(activeSub?.state).toBe("active");
+    const canceledSub = await server.services.billing.store.createSubscription({
+      id: randomUUID(),
+      orgId: targetMe.orgId,
+      planVersionId: catalog.planVersionId,
+      priceVersionId: catalog.priceVersionId,
+      state: "canceled",
+      providerName: "scripted",
+      providerRef: `scripted_sub_canceled_${randomUUID()}`,
+      providerEnvironment: "test",
+      currentPeriodStart: new Date(Date.now() - 60_000).toISOString(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 3600_000).toISOString(),
+      failedRenewals: 0,
+      cancelAtPeriodEnd: false,
+      canceledAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+
+    const { computeClasses: computeClassesTable, serverOrders: serverOrdersTable, serverOperations: serverOperationsTable, auditEvents: auditEventsTable } = await import("@mox/database");
+    await server.services.db.insert(computeClassesTable).values({
+      code: "COMPUTE_ADMIN_TEST",
+      displayName: "Admin Test",
+      minVcpu: 1,
+      minRamGb: 1,
+      skuMap: [],
+      active: true,
+    }).onConflictDoNothing({ target: computeClassesTable.code });
+    const [order] = await server.services.db.insert(serverOrdersTable).values({
+      orgId: targetMe.orgId,
+      computeClassCode: "COMPUTE_ADMIN_TEST",
+      state: "running",
+      providerName: "fake-compute",
+      providerInstanceId: `instance-${randomUUID()}`,
+      hostname: "admin-cancel-test",
+      idempotencyKey: `admin-cancel-${randomUUID()}`,
+    }).returning({ id: serverOrdersTable.id });
+
+    const suspend = await call(`/api/admin/customers/${targetMe.orgId}/suspend`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie },
+      body: JSON.stringify({ reason: "security review" }),
+    });
+    expect(suspend.status).toBe(200);
+    expect((suspend.body as { queuedComputeActions: number }).queuedComputeActions).toBe(1);
+    expect((await server.services.billing.getSubscription(activeSub!.id)).state).toBe("suspended");
+    const activeTransitions = await server.services.billing.listTransitions(activeSub!.id);
+    expect(activeTransitions.some((row) => row.toState === "suspended" && row.actorType === "admin" && row.actorId === adminMe.userId)).toBe(true);
+    const orderAfterSuspend = await server.services.orchestrator.getOrder(order!.id);
+    expect(orderAfterSuspend.state).toBe("cancelling");
+    const cancelOps = await server.services.db
+      .select()
+      .from(serverOperationsTable)
+      .where((await import("drizzle-orm")).eq(serverOperationsTable.orderId, order!.id));
+    expect(cancelOps.some((op) => op.kind === "cancel" && op.state === "queued")).toBe(true);
+
+    const reactivate = await call(`/api/admin/customers/${targetMe.orgId}/reactivate`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie },
+      body: JSON.stringify({}),
+    });
+    expect(reactivate.status).toBe(200);
+    expect((reactivate.body as { ok: boolean; subscriptionErrors: Array<{ subscriptionId: string }> }).ok).toBe(false);
+    expect((await server.services.billing.getSubscription(activeSub!.id)).state).toBe("active");
+    expect((await server.services.billing.getSubscription(canceledSub.id)).state).toBe("canceled");
+
+    const audits = await server.services.db
+      .select()
+      .from(auditEventsTable)
+      .where((await import("drizzle-orm")).eq(auditEventsTable.resourceId, targetMe.orgId));
+    const suspendAudit = audits.find((row) => row.action === "customer.suspend");
+    expect(suspendAudit?.orgId).toBe(targetMe.orgId);
+    expect(suspendAudit?.orgId).not.toBe(adminMe.orgId);
+    expect(suspendAudit?.actorType).toContain("superadmin");
+    expect(JSON.stringify(suspendAudit?.after)).toContain("admin.customers.write");
   });
 
   it("duplicate workspace names allocate distinct slugs safely (00C §F, test 11)", async () => {
@@ -1466,6 +1995,15 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
 
   it("admin send targets user/org/all with durable idempotent fan-out; platform-admin gated (Prompt 02)", async () => {
     const { a, b } = await twoUsers();
+    const cSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "notif-c-pass" }),
+    });
+    const c = {
+      cookie: cookieFrom(cSignup.headers),
+      ...((await (await call("/api/me", { headers: { cookie: cookieFrom(cSignup.headers) } })).body) as { userId: string; orgId: string }),
+    };
     // Platform authority is explicit.
     const meAdmin = (await (await call("/api/me", { headers: { cookie: a.cookie } })).body) as { userId: string };
     server.services.config.platformAdminCapabilities[meAdmin.userId] = ["admin.read"];
@@ -1482,7 +2020,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(capabilityDenied.status).toBe(403);
     expect(JSON.stringify(capabilityDenied.body)).toContain("capability_denied");
 
-    server.services.config.platformAdminUserIds.push(meAdmin.userId);
+    server.services.config.platformAdminRoles[meAdmin.userId] = "superadmin";
 
     const deny = await call("/api/admin/notifications/send", {
       method: "POST",
@@ -1510,6 +2048,10 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(send1.status).toBe(200);
     const inboxA = (await (await call("/api/notifications", { headers: { cookie: a.cookie } })).body) as Array<{ title: string }>;
     expect(inboxA.some((n) => n.title === "Hello A")).toBe(true);
+    const inboxBAfterTarget = (await (await call("/api/notifications", { headers: { cookie: b.cookie } })).body) as Array<{ title: string }>;
+    const inboxCAfterTarget = (await (await call("/api/notifications", { headers: { cookie: c.cookie } })).body) as Array<{ title: string }>;
+    expect(inboxBAfterTarget.some((n) => n.title === "Hello A")).toBe(false);
+    expect(inboxCAfterTarget.some((n) => n.title === "Hello A")).toBe(false);
 
     // Idempotent replay: same key → same job, no duplicate rows.
     const send1b = await call("/api/admin/notifications/send", {
@@ -1543,7 +2085,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
   it("scheduled sends run via the job runner and can be canceled before due time (Prompt 02)", async () => {
     const { a } = await twoUsers();
     const meAdmin = (await (await call("/api/me", { headers: { cookie: a.cookie } })).body) as { userId: string };
-    server.services.config.platformAdminUserIds.push(meAdmin.userId);
+    server.services.config.platformAdminRoles[meAdmin.userId] = "superadmin";
 
     const scheduledAt = new Date(Date.now() - 1000).toISOString(); // already due
     const jobId = ((await call("/api/admin/notifications/schedule", {

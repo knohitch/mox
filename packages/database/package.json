@@ -25,6 +25,7 @@
     "@mox/contracts": "workspace:*",
     "@mox/entitlements": "workspace:*",
     "@mox/money": "workspace:*",
+    "@mox/security": "workspace:*",
     "@mox/notification-service": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "pg": "^8.16.3"

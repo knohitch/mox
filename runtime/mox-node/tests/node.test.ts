@@ -105,6 +105,14 @@ describe("docker workload manager", () => {
     const mgr = new DockerWorkloadManager(exec);
     await expect(mgr.apply({ name: "x", image: "y", env: {}, restartPolicy: "no" })).rejects.toThrow(/daemon down/);
   });
+
+  it("scrubs and bounds docker stderr before throwing", async () => {
+    const secret = `Bearer ${"a".repeat(200)} sk-proj0123456789 postgres://u:p@db.internal/app`;
+    const exec = async () => ({ exitCode: 125, stdout: "", stderr: `${secret} ${"x".repeat(10_000)}` });
+    const mgr = new DockerWorkloadManager(exec);
+    await expect(mgr.apply({ name: "x", image: "y", env: {}, restartPolicy: "no" })).rejects.toThrow(/redacted/);
+    await expect(mgr.apply({ name: "x", image: "y", env: {}, restartPolicy: "no" })).rejects.not.toThrow(/sk-proj0123456789|postgres:\/\/u:p/);
+  });
 });
 
 describe("mox node agent loop", () => {

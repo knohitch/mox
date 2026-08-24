@@ -163,15 +163,11 @@ export class PayPalProvider implements BillingProvider {
     switch (parsed.event_type) {
       case "BILLING.SUBSCRIPTION.ACTIVATED":
       case "BILLING.SUBSCRIPTION.RE-ACTIVATED":
+        throw new WebhookVerificationError(`${parsed.event_type} is not proof of payment`);
       case "CHECKOUT.ORDER.APPROVED":
-        return {
-          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
-          type: "checkout.completed",
-          subjectRef: String(resource.id ?? ""),
-          subscriptionRef: String(resource.id ?? ""),
-          occurredAt,
-          payload: parsed,
-        };
+        throw new WebhookVerificationError("paypal approval is not proof of payment");
+      case "BILLING.SUBSCRIPTION.CREATED":
+        throw new WebhookVerificationError("paypal subscription creation is not proof of payment");
       case "PAYMENT.SALE.COMPLETED": {
         const amount = resource.amount as { total?: string; currency?: string } | undefined;
         return {
@@ -211,6 +207,34 @@ export class PayPalProvider implements BillingProvider {
           occurredAt,
           payload: parsed,
         };
+      case "PAYMENT.SALE.REFUNDED": {
+        const amount = resource.amount as { total?: string; currency?: string } | undefined;
+        return {
+          externalEventId: parsed.id ?? `PAYMENT.SALE.REFUNDED:${String(resource.id)}`,
+          type: "payment.refunded",
+          subjectRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
+          subscriptionRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
+          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          occurredAt,
+          amountMinor: amount?.total !== undefined ? majorToMinor(amount.total, amount?.currency ?? "USD") : undefined,
+          currency: amount?.currency,
+          payload: parsed,
+        };
+      }
+      case "PAYMENT.SALE.REVERSED":
+        return {
+          externalEventId: parsed.id ?? `PAYMENT.SALE.REVERSED:${String(resource.id)}`,
+          type: "dispute.opened",
+          subjectRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
+          subscriptionRef:
+            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
+          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          occurredAt,
+          payload: parsed,
+        };
       default:
         throw new WebhookVerificationError(`unsupported paypal event ${parsed.event_type}`);
     }
@@ -219,6 +243,7 @@ export class PayPalProvider implements BillingProvider {
   /** Reconciliation fallback: GET the subscription and check status. */
   async verifyCheckout(input: { providerRef: string }): Promise<{
     paid: boolean;
+    amountMinor?: bigint;
     currency?: string;
     occurredAt?: string;
     transactionRef?: string;
@@ -228,15 +253,18 @@ export class PayPalProvider implements BillingProvider {
       id: string;
       status?: string;
       start_time?: string;
-      billing_info?: { last_payment?: { amount?: { currency?: string } } };
+      billing_info?: { last_payment?: { amount?: { value?: string; currency_code?: string; currency?: string } } };
     }>({
       url: `${this.baseUrl}/v1/billing/subscriptions/${encodeURIComponent(input.providerRef)}`,
       headers: { authorization: `Bearer ${token}` },
       fetchImpl: this.fetchImpl,
     });
+    const amount = res.data.billing_info?.last_payment?.amount;
+    const currency = amount?.currency_code ?? amount?.currency;
     return {
-      paid: res.data.status === "ACTIVE" || res.data.status === "APPROVED",
-      currency: res.data.billing_info?.last_payment?.amount?.currency,
+      paid: res.data.status === "ACTIVE" && !!amount?.value && !!currency,
+      amountMinor: amount?.value && currency ? majorToMinor(amount.value, currency) : undefined,
+      currency,
       occurredAt: res.data.start_time,
       transactionRef: res.data.id,
     };

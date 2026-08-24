@@ -7,7 +7,7 @@
  */
 
 import { ToolDefinition, type JsonValue } from "@mox/contracts";
-import { assertSafeOutboundUrl } from "@mox/security";
+import { safeOutboundFetch, UnsafeOutboundUrlError } from "@mox/security";
 
 export type IntegrationProviderKind = "mcp" | "composio" | "oauth-api" | "make" | "n8n" | "webhook-token";
 
@@ -147,16 +147,22 @@ export class WebhookAutomationProvider implements IntegrationProvider {
   readonly kind: IntegrationProviderKind;
   readonly displayName: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>;
   private readonly resolveSecret?: (secretRef: string) => Promise<string | undefined>;
 
   constructor(
     kind: "make" | "n8n" | "webhook-token",
-    options: { fetchImpl?: typeof fetch; resolveSecret?: (secretRef: string) => Promise<string | undefined> } = {},
+    options: {
+      fetchImpl?: typeof fetch;
+      resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>;
+      resolveSecret?: (secretRef: string) => Promise<string | undefined>;
+    } = {},
   ) {
     this.kind = kind;
     this.displayName =
       kind === "make" ? "Make.com" : kind === "n8n" ? "n8n" : "Generic Webhook/API Token";
     this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
+    this.resolve = options.resolve;
     this.resolveSecret = options.resolveSecret;
   }
 
@@ -185,8 +191,6 @@ export class WebhookAutomationProvider implements IntegrationProvider {
     input: Record<string, unknown>,
   ): Promise<{ ok: boolean; output: JsonValue; error?: string }> {
     if (!connection.webhookUrl) return { ok: false, output: null, error: "webhook_not_configured" };
-    const urlCheck = assertSafeOutboundUrl(connection.webhookUrl);
-    if (!urlCheck.ok) return { ok: false, output: null, error: `webhook_url_denied:${urlCheck.reason}` };
     let bearer: string | undefined;
     if (connection.secretRef) {
       if (!this.resolveSecret) return { ok: false, output: null, error: "secret_resolution_not_configured" };
@@ -194,18 +198,25 @@ export class WebhookAutomationProvider implements IntegrationProvider {
       if (!bearer) return { ok: false, output: null, error: "secret_not_found" };
     }
     try {
-      const res = await this.fetchImpl(connection.webhookUrl, {
+      const { response } = await safeOutboundFetch(connection.webhookUrl, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
         },
         body: JSON.stringify(input.payload ?? {}),
+      }, {
+        fetchImpl: this.fetchImpl,
+        resolve: this.resolve,
+        allowedPorts: [443],
       });
-      return res.ok
-        ? { ok: true, output: { status: res.status } }
-        : { ok: false, output: null, error: `webhook HTTP ${res.status}` };
+      return response.ok
+        ? { ok: true, output: { status: response.status } }
+        : { ok: false, output: null, error: `webhook HTTP ${response.status}` };
     } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        return { ok: false, output: null, error: `webhook_url_denied:${error.reason}` };
+      }
       return { ok: false, output: null, error: String(error) };
     }
   }

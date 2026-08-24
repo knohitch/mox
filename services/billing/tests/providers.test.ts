@@ -174,7 +174,8 @@ describe("stripe adapter", () => {
       id: "evt_1",
       type: "checkout.session.completed",
       created: timestamp,
-      data: { object: { id: "cs_1", subscription: "sub_9", total: 1999, currency: "usd" } },
+      livemode: false,
+      data: { object: { id: "cs_1", subscription: "sub_9", amount_total: 1999, currency: "usd", mode: "subscription", payment_status: "paid" } },
     });
     const event = await provider.verifyWebhook({ "stripe-signature": stripeSigned(raw) }, raw);
     expect(event.type).toBe("checkout.completed");
@@ -282,7 +283,7 @@ describe("paypal adapter", () => {
     };
   }
 
-  it("requires OFFICIAL postback verification SUCCESS and normalizes activation", async () => {
+  it("requires OFFICIAL postback verification SUCCESS and rejects activation without payment", async () => {
     let verifyBody: { verification_status?: string; webhook_event?: { event_type?: string } } | undefined;
     const provider = new PayPalProvider({
       environment: "test",
@@ -307,10 +308,7 @@ describe("paypal adapter", () => {
       create_time: "2026-08-23T10:00:00Z",
       resource: { id: "I-ABC123" },
     });
-    const event = await provider.verifyWebhook(headers, raw);
-    expect(event.type).toBe("checkout.completed");
-    expect(event.subjectRef).toBe("I-ABC123");
-    expect(event.subscriptionRef).toBe("I-ABC123");
+    await expect(provider.verifyWebhook(headers, raw)).rejects.toThrow(/not proof of payment/);
     expect(verifyBody?.verification_status).toBeUndefined(); // request carries webhook_event
     expect((verifyBody as unknown as { webhook_id: string }).webhook_id).toBe("WHID");
     void verifyBody;

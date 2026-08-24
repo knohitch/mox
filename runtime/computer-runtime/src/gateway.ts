@@ -112,16 +112,16 @@ export class ComputerGateway {
     const verified = verifyGatewayToken(token, now);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     const claims = verified.claims;
+    if (!claims.agentId) throw new GatewayRejectedError("unauthorized", "gateway token missing agent scope");
 
     const entitlement = await this.opts.entitlements.check(claims.orgId, "computer");
     if (!entitlement.entitled) {
       throw new GatewayRejectedError("not-entitled", entitlement.reason ?? "computer not entitled");
     }
 
-    if (input.requestedSessionId && this.owners.has(input.requestedSessionId)) {
-      throw new GatewayRejectedError("unknown-session", "session id already in use");
+    if (input.requestedSessionId && input.requestedSessionId !== claims.sessionId) {
+      throw new GatewayRejectedError("unauthorized", "requested session does not match gateway token");
     }
-
     const active = Array.from(this.owners.entries()).filter(([, o]) => o.orgId === claims.orgId);
     const max = this.opts.maxSessionsPerOrg ?? 8;
     if (active.length >= max) {
@@ -131,7 +131,10 @@ export class ComputerGateway {
       );
     }
 
-    const sessionId = input.requestedSessionId ?? randomUUID();
+    const sessionId = input.requestedSessionId ?? claims.sessionId ?? randomUUID();
+    if (this.owners.has(sessionId)) {
+      throw new GatewayRejectedError("unknown-session", "session id already in use");
+    }
     await this.opts.provider.openSession({ orgId: claims.orgId, agentId: claims.agentId, sessionId });
     this.owners.set(sessionId, { orgId: claims.orgId, agentId: claims.agentId });
     await this.audit(claims, sessionId, "computer.session.open", "success", { sessionId });
@@ -152,6 +155,7 @@ export class ComputerGateway {
     const verified = verifyGatewayToken(token, now);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     const claims = verified.claims;
+    if (!claims.agentId) throw new GatewayRejectedError("unauthorized", "gateway token missing agent scope");
 
     // The token must be bound to the addressed session: a valid token for a
     // DIFFERENT session is still a direct-access attempt (no session-hopping).

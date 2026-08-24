@@ -9,7 +9,6 @@
 
 import type {
   AdminAudience,
-  AdminSendInput,
   DispatchedMessage,
   InAppNotification,
   MessageTemplate,
@@ -52,10 +51,11 @@ export interface NotificationStore {
   // ---- Admin jobs (durable, idempotent) ----
   insertJob(job: NotificationJobRecord): Promise<{ created: boolean; existing?: NotificationJobRecord }>;
   getJob(id: string): Promise<NotificationJobRecord | undefined>;
-  getJobByIdempotencyKey(key: string): Promise<NotificationJobRecord | undefined>;
+  getJobByIdempotencyKey(createdBy: string, key: string): Promise<NotificationJobRecord | undefined>;
   updateJob(job: NotificationJobRecord): Promise<void>;
   /** Due scheduled jobs for the runner; running jobs excluded (claim upstream). */
   dueJobs(nowIso: string): Promise<NotificationJobRecord[]>;
+  claimDueJobs(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<NotificationJobRecord[]>;
 }
 
 export class InMemoryNotificationStore implements NotificationStore {
@@ -100,8 +100,8 @@ export class InMemoryNotificationStore implements NotificationStore {
    */
   private visibleTo(n: InAppNotification, orgId: string, userId: string | undefined): boolean {
     if (n.orgId !== orgId) return false;
-    if (n.audienceType === "user") return !!userId && n.userId === userId;
-    return true;
+    if (n.audienceType === "org" && !n.userId) return true;
+    return !!userId && n.userId === userId;
   }
 
   async getForUser(id: string, orgId: string, userId: string): Promise<InAppNotification | undefined> {
@@ -178,6 +178,7 @@ export class InMemoryNotificationStore implements NotificationStore {
 
   async recordDispatch(message: DispatchedMessage): Promise<void> {
     const list = this.dispatches.get(message.orgId) ?? [];
+    if (message.dedupeKey && list.some((existing) => existing.dedupeKey === message.dedupeKey)) return;
     list.push(message);
     this.dispatches.set(message.orgId, list);
   }
@@ -187,9 +188,9 @@ export class InMemoryNotificationStore implements NotificationStore {
   }
 
   async insertJob(job: NotificationJobRecord): Promise<{ created: boolean; existing?: NotificationJobRecord }> {
-    const existing = this.jobs.get(job.idempotencyKey);
+    const existing = this.jobs.get(`${job.createdBy}:${job.idempotencyKey}`);
     if (existing) return { created: false, existing: { ...existing } };
-    this.jobs.set(job.idempotencyKey, { ...job });
+    this.jobs.set(`${job.createdBy}:${job.idempotencyKey}`, { ...job });
     return { created: true };
   }
 
@@ -198,13 +199,13 @@ export class InMemoryNotificationStore implements NotificationStore {
     return job ? { ...job } : undefined;
   }
 
-  async getJobByIdempotencyKey(key: string): Promise<NotificationJobRecord | undefined> {
-    const job = this.jobs.get(key);
+  async getJobByIdempotencyKey(createdBy: string, key: string): Promise<NotificationJobRecord | undefined> {
+    const job = this.jobs.get(`${createdBy}:${key}`);
     return job ? { ...job } : undefined;
   }
 
   async updateJob(job: NotificationJobRecord): Promise<void> {
-    this.jobs.set(job.idempotencyKey, { ...job, updatedAt: new Date().toISOString() });
+    this.jobs.set(`${job.createdBy}:${job.idempotencyKey}`, { ...job, updatedAt: new Date().toISOString() });
   }
 
   async dueJobs(nowIso: string): Promise<NotificationJobRecord[]> {
@@ -215,6 +216,35 @@ export class InMemoryNotificationStore implements NotificationStore {
           (!j.scheduledAt || j.scheduledAt <= nowIso),
       )
       .map((j) => ({ ...j }));
+  }
+
+  async claimDueJobs(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<NotificationJobRecord[]> {
+    const now = Date.parse(nowIso);
+    const leaseUntil = new Date(now + leaseMs).toISOString();
+    const claimed: NotificationJobRecord[] = [];
+    const due = [...this.jobs.values()]
+      .filter(
+        (j) =>
+          (
+            (j.status === "scheduled" || j.status === "draft") &&
+            (!j.scheduledAt || j.scheduledAt <= nowIso)
+          ) ||
+          (j.status === "running" && !!j.claimExpiresAt && Date.parse(j.claimExpiresAt) <= now),
+      )
+      .sort((a, b) => (a.scheduledAt ?? a.createdAt).localeCompare(b.scheduledAt ?? b.createdAt));
+    for (const job of due) {
+      if (claimed.length >= limit) break;
+      if (job.claimExpiresAt && Date.parse(job.claimExpiresAt) > now) continue;
+      job.status = "running";
+      job.startedAt = job.startedAt ?? nowIso;
+      job.claimOwner = workerId;
+      job.claimExpiresAt = leaseUntil;
+      job.attempts += 1;
+      job.updatedAt = nowIso;
+      this.jobs.set(`${job.createdBy}:${job.idempotencyKey}`, { ...job });
+      claimed.push({ ...job });
+    }
+    return claimed;
   }
 }
 

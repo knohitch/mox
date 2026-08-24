@@ -50,8 +50,9 @@ async function service(options: {
   developerMode?: boolean;
   agentLimit?: number;
 } = {}) {
+  const planVersionId = "plan-version-test";
   const entitlements = new EntitlementService(new InMemoryEntitlementStore());
-  await entitlements.setPlanValues("plan-version-current", {
+  await entitlements.setPlanValues(planVersionId, {
     developer_mode: options.developerMode ?? true,
     active_concurrent_agents: options.agentLimit ?? 10,
     cli_sessions: true,
@@ -63,6 +64,11 @@ async function service(options: {
     serverOwnership: {
       async ownerOf(serverOrderId) {
         return serverOrderId === "srv-777" ? "org-1" : undefined;
+      },
+    },
+    commercialPlans: {
+      async entitledPlanVersionId(orgId) {
+        return orgId === "org-1" ? planVersionId : undefined;
       },
     },
   });
@@ -218,7 +224,7 @@ describe("browser terminal", () => {
     // Another org's server is unaddressable.
     await expect(
       svc.openTerminal({ orgId: "org-2", userId: "u2", serverOrderId: "srv-777" }),
-    ).rejects.toThrow(/owned by your organization/);
+    ).rejects.toThrow(/commercially entitled/);
 
     // Unknown server too.
     await expect(
@@ -227,9 +233,17 @@ describe("browser terminal", () => {
   });
 
   it("denies terminal access when plan lacks cli_sessions entitlement", async () => {
+    const planVersionId = "plan-version-no-cli";
     const entitlements = new EntitlementService(new InMemoryEntitlementStore());
-    await entitlements.setPlanValues("plan-version-current", { cli_sessions: false });
-    const svc = new AgentControlService(new InMemoryAgentControlStore(), { entitlements });
+    await entitlements.setPlanValues(planVersionId, { cli_sessions: false });
+    const svc = new AgentControlService(new InMemoryAgentControlStore(), {
+      entitlements,
+      commercialPlans: {
+        async entitledPlanVersionId() {
+          return planVersionId;
+        },
+      },
+    });
     await expect(
       svc.openTerminal({ orgId: "org-1", userId: "u1", serverOrderId: "srv-x" }),
     ).rejects.toThrow(/not enabled/);

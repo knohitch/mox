@@ -27,6 +27,7 @@
     "@mox/entitlements": "workspace:*",
     "@mox/notification-service": "workspace:*",
     "@mox/runtime-client": "workspace:*",
+    "@mox/security": "workspace:*",
     "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {

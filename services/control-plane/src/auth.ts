@@ -232,6 +232,7 @@ const KNOWN_SCOPES = [
   "channels",
   "usage",
   "approvals",
+  "notifications",
   "settings",
   "admin",
 ] as const;

@@ -217,7 +217,7 @@ describe("enrollment retry hardening (§F)", () => {
       orch.enrollNode({
         orgId: "org-retry",
         orderId: order.id,
-        nodeId: "node-stale",
+        nodeId: `node-${order.id}`,
         enrollToken: staleSecret,
         now: new Date().toISOString(),
       }),
@@ -226,11 +226,11 @@ describe("enrollment retry hardening (§F)", () => {
     const { node } = await orch.enrollNode({
       orgId: "org-retry",
       orderId: order.id,
-      nodeId: "node-fresh",
+      nodeId: `node-${order.id}`,
       enrollToken: freshSecret,
       now: new Date().toISOString(),
     });
-    expect(node.nodeId).toBe("node-fresh");
+    expect(node.nodeId).toBe(`node-${order.id}`);
   });
 
   it("a bound token from an older provisioning attempt is rejected after re-provision", async () => {
@@ -260,16 +260,16 @@ describe("enrollment retry hardening (§F)", () => {
 
     // Old token is revoked â†’ rejected even though its hash was valid once.
     await expect(
-      orch.enrollNode({ orgId: "org-old-token", orderId: order.id, nodeId: "n-old", enrollToken: firstSecret }),
+      orch.enrollNode({ orgId: "org-old-token", orderId: order.id, nodeId: `node-${order.id}`, enrollToken: firstSecret }),
     ).rejects.toThrow(/revoked/);
 
     // New token enrolls and the node record exists.
     const { node } = await orch.enrollNode({
       orgId: "org-old-token",
       orderId: order.id,
-      nodeId: "n-new",
+      nodeId: `node-${order.id}`,
       enrollToken: reissued.secret,
     });
-    expect(node.nodeId).toBe("n-new");
+    expect(node.nodeId).toBe(`node-${order.id}`);
   });
 });

@@ -5,13 +5,16 @@
  * readable codes instead of pretending.
  */
 
+import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
+import { IdempotencyConflictError } from "@mox/compute-orchestrator";
 import {
   agentDeployments,
   agentRooms,
   agents,
+  approvalRequests,
   abuseCases,
   addonDefinitions,
   auditEvents,
@@ -54,6 +57,7 @@ import {
   users,
   verifiedWebhookEvents,
 } from "@mox/database";
+import { sanitizeForPersistence } from "@mox/security";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import {
@@ -75,6 +79,8 @@ import {
   switchActiveOrg,
 } from "./auth.js";
 import { httpError, Router, sendJson, type RequestContext } from "./http.js";
+import { PLATFORM_ROLE_CAPABILITIES, type PlatformAdminCapability, type PlatformAdminRole } from "./config.js";
+import { bucketHash, clientIp, DurableRateLimiter } from "./rate-limit.js";
 
 export interface ApiDeps {
   services: ControlPlaneServices;
@@ -87,6 +93,11 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const router = new Router();
   const { services } = deps;
   const db = () => services.db;
+  const authLimiter = new DurableRateLimiter(db());
+  const ORG_ROLE_RANK = { viewer: 0, member: 1, admin: 2, owner: 3 } as const;
+  const sseByUser = new Map<string, number>();
+  const sseByIp = new Map<string, number>();
+  let sseGlobal = 0;
 
   /**
    * Central auth gate (Prompt 00D §A). Browser sessions carry full
@@ -119,6 +130,40 @@ export function buildApiRouter(deps: ApiDeps): Router {
     };
   };
 
+  type AuthIdentity = Awaited<ReturnType<typeof requireAuth>>;
+  type OrgRole = keyof typeof ORG_ROLE_RANK;
+  type OrgCapability =
+    | "workspace.write"
+    | "billing.manage"
+    | "infrastructure.manage"
+    | "integrations.manage"
+    | "approvals.resolve"
+    | "notifications.manage";
+
+  const roleOf = (identity: Pick<AuthIdentity, "role">): OrgRole =>
+    (Object.prototype.hasOwnProperty.call(ORG_ROLE_RANK, identity.role) ? identity.role : "viewer") as OrgRole;
+
+  const requireOrgRole = (identity: Pick<AuthIdentity, "role">, minimum: OrgRole): void => {
+    if (ORG_ROLE_RANK[roleOf(identity)] < ORG_ROLE_RANK[minimum]) {
+      throw httpError(`organization role ${minimum} or higher required`, 403, { code: "role_denied" });
+    }
+  };
+
+  const requireOrgCapability = (identity: Pick<AuthIdentity, "role">, capability: OrgCapability): void => {
+    switch (capability) {
+      case "workspace.write":
+      case "notifications.manage":
+        requireOrgRole(identity, "member");
+        return;
+      case "billing.manage":
+      case "infrastructure.manage":
+      case "integrations.manage":
+      case "approvals.resolve":
+        requireOrgRole(identity, "admin");
+        return;
+    }
+  };
+
   /** Token management is SESSION-only (Prompt 00D §B preferred policy). */
   const requireSessionAuth = async (ctx: RequestContext) => {
     const auth = await requireAuth(ctx);
@@ -142,26 +187,6 @@ export function buildApiRouter(deps: ApiDeps): Router {
     } catch {
       throw httpError("node authentication failed", 403, { code: "node_auth_failed" });
     }
-  };
-
-  /**
-   * Prompt 02 §Admin: real platform authority — explicit deployment
-   * admin list. A PAT `admin` scope NEVER confers this.
-   */
-  const requirePlatformAdmin = async (ctx: RequestContext) => {
-    const auth = await authenticate(db(), {
-      authorization: ctx.req.headers.authorization,
-      cookie: ctx.req.headers.cookie,
-    });
-    const mutating = ["POST", "PATCH", "PUT", "DELETE"].includes(ctx.req.method ?? "");
-    if (mutating && isCookieAuthenticated(ctx.req.headers) && !ctx.req.headers[CSRF_HEADER]) {
-      throw httpError("missing CSRF header for cookie-authenticated mutation", 403, { code: "csrf_required" });
-    }
-    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
-    if (!services.config.platformAdminUserIds.includes(auth.userId) && capabilities.length === 0) {
-      throw httpError("platform administrator authority required", 403, { code: "role_denied" });
-    }
-    return { ...auth.identity, userId: auth.userId };
   };
 
   function validateAdminSendBody(body: unknown): {
@@ -213,6 +238,58 @@ export function buildApiRouter(deps: ApiDeps): Router {
     maxAgeSeconds: Math.floor(services.config.sessionTtlMs / 1000),
   });
 
+  const enforceAuthRateLimits = async (ctx: RequestContext, endpoint: "setup" | "signup" | "login" | "token-login", email?: string) => {
+    const ip = clientIp(ctx.req, services.config.trustedProxyIps);
+    const userAgent = ctx.req.headers["user-agent"];
+    const ipLimit = endpoint === "signup" ? 180 : endpoint === "setup" ? 20 : 90;
+    const checks = [
+      { scope: `auth:${endpoint}:global`, bucketKey: "global", limit: 2000, windowMs: 60_000, lockMs: 60_000 },
+      { scope: `auth:${endpoint}:ip`, bucketKey: bucketHash(ip || "unknown"), limit: ipLimit, windowMs: 60_000, lockMs: 5 * 60_000 },
+    ];
+    if (email) {
+      checks.push({
+        scope: `auth:${endpoint}:account`,
+        bucketKey: bucketHash(email),
+        limit: 8,
+        windowMs: 15 * 60_000,
+        lockMs: 15 * 60_000,
+      });
+    }
+    for (const check of checks) {
+      const result = await authLimiter.check({ ...check, requestIp: ip, userAgent });
+      if (!result.allowed) {
+        throw httpError("too many authentication attempts; retry later", 429, {
+          code: "rate_limited",
+          reason: String(result.retryAfterSeconds ?? 60),
+        });
+      }
+    }
+  };
+
+  const admitSse = (ctx: RequestContext, userId: string): (() => void) => {
+    const ip = clientIp(ctx.req, services.config.trustedProxyIps);
+    const userCount = sseByUser.get(userId) ?? 0;
+    const ipCount = sseByIp.get(ip) ?? 0;
+    if (userCount >= 5 || ipCount >= 25 || sseGlobal >= 1000) {
+      throw httpError("too many open streams", 429, { code: "sse_connection_limit" });
+    }
+    sseByUser.set(userId, userCount + 1);
+    sseByIp.set(ip, ipCount + 1);
+    sseGlobal += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const nextUser = Math.max((sseByUser.get(userId) ?? 1) - 1, 0);
+      const nextIp = Math.max((sseByIp.get(ip) ?? 1) - 1, 0);
+      if (nextUser === 0) sseByUser.delete(userId);
+      else sseByUser.set(userId, nextUser);
+      if (nextIp === 0) sseByIp.delete(ip);
+      else sseByIp.set(ip, nextIp);
+      sseGlobal = Math.max(sseGlobal - 1, 0);
+    };
+  };
+
   // ---- Health ----------------------------------------------------------------
 
   router.get("/healthz", async () => {
@@ -238,6 +315,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (!body?.ownerEmail || !body?.ownerPassword || !body?.orgSlug) {
       throw httpError("ownerEmail, ownerPassword and orgSlug are required", 400);
     }
+    await enforceAuthRateLimits(ctx, "setup", body.ownerEmail);
     await completePlatformSetup({
       db: db(),
       setupTokenHash: setupRow?.setupTokenHash ?? undefined,
@@ -264,13 +342,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.post("/api/auth/signup", async (ctx) => {
     const body = ctx.body as { email?: string; password?: string; displayName?: string; orgName?: string } | undefined;
     if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    await enforceAuthRateLimits(ctx, "signup", body.email);
     const result = await signupAccount({
       db: db(),
       email: body.email,
       password: body.password,
       displayName: body.displayName,
       orgName: body.orgName,
-      meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
+      meta: { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] },
     });
     ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
     return toBrowserAuthResponse(result);
@@ -279,11 +358,12 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.post("/api/auth/login", async (ctx) => {
     const body = ctx.body as { email?: string; password?: string } | undefined;
     if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    await enforceAuthRateLimits(ctx, "login", body.email);
     const result = await loginAccount({
       db: db(),
       email: body.email,
       password: body.password,
-      meta: { ipAddress: ctx.req.socket.remoteAddress ?? undefined, userAgent: ctx.req.headers["user-agent"] },
+      meta: { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] },
     });
     ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
     return toBrowserAuthResponse(result);
@@ -297,6 +377,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.post("/api/auth/token-login", async (ctx) => {
     const body = ctx.body as { email?: string; password?: string; name?: string; scopes?: string[] } | undefined;
     if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    await enforceAuthRateLimits(ctx, "token-login", body.email);
     const result = await programmaticLogin({
       db: db(),
       email: body.email,
@@ -414,6 +495,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   /** Authoritative model change on the live draft definition. */
   router.patch("/api/agents/:agentId/model", async (ctx) => {
     const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
     const body = ctx.body as { providerId?: string; modelId?: string } | undefined;
     if (!body?.providerId || !body?.modelId) throw httpError("providerId and modelId are required", 400);
     const rows = await db()
@@ -440,6 +522,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.post("/api/threads", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
+    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
     const body = ctx.body as { agentId?: string; title?: string } | undefined;
     if (!body?.agentId) throw httpError("agentId is required", 400);
     const record = await services.threads.create(identity, { agentId: body.agentId, title: body.title });
@@ -466,6 +549,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
    */
   router.post("/api/threads/:threadId/messages", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
+    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
     const threadId = ctx.params.threadId!;
     const body = ctx.body as { text?: string } | undefined;
     if (!body?.text) throw httpError("text is required", 400);
@@ -541,6 +625,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
       throw httpError("token lacks required scope: threads", 403, { code: "scope_denied" });
     }
     const { identity } = auth;
+    const releaseSse = admitSse(ctx, auth.userId);
     let lastSeq = Number(ctx.query.get("sinceSeq") ?? "0");
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -563,10 +648,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
         ctx.res.write(`: ping\n\n`);
       } catch {
         clearInterval(timer);
+        releaseSse();
         ctx.res.end();
       }
     }, 1000);
-    ctx.req.on("close", () => clearInterval(timer));
+    ctx.req.on("close", () => {
+      clearInterval(timer);
+      releaseSse();
+    });
     return undefined;
   });
 
@@ -574,44 +663,78 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.get("/api/approvals/open", async (ctx) => {
     const identity = await requireAuth(ctx, "approvals");
-    const [requested, resolved] = await Promise.all([
-      db()
-        .select()
-        .from(sessionEvents)
-        .where(and(eq(sessionEvents.orgId, identity.orgId), eq(sessionEvents.type, "approval.requested")))
-        .orderBy(desc(sessionEvents.seq)),
-      db()
-        .select()
-        .from(sessionEvents)
-        .where(and(eq(sessionEvents.orgId, identity.orgId), eq(sessionEvents.type, "approval.resolved"))),
-    ]);
-    const resolvedIds = new Set(
-      resolved.map(
-        (r) => (r.payload as { approvalId?: string }).approvalId ?? "",
-      ),
-    );
-    return requested
-      .map((row) => row.payload as SessionEvent & { type: string; approvalId?: string })
-      .filter((payload) => payload.approvalId !== undefined && !resolvedIds.has(payload.approvalId));
+    const rows = await db()
+      .select()
+      .from(approvalRequests)
+      .where(and(eq(approvalRequests.orgId, identity.orgId), eq(approvalRequests.state, "open")))
+      .orderBy(desc(approvalRequests.requestedAt));
+    return rows.map((row) => ({
+      approvalId: row.approvalRef ?? row.id,
+      orgId: row.orgId,
+      agentId: row.agentId,
+      threadId: row.threadId ?? undefined,
+      runId: row.correlationId ?? undefined,
+      kind: row.kind,
+      summary: row.summary,
+      payload: row.payload,
+      requestedAt: row.requestedAt.toISOString(),
+    }));
   });
 
   router.post("/api/approvals/:approvalId/resolve", async (ctx) => {
     const identity = await requireAuth(ctx, "approvals");
+    requireOrgCapability(identity, "approvals.resolve");
     const body = ctx.body as { outcome?: "approved" | "denied" } | undefined;
     if (body?.outcome !== "approved" && body?.outcome !== "denied") {
       throw httpError('outcome must be "approved" or "denied"', 400);
+    }
+    const approvalId = ctx.params.approvalId!;
+    const rows = await db()
+      .select()
+      .from(approvalRequests)
+      .where(and(eq(approvalRequests.orgId, identity.orgId), eq(approvalRequests.approvalRef, approvalId)))
+      .limit(1);
+    const request = rows[0];
+    if (!request) throw httpError(`approval ${approvalId} not found`, 404);
+    const desiredState = body.outcome === "approved" ? "approved" : "rejected";
+    if (request.state !== "open") {
+      if (request.outcome === body.outcome || request.state === desiredState) {
+        return { ok: true, duplicate: true, approvalId, outcome: body.outcome };
+      }
+      throw httpError(`approval ${approvalId} is already resolved`, 409, { code: "approval_already_resolved" });
+    }
+    const resolvedAt = new Date();
+    const updated = await db()
+      .update(approvalRequests)
+      .set({
+        state: desiredState,
+        outcome: body.outcome,
+        resolvedAt,
+        resolvedByUserId: identity.userId,
+      })
+      .where(and(eq(approvalRequests.id, request.id), eq(approvalRequests.state, "open")))
+      .returning();
+    const resolved = updated[0];
+    if (!resolved) {
+      return { ok: true, duplicate: true, approvalId };
     }
     const event: SessionEvent = {
       type: "approval.resolved",
       eventId: crypto.randomUUID(),
       orgId: identity.orgId,
-      correlationId: `approval:${ctx.params.approvalId}`,
-      at: new Date().toISOString(),
-      approvalId: ctx.params.approvalId!,
+      agentId: request.agentId,
+      threadId: request.threadId ?? undefined,
+      correlationId: request.correlationId ?? `approval:${approvalId}`,
+      at: resolvedAt.toISOString(),
+      approvalId,
       outcome: body.outcome,
     } as unknown as SessionEvent;
-    await services.events.append(identity, { kind: "thread", id: identity.orgId }, event);
-    return { ok: true };
+    await services.events.append(identity, { kind: "thread", id: request.threadId ?? identity.orgId }, sanitizeForPersistence(event));
+    const runId = request.correlationId ?? ((request.payload as { runId?: string } | null)?.runId);
+    if (services.runtime && runId) {
+      await services.runtime.respondApproval({ orgId: identity.orgId, runId, approvalId, outcome: body.outcome });
+    }
+    return { ok: true, approvalId, outcome: body.outcome, resolvedBy: identity.userId, resolvedAt: resolvedAt.toISOString() };
   });
 
   // ---- Rooms -----------------------------------------------------------------
@@ -630,6 +753,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.post("/api/rooms", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
+    await requireCommercialMutation(identity, "agent_rooms", { min: 1 }, "member");
     const body = ctx.body as { title?: string; memberAgentIds?: string[] } | undefined;
     if (!body?.title) throw httpError("title is required", 400);
     const inserted = await db()
@@ -661,17 +785,53 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.post("/api/servers/orders", async (ctx) => {
     const identity = await requireAuth(ctx, "servers");
-    const body = ctx.body as { computeClassCode?: string; hostname?: string; sshKeyId?: string } | undefined;
+    requireOrgCapability(identity, "infrastructure.manage");
+    const body = ctx.body as { computeClassCode?: string; hostname?: string; sshKeyId?: string; idempotencyKey?: string } | undefined;
     if (!body?.computeClassCode || !body?.hostname) {
       throw httpError("computeClassCode and hostname are required", 400);
     }
-    const result = await services.orchestrator.orderServer({
-      orgId: identity.orgId,
+    const authz = await requireCommercialMutation(identity, "included_server_count", { min: 1 });
+    const computeClassAllowed = await services.billing.requireCommercialEntitlement(
+      identity.orgId,
+      services.entitlements,
+      "included_compute_class",
+      { equals: body.computeClassCode },
+    );
+    if (!computeClassAllowed.entitled && computeClassAllowed.value !== "*" && computeClassAllowed.value !== "all") {
+      throw httpError("compute class is not included in the current plan", 402, {
+        code: "compute_class_not_entitled",
+        reason: computeClassAllowed.reason,
+      });
+    }
+    const activeOrders = (await services.orchestrator.listOrders(identity.orgId)).filter((order) =>
+      ["requested", "provisioning", "running", "resizing", "stopping", "stopped"].includes(order.state),
+    );
+    if (typeof authz.value === "number" && authz.value >= 0 && activeOrders.length >= authz.value) {
+      throw httpError("server quota exceeded for current plan", 402, { code: "server_quota_exceeded" });
+    }
+    const idempotencyKey = requireIdempotencyKey(ctx, body.idempotencyKey);
+    const requestFingerprint = fingerprintJson({
+      op: "server.order",
       computeClassCode: body.computeClassCode,
       hostname: body.hostname,
-      idempotencyKey: crypto.randomUUID(),
-      sshKeyId: body.sshKeyId,
+      sshKeyId: body.sshKeyId ?? null,
     });
+    let result;
+    try {
+      result = await services.orchestrator.orderServer({
+        orgId: identity.orgId,
+        computeClassCode: body.computeClassCode,
+        hostname: body.hostname,
+        idempotencyKey,
+        requestFingerprint,
+        sshKeyId: body.sshKeyId,
+      });
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) {
+        throw httpError(error.message, 409, { code: "idempotency_conflict" });
+      }
+      throw error;
+    }
     if (result.created) {
       await emitPlatformEvent({
         eventId: `server.ordered:${result.order.id}`,
@@ -729,7 +889,8 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/model-connections/:providerSlug/test", async (ctx) => {
-    await requireAuth(ctx, "models");
+    const identity = await requireAuth(ctx, "models");
+    requireOrgCapability(identity, "integrations.manage");
     // A real probe requires the provider SDK credential vault; until wired
     // the API reports honestly rather than faking connectivity.
     throw httpError("provider connection probes are not configured on this deployment", 501, { code: "not_configured" });
@@ -757,6 +918,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.patch("/api/integrations/:integrationId", async (ctx) => {
     const identity = await requireAuth(ctx, "integrations");
+    requireOrgCapability(identity, "integrations.manage");
     const body = ctx.body as { connected?: boolean } | undefined;
     const rows = await db()
       .select()
@@ -806,53 +968,64 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // owner/admin; secrets are NEVER accepted or returned — only vault/env
   // REF names.
 
+  const platformCapabilitiesFor = (userId: string): { role?: PlatformAdminRole; capabilities: string[] } => {
+    const role = services.config.platformAdminRoles[userId];
+    const explicit = services.config.platformAdminCapabilities[userId] ?? [];
+    const configured = services.config.platformAdminUserIds.includes(userId) || role !== undefined || explicit.length > 0;
+    if (!configured) return { capabilities: [] };
+    const fromRole = role ? [...PLATFORM_ROLE_CAPABILITIES[role]] : [];
+    if ((explicit.includes("*") || fromRole.includes("*")) && role !== "superadmin") {
+      return { role, capabilities: [] };
+    }
+    return { role, capabilities: [...new Set([...fromRole, ...explicit])] };
+  };
+
   const requireAdminSession = async (ctx: RequestContext) => {
     const auth = await requireSessionAuth(ctx);
     // Prompt 01 §Provider config: provider administration is a PLATFORM
     // authority — an explicit deployment-configured admin/capability list,
     // NOT merely org owner/admin. Empty list denies everyone (fail-closed).
-    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
-    if (!services.config.platformAdminUserIds.includes(auth.userId) && capabilities.length === 0) {
+    const { role, capabilities } = platformCapabilitiesFor(auth.userId);
+    if (capabilities.length === 0) {
       throw httpError("platform administrator authority required for provider configuration", 403, {
         code: "role_denied",
       });
     }
-    return auth;
+    return { ...auth, platformRole: role, platformCapabilities: capabilities };
   };
 
-  type AdminCapability =
-    | "admin.read"
-    | "admin.customers.write"
-    | "admin.billing.write"
-    | "admin.compute.write"
-    | "admin.intelligence.write"
-    | "admin.notifications.write"
-    | "admin.operations.write";
+  type AdminCapability = PlatformAdminCapability;
 
   const requireAdminCapability = async (ctx: RequestContext, capability: AdminCapability) => {
     const auth = await requireAdminSession(ctx);
-    const capabilities = services.config.platformAdminCapabilities[auth.userId] ?? [];
-    const allCapabilities = services.config.platformAdminUserIds.includes(auth.userId);
+    const capabilities = auth.platformCapabilities;
+    const allCapabilities = auth.platformRole === "superadmin";
     if (!allCapabilities && !capabilities.includes("*") && !capabilities.includes(capability)) {
       throw httpError(`admin capability required: ${capability}`, 403, { code: "capability_denied" });
     }
-    return auth;
+    return { ...auth, adminCapability: capability };
   };
 
   const appendAdminAudit = async (
-    actor: Awaited<ReturnType<typeof requireAdminSession>>,
-    input: { action: string; resourceType: string; resourceId?: string; before?: unknown; after?: unknown },
+    actor: Awaited<ReturnType<typeof requireAdminCapability>>,
+    input: { action: string; resourceType: string; resourceId?: string; targetOrgId?: string; result?: string; correlationId?: string; before?: unknown; after?: unknown },
   ) => {
     await db().insert(auditEvents).values({
-      orgId: actor.orgId,
-      actorType: "platform_admin",
+      orgId: input.targetOrgId ?? actor.orgId,
+      actorType: `platform_admin:${actor.platformRole ?? "capability"}`,
       actorId: actor.userId,
       action: input.action,
       resourceType: input.resourceType,
       resourceId: input.resourceId,
-      result: "success",
-      before: input.before as object | undefined,
-      after: input.after as object | undefined,
+      result: input.result ?? "success",
+      correlationId: input.correlationId,
+      before: redactAdminPayload(input.before),
+      after: redactAdminPayload({
+        actorPlatformRole: actor.platformRole ?? null,
+        actorCapability: actor.adminCapability,
+        targetOrgId: input.targetOrgId ?? actor.orgId,
+        data: input.after,
+      }),
     });
   };
 
@@ -872,8 +1045,6 @@ export function buildApiRouter(deps: ApiDeps): Router {
     "openrouter",
     "openai-compatible",
   ] as const;
-
-  const toArray = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
 
   const rejectSecretBearingUrl = (raw?: string | null) => {
     if (!raw) return;
@@ -1008,7 +1179,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
         ...row,
         currentPeriodEnd: row.currentPeriodEnd?.toISOString(),
       })),
-      servers: serverRows.filter((row) => row.orgId === org.id),
+      servers: serverRows.filter((row) => row.orgId === org.id).map(projectServerOrderForAdmin),
       agents: agentRows.filter((row) => row.orgId === org.id).map((row) => ({
         agentId: row.id,
         slug: row.slug,
@@ -1026,18 +1197,15 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/admin/customers/:orgId/support-notes", async (ctx) => {
-    const admin = await requireAdminCapability(ctx, "admin.customers.write");
+    const admin = await requireAdminCapability(ctx, "admin.support.write");
     const body = ctx.body as { note?: string } | undefined;
     if (!body?.note?.trim()) throw httpError("note is required", 400);
     const note = body.note.trim().slice(0, 4000);
-    await db().insert(auditEvents).values({
-      orgId: ctx.params.orgId!,
-      actorType: "platform_admin",
-      actorId: admin.userId,
+    await appendAdminAudit(admin, {
       action: "support.note",
       resourceType: "organization",
       resourceId: ctx.params.orgId!,
-      result: "success",
+      targetOrgId: ctx.params.orgId!,
       after: { note },
     });
     return { ok: true };
@@ -1047,28 +1215,50 @@ export function buildApiRouter(deps: ApiDeps): Router {
     const admin = await requireAdminCapability(ctx, "admin.customers.write");
     const action = ctx.params.action!;
     if (action !== "suspend" && action !== "reactivate") throw httpError("unsupported customer action", 400);
-    const now = new Date();
     const body = ctx.body as { reason?: string } | undefined;
     const orgSubs = await db().select().from(subscriptions).where(eq(subscriptions.orgId, ctx.params.orgId!));
+    const subscriptionErrors: Array<{ subscriptionId: string; error: string }> = [];
     for (const sub of orgSubs) {
-      const next = action === "suspend" ? "suspended" : "active";
-      await db().update(subscriptions).set({
-        state: next,
-        suspendedAt: action === "suspend" ? now : null,
-        updatedAt: now,
-      }).where(eq(subscriptions.id, sub.id));
+      try {
+        if (action === "suspend" && !["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+          await services.billing.adminSuspend(sub.id, admin.userId, body?.reason ?? "platform_admin_suspended");
+        } else if (action === "reactivate" && sub.state === "suspended") {
+          await services.billing.adminReactivate(sub.id, admin.userId);
+        } else if (action === "reactivate" && ["canceled", "retention", "deleted"].includes(sub.state)) {
+          subscriptionErrors.push({ subscriptionId: sub.id, error: `cannot reactivate ${sub.state} subscription` });
+        }
+      } catch (error) {
+        subscriptionErrors.push({ subscriptionId: sub.id, error: error instanceof Error ? error.message : String(error) });
+      }
     }
-    await db().update(serverOrders).set({
-      state: action === "suspend" ? "stopped" : "requested",
-      updatedAt: now,
-    }).where(eq(serverOrders.orgId, ctx.params.orgId!));
+    const orgOrders = await services.orchestrator.listOrders(ctx.params.orgId!);
+    const computeErrors: Array<{ orderId: string; error: string }> = [];
+    let queuedComputeActions = 0;
+    if (action === "suspend") {
+      for (const order of orgOrders.filter((row) => ["requested", "provisioning", "running", "resizing", "stopping", "stopped"].includes(row.state))) {
+        try {
+          await services.orchestrator.cancelOrder(order.id);
+          queuedComputeActions += 1;
+        } catch (error) {
+          computeErrors.push({ orderId: order.id, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }
     await appendAdminAudit(admin, {
       action: `customer.${action}`,
       resourceType: "organization",
       resourceId: ctx.params.orgId!,
-      after: { reason: body?.reason },
+      targetOrgId: ctx.params.orgId!,
+      result: subscriptionErrors.length > 0 || computeErrors.length > 0 ? "partial_failure" : "success",
+      after: {
+        reason: body?.reason,
+        changedSubscriptions: orgSubs.length - subscriptionErrors.length,
+        queuedComputeActions,
+        subscriptionErrors,
+        computeErrors,
+      },
     });
-    return { ok: true, changedSubscriptions: orgSubs.length };
+    return { ok: subscriptionErrors.length === 0 && computeErrors.length === 0, changedSubscriptions: orgSubs.length - subscriptionErrors.length, queuedComputeActions, subscriptionErrors, computeErrors };
   });
 
   // ---- Mox Admin: plans / entitlements / pricing ----------------------------------
@@ -1177,11 +1367,49 @@ export function buildApiRouter(deps: ApiDeps): Router {
     ]);
     return {
       providers: computeProviderNames,
-      accounts: accounts.map((row) => ({ ...row, hasCredentialRef: Boolean(row.credentialRefId) })),
+      accounts: accounts.map((row) => ({
+        id: row.id,
+        providerName: row.providerName,
+        accountLabel: row.accountLabel,
+        regionCode: row.regionCode,
+        commercialStatus: row.commercialStatus,
+        healthScore: row.healthScore,
+        enabled: row.enabled,
+        hasCredentialRef: Boolean(row.credentialRefId),
+        createdAt: row.createdAt.toISOString(),
+      })),
       classes,
-      orders,
-      operations,
-      nodes,
+      orders: orders.map(projectServerOrderForAdmin),
+      operations: operations.map((row) => ({
+        id: row.id,
+        orderId: row.orderId,
+        kind: row.kind,
+        state: row.state,
+        providerOperationId: row.providerOperationId,
+        attempts: row.attempts,
+        maxAttempts: row.maxAttempts,
+        nextAttemptAt: row.nextAttemptAt.toISOString(),
+        lastError: row.lastError,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      nodes: nodes.map((row) => ({
+        id: row.id,
+        orgId: row.orgId,
+        orderId: row.orderId,
+        nodeId: row.nodeId,
+        version: row.version,
+        capabilities: row.capabilities,
+        metrics: row.metrics,
+        enrolledAt: row.enrolledAt.toISOString(),
+        lastHeartbeatAt: row.lastHeartbeatAt.toISOString(),
+        status: row.status,
+        hasAgentToken: Boolean(row.agentTokenHash),
+      })),
+      redactionSummary: {
+        applied: true,
+        categories: ["provider_credentials", "server_credentials", "node_tokens", "request_integrity"],
+      },
     };
   });
 
@@ -1504,7 +1732,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.get("/api/admin/operations", async (ctx) => {
-    await requireAdminCapability(ctx, "admin.read");
+    const admin = await requireAdminCapability(ctx, "admin.read");
     const [jobs, ops, incidentRows, backupRows, abuseRows, auditRows, flagRows, costRows] = await Promise.all([
       db().select().from(notificationJobs).orderBy(desc(notificationJobs.createdAt)).limit(100),
       db().select().from(serverOperations).orderBy(desc(serverOperations.createdAt)).limit(100),
@@ -1515,14 +1743,53 @@ export function buildApiRouter(deps: ApiDeps): Router {
       db().select().from(featureFlags).orderBy(asc(featureFlags.key)).limit(200),
       db().select().from(costLedgerEntries).orderBy(desc(costLedgerEntries.at)).limit(200),
     ]);
-    return { jobs, queues: ops, incidents: incidentRows, backups: backupRows, abuse: abuseRows, audit: auditRows, featureFlags: flagRows, costLedger: costRows };
+    const canViewCosts = admin.platformRole === "superadmin" || admin.platformRole === "billing_admin" || admin.platformCapabilities.includes("admin.billing.write");
+    return {
+      jobs: jobs.map(projectNotificationJobForAdmin),
+      queues: ops.map((row) => ({
+        id: row.id,
+        orderId: row.orderId,
+        kind: row.kind,
+        state: row.state,
+        attempts: row.attempts,
+        maxAttempts: row.maxAttempts,
+        nextAttemptAt: row.nextAttemptAt.toISOString(),
+        lastError: row.lastError,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      incidents: incidentRows,
+      backups: backupRows,
+      abuse: abuseRows,
+      audit: auditRows.map((row) => ({
+        id: row.id,
+        targetOrgId: row.orgId,
+        actorType: row.actorType,
+        actorId: row.actorId,
+        action: row.action,
+        resourceType: row.resourceType,
+        resourceId: row.resourceId,
+        result: row.result,
+        correlationId: row.correlationId,
+        at: row.at.toISOString(),
+      })),
+      featureFlags: flagRows,
+      costLedger: canViewCosts ? costRows.map((row) => ({
+        entryId: row.entryId,
+        orgId: row.orgId,
+        kind: row.kind,
+        amountMinor: row.amountMinor.toString(),
+        currency: row.currency,
+        at: row.at.toISOString(),
+      })) : [],
+    };
   });
 
   router.get("/api/admin/notifications/jobs", async (ctx) => {
     await requireAdminCapability(ctx, "admin.read");
     const jobs = await db().select().from(notificationJobs).orderBy(desc(notificationJobs.createdAt)).limit(100);
     return {
-      jobs,
+      jobs: jobs.map(projectNotificationJobForAdmin),
       stats: {
         scheduled: jobs.filter((job) => job.status === "scheduled").length,
         completed: jobs.filter((job) => job.status === "completed").length,
@@ -1563,6 +1830,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   ): ((ctx: RequestContext) => Promise<unknown>) => {
     return async (ctx) => {
       const auth = await requireAuth(ctx);
+      requireOrgCapability(auth, "notifications.manage");
       let ok: boolean;
       if (action === "read") ok = await services.notifications.markRead(ctx.params.id!, auth.orgId, auth.userId);
       else if (action === "unread") ok = await services.notifications.markUnread(ctx.params.id!, auth.orgId, auth.userId);
@@ -1578,6 +1846,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.post("/api/notifications/read-all", async (ctx) => {
     const auth = await requireAuth(ctx);
+    requireOrgCapability(auth, "notifications.manage");
     const changed = await services.notifications.markAllRead(auth.orgId, auth.userId);
     return { changed };
   });
@@ -1597,12 +1866,17 @@ export function buildApiRouter(deps: ApiDeps): Router {
       authorization: ctx.req.headers.authorization,
       cookie: ctx.req.headers.cookie,
     });
+    if (auth.authKind === "api_token" && !scopeSatisfied(auth.scopes, "notifications")) {
+      throw httpError("token lacks required scope: notifications", 403, { code: "scope_denied" });
+    }
+    const releaseSse = admitSse(ctx, auth.userId);
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-store",
       connection: "keep-alive",
     });
     ctx.res.write(`retry: 3000\n\n`);
+    const heartbeat = setInterval(() => ctx.res.write(`: ping\n\n`), 15_000);
     const unsubscribe = services.notifications.onPublished((published) => {
       // Isolation: only the intended recipient receives the frame.
       if (published.audienceType === "user" && published.userId !== auth.userId) return;
@@ -1613,7 +1887,11 @@ export function buildApiRouter(deps: ApiDeps): Router {
       }
       ctx.res.write(`data: ${JSON.stringify({ notificationId: published.notificationId })}\n\n`);
     });
-    ctx.req.on("close", unsubscribe);
+    ctx.req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+      releaseSse();
+    });
     return undefined;
   });
 
@@ -1661,7 +1939,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
     await requireAdminCapability(ctx, "admin.read");
     const job = await services.notifications.getJob(ctx.params.jobId!);
     if (!job) throw httpError(`job ${ctx.params.jobId} not found`, 404);
-    return job;
+    return projectNotificationJobForAdmin(job);
   });
 
   // ---- Usage / billing -----------------------------------------------------------
@@ -1674,13 +1952,45 @@ export function buildApiRouter(deps: ApiDeps): Router {
    */
   const requireBillingManager = async (ctx: RequestContext) => {
     const auth = await requireAuth(ctx, "billing");
-    if (auth.role !== "owner" && auth.role !== "admin") {
-      throw httpError("organization owner/admin authority required for billing mutations", 403, {
-        code: "role_denied",
-      });
-    }
+    requireOrgCapability(auth, "billing.manage");
     return auth;
   };
+
+  const requireCommercialMutation = async (
+    identity: AuthIdentity,
+    entitlementKey: Parameters<typeof services.billing.requireCommercialEntitlement>[2],
+    options: { min?: number; equals?: string } = {},
+    minimumRole: OrgRole = "admin",
+  ) => {
+    requireOrgRole(identity, minimumRole);
+    const decision = await services.billing.requireCommercialEntitlement(
+      identity.orgId,
+      services.entitlements,
+      entitlementKey,
+      options,
+    );
+    if (!decision.entitled) {
+      throw httpError("commercial entitlement required", 402, {
+        code: "commercial_entitlement_required",
+        reason: decision.reason,
+      });
+    }
+    return decision;
+  };
+
+  const requireIdempotencyKey = (ctx: RequestContext, bodyValue?: string): string => {
+    const header = ctx.req.headers["idempotency-key"];
+    const key = (Array.isArray(header) ? header[0] : header) ?? bodyValue;
+    if (!key || !/^[A-Za-z0-9._:-]{8,128}$/.test(key)) {
+      throw httpError("Idempotency-Key header is required and must be 8-128 safe characters", 400, {
+        code: "invalid_idempotency_key",
+      });
+    }
+    return key;
+  };
+
+  const fingerprintJson = (value: unknown): string =>
+    createHash("sha256").update(JSON.stringify(sortJson(value))).digest("hex");
 
   /** Safe public provider catalog — no secrets, ever. */
   router.get("/api/billing/providers", async (ctx) => {
@@ -1817,25 +2127,29 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Computer gateway + files/logs: honest 501s until wired --------------------
 
   router.get("/api/computer/:agentId/snapshot", async (ctx) => {
-    await requireAuth(ctx, "servers");
+    const identity = await requireAuth(ctx, "servers");
+    await requireCommercialMutation(identity, "browser_sessions", { min: 1 });
     void ctx;
     throw httpError("computer gateway is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.get("/api/agents/:agentId/files", async (ctx) => {
-    await requireAuth(ctx, "servers");
+    const identity = await requireAuth(ctx, "servers");
+    await requireCommercialMutation(identity, "developer_mode", {});
     void ctx;
     throw httpError("workspace file access is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.post("/api/agents/:agentId/terminal", async (ctx) => {
-    await requireAuth(ctx, "servers");
+    const identity = await requireAuth(ctx, "servers");
+    await requireCommercialMutation(identity, "cli_sessions", {});
     void ctx;
     throw httpError("Mox Runtime terminal execution is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   router.get("/api/agents/:agentId/logs", async (ctx) => {
-    await requireAuth(ctx, "servers");
+    const identity = await requireAuth(ctx, "servers");
+    await requireCommercialMutation(identity, "developer_mode", {});
     void ctx;
     throw httpError("log streaming is not configured on this deployment", 501, { code: "not_configured" });
   });
@@ -1938,6 +2252,103 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
 function bearer(header: string): string {
   return header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+}
+
+function projectServerOrderForAdmin(row: typeof serverOrders.$inferSelect) {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    subscriptionItemId: row.subscriptionItemId,
+    computeClassCode: row.computeClassCode,
+    state: row.state,
+    providerName: row.providerName,
+    providerAccountId: row.providerAccountId,
+    regionCode: row.regionCode,
+    providerSku: row.providerSku,
+    providerInstanceId: row.providerInstanceId,
+    ipv4: row.ipv4,
+    ipv6: row.ipv6,
+    hostname: row.hostname,
+    sshKeyId: row.sshKeyId,
+    reverseDns: row.reverseDns,
+    attemptCount: row.attemptCount,
+    lastError: row.lastError,
+    retentionUntil: row.retentionUntil?.toISOString(),
+    canceledAt: row.canceledAt?.toISOString(),
+    destroyedAt: row.destroyedAt?.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    hasRootCredentialRef: Boolean(row.rootCredentialRefId),
+  };
+}
+
+function projectNotificationJobForAdmin(row: {
+  id: string;
+  orgId?: string | null;
+  audienceType: string;
+  audiencePayload?: unknown;
+  title: string;
+  body: string;
+  severity: string;
+  category: string;
+  resourceType?: string | null;
+  resourceId?: string | null;
+  status: string;
+  scheduledAt?: Date | string | null;
+  startedAt?: Date | string | null;
+  completedAt?: Date | string | null;
+  fanoutTotal: number;
+  fanoutDone: number;
+  error?: string | null;
+  createdBy: string;
+  idempotencyKey: string;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}) {
+  return {
+    id: row.id,
+    orgId: row.orgId ?? undefined,
+    audienceType: row.audienceType,
+    audiencePayload: redactAdminPayload(row.audiencePayload),
+    title: row.title,
+    body: row.body,
+    severity: row.severity,
+    category: row.category,
+    resourceType: row.resourceType ?? undefined,
+    resourceId: row.resourceId ?? undefined,
+    status: row.status,
+    scheduledAt: isoMaybe(row.scheduledAt),
+    startedAt: isoMaybe(row.startedAt),
+    completedAt: isoMaybe(row.completedAt),
+    fanoutTotal: row.fanoutTotal,
+    fanoutDone: row.fanoutDone,
+    error: row.error ?? undefined,
+    createdBy: row.createdBy,
+    idempotencyKey: row.idempotencyKey,
+    createdAt: isoMaybe(row.createdAt),
+    updatedAt: isoMaybe(row.updatedAt),
+  };
+}
+
+function isoMaybe(value: Date | string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function redactAdminPayload(value: unknown): object | undefined {
+  if (value === undefined || value === null) return undefined;
+  const safe = sanitizeForPersistence(value);
+  return (typeof safe === "object" && safe !== null ? safe : { value: safe }) as object;
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, sortJson(item)]),
+  );
 }
 
 /**

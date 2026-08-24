@@ -102,6 +102,61 @@ describe("notification service", () => {
     expect(await store.listForUser("org-1", "u1")).toHaveLength(1);
   });
 
+  it("keeps selected-users fan-out visible only to each explicit recipient", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store, async () => [
+      { orgId: "org-1", userId: "u1" },
+    ]);
+    await svc.createJob({
+      idempotencyKey: "selected-users-once",
+      createdBy: "admin",
+      audience: { type: "users", userIds: ["u1"] },
+      payload: { title: "Selected", body: "Only one user" },
+    });
+    await svc.runDueJobs(new Date().toISOString());
+    expect((await store.listForUser("org-1", "u1")).map((n) => n.title)).toContain("Selected");
+    expect((await store.listForUser("org-1", "u2")).map((n) => n.title)).not.toContain("Selected");
+  });
+
+  it("namespaces admin job idempotency by creating actor", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store, async () => []);
+    const first = await svc.createJob({
+      idempotencyKey: "same-key",
+      createdBy: "admin-a",
+      audience: { type: "all" },
+      payload: { title: "A", body: "A body" },
+    });
+    const second = await svc.createJob({
+      idempotencyKey: "same-key",
+      createdBy: "admin-b",
+      audience: { type: "all" },
+      payload: { title: "B", body: "B body" },
+    });
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(true);
+    expect(second.job.id).not.toBe(first.job.id);
+  });
+
+  it("dedupes external dispatches per recipient/channel", async () => {
+    const store = new InMemoryNotificationStore();
+    const message = {
+      id: "msg_a",
+      orgId: "org-d",
+      userId: "u1",
+      eventType: "backup.failed" as const,
+      route: "email" as const,
+      recipient: "u1",
+      title: "Backup failed",
+      body: "Body",
+      dedupeKey: "evt:email:u1",
+      at: new Date().toISOString(),
+    };
+    await store.recordDispatch(message);
+    await store.recordDispatch({ ...message, id: "msg_b" });
+    expect(await store.listDispatches("org-d")).toHaveLength(1);
+  });
+
   it("supports realtime unread updates, read state, archive and expiry", async () => {
     const store = new InMemoryNotificationStore();
     const svc = new NotificationService(store);

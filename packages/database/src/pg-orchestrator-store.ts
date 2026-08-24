@@ -187,13 +187,24 @@ export class PgOrchestratorStore implements OrchestratorStore {
 
   async upsertOperation(op: ServerOperation): Promise<void> {
     const values = toOperationRow(op);
-    await this.db
+    const inserted = await this.db
       .insert(serverOperations)
       .values(values)
-      .onConflictDoUpdate({
+      .onConflictDoNothing({
         target: [serverOperations.orderId, serverOperations.kind, serverOperations.idempotencyKey],
-        set: { ...values, updatedAt: new Date() },
-      });
+      })
+      .returning({ id: serverOperations.id });
+    if (inserted.length > 0) return;
+    const existing = await this.getOperation(op.orderId, op.kind, op.idempotencyKey);
+    if (!existing || existing.state === "succeeded" || existing.state === "abandoned") return;
+    await this.db
+      .update(serverOperations)
+      .set({
+        nextAttemptAt: new Date(op.nextAttemptAt),
+        maxAttempts: op.maxAttempts,
+        updatedAt: new Date(),
+      })
+      .where(eq(serverOperations.id, existing.id));
   }
 
   async getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined> {
@@ -235,6 +246,37 @@ export class PgOrchestratorStore implements OrchestratorStore {
       .filter((op) => op.attempts < op.maxAttempts);
   }
 
+  async claimDueOperations(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<ServerOperation[]> {
+    const now = new Date(nowIso);
+    const leaseUntil = new Date(now.getTime() + leaseMs);
+    const result = await this.db.execute(sql`
+      WITH claimable AS (
+        SELECT id
+        FROM server_operations
+        WHERE (
+          (state IN ('queued', 'failed') AND next_attempt_at <= ${now})
+          OR (state = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ${now})
+        )
+        AND attempts < max_attempts
+        ORDER BY next_attempt_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT ${limit}
+      )
+      UPDATE server_operations AS op
+      SET state = 'running',
+          lease_owner = ${workerId},
+          lease_expires_at = ${leaseUntil},
+          updated_at = ${now}
+      FROM claimable
+      WHERE op.id = claimable.id
+      RETURNING op.*
+    `);
+    const rows = Array.isArray((result as { rows?: unknown[] }).rows)
+      ? (result as { rows: Record<string, unknown>[] }).rows
+      : [];
+    return rows.map(toOperationFromSqlRow);
+  }
+
   // ---- Nodes ---------------------------------------------------------------
 
   async upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord> {
@@ -272,6 +314,7 @@ export class PgOrchestratorStore implements OrchestratorStore {
       orgId: record.orgId,
       orderId: record.orderId,
       providerInstanceId: record.providerInstanceId ?? null,
+      expectedNodeId: record.expectedNodeId ?? null,
       state: record.state,
       expiresAt: new Date(record.expiresAt),
       consumedAt: record.consumedAt ? new Date(record.consumedAt) : null,
@@ -293,6 +336,7 @@ export class PgOrchestratorStore implements OrchestratorStore {
       .update(nodeEnrollmentTokens)
       .set({
         providerInstanceId: record.providerInstanceId ?? null,
+        expectedNodeId: record.expectedNodeId ?? null,
         state: record.state,
         expiresAt: new Date(record.expiresAt),
         consumedAt: record.consumedAt ? new Date(record.consumedAt) : null,
@@ -392,6 +436,7 @@ function toOrderRow(order: ServerOrder) {
     sshKeyId: order.sshKeyId ?? null,
     reverseDns: order.reverseDns ?? null,
     idempotencyKey: order.idempotencyKey,
+    requestFingerprint: order.requestFingerprint ?? null,
     attemptCount: order.attemptCount,
     lastError: order.lastError ?? null,
     retentionUntil: order.retentionUntil ? new Date(order.retentionUntil) : null,
@@ -418,6 +463,7 @@ function toOrder(row: OrderRow): ServerOrder {
     sshKeyId: row.sshKeyId ?? undefined,
     reverseDns: row.reverseDns ?? undefined,
     idempotencyKey: row.idempotencyKey,
+    requestFingerprint: row.requestFingerprint ?? undefined,
     attemptCount: row.attemptCount,
     lastError: row.lastError ?? undefined,
     retentionUntil: iso(row.retentionUntil),
@@ -439,6 +485,8 @@ function toOperationRow(op: ServerOperation) {
     attempts: op.attempts,
     maxAttempts: op.maxAttempts,
     nextAttemptAt: new Date(op.nextAttemptAt),
+    leaseOwner: op.leaseOwner ?? null,
+    leaseExpiresAt: op.leaseExpiresAt ? new Date(op.leaseExpiresAt) : null,
     lastError: op.lastError ?? null,
   };
 }
@@ -454,9 +502,33 @@ function toOperation(row: OperationRow): ServerOperation {
     attempts: row.attempts,
     maxAttempts: row.maxAttempts,
     nextAttemptAt: row.nextAttemptAt.toISOString(),
+    leaseOwner: row.leaseOwner ?? undefined,
+    leaseExpiresAt: iso(row.leaseExpiresAt),
     lastError: row.lastError ?? undefined,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function toOperationFromSqlRow(row: Record<string, unknown>): ServerOperation {
+  const dateIso = (value: unknown): string => value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
+  const maybeDateIso = (value: unknown): string | undefined =>
+    value === null || value === undefined ? undefined : dateIso(value);
+  return {
+    id: String(row.id),
+    orderId: String(row.order_id),
+    kind: String(row.kind) as OperationKind,
+    state: String(row.state) as ServerOperation["state"],
+    providerOperationId: row.provider_operation_id ? String(row.provider_operation_id) : undefined,
+    idempotencyKey: String(row.idempotency_key),
+    attempts: Number(row.attempts ?? 0),
+    maxAttempts: Number(row.max_attempts ?? 0),
+    nextAttemptAt: dateIso(row.next_attempt_at),
+    leaseOwner: row.lease_owner ? String(row.lease_owner) : undefined,
+    leaseExpiresAt: maybeDateIso(row.lease_expires_at),
+    lastError: row.last_error ? String(row.last_error) : undefined,
+    createdAt: dateIso(row.created_at),
+    updatedAt: dateIso(row.updated_at),
   };
 }
 
@@ -500,6 +572,7 @@ function toEnrollmentToken(row: EnrollmentTokenRow): NodeEnrollmentTokenRecord {
     orgId: row.orgId,
     orderId: row.orderId,
     providerInstanceId: row.providerInstanceId ?? undefined,
+    expectedNodeId: row.expectedNodeId ?? undefined,
     state: row.state,
     expiresAt: row.expiresAt.toISOString(),
     consumedAt: iso(row.consumedAt),

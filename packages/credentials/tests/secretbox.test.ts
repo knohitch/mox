@@ -30,4 +30,11 @@ describe("secretbox (AES-256-GCM)", () => {
   it("derives the same key from hex and passphrase forms deterministically", () => { 
     expect(deriveKey("passphrase")).toEqual(deriveKey("passphrase")); 
   }); 
+
+  it("does not treat malformed suffix-matching hex as key material", () => {
+    const valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    expect(() => deriveKey(`prefix-${valid}`)).not.toThrow();
+    expect(() => deriveKey(`${valid.slice(0, 62)}`)).toThrow(/exactly 32 bytes/);
+    expect(() => deriveKey(`hex:${valid.slice(0, 62)}`)).toThrow(/exactly 32 bytes/);
+  });
 }); 

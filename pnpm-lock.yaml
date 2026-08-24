@@ -136,6 +136,9 @@ importers:
       '@mox/notification-service':
         specifier: workspace:*
         version: link:../../services/notification-service
+      '@mox/security':
+        specifier: workspace:*
+        version: link:../security
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
@@ -334,6 +337,9 @@ importers:
       '@mox/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@mox/security':
+        specifier: workspace:*
+        version: link:../../packages/security
     devDependencies:
       typescript:
         specifier: ^5.9.2
@@ -426,6 +432,9 @@ importers:
       '@mox/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@mox/security':
+        specifier: workspace:*
+        version: link:../../packages/security
     devDependencies:
       typescript:
         specifier: ^5.9.2
@@ -482,6 +491,9 @@ importers:
       '@mox/runtime-client':
         specifier: workspace:*
         version: link:../../packages/runtime-client
+      '@mox/security':
+        specifier: workspace:*
+        version: link:../../packages/security
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)

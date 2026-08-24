@@ -38,6 +38,7 @@ import type {
 export class OrchestratorError extends Error {}
 export class NotFoundError extends OrchestratorError {}
 export class NotApprovedError extends OrchestratorError {}
+export class IdempotencyConflictError extends OrchestratorError {}
 export class TerminalFailureError extends OrchestratorError {}
 /** Raised when a bootstrap enrollment attempt fails validation/consumption. */
 export class EnrollmentError extends OrchestratorError {}
@@ -93,6 +94,8 @@ export class ComputeOrchestrator {
   readonly controlPlaneUrl: string;
   private readonly retryBaseMs: number;
   private readonly defaultMaxAttempts: number;
+  private readonly workerId: string;
+  private readonly operationLeaseMs: number;
   private readonly heartbeatLostMs: number;
   private readonly retentionDays: number;
   private readonly enrollTokenTtlMs: number;
@@ -108,6 +111,8 @@ export class ComputeOrchestrator {
     this.healthScorer = options.healthScorer;
     this.retryBaseMs = options.retryBaseMs ?? 1000;
     this.defaultMaxAttempts = options.maxAttempts ?? 5;
+    this.workerId = `compute-${newId()}`;
+    this.operationLeaseMs = Math.max(this.retryBaseMs * 300, 10 * 60_000);
     this.heartbeatLostMs = options.heartbeatLostMs ?? 5 * 60_000;
     this.retentionDays = options.retentionDays ?? 14;
     this.enrollTokenTtlMs = options.enrollTokenTtlMs ?? 30 * 60_000;
@@ -228,11 +233,21 @@ export class ComputeOrchestrator {
     computeClassCode: string;
     hostname: string;
     idempotencyKey: string;
+    requestFingerprint?: string;
     sshKeyId?: string;
     subscriptionItemId?: string;
   }): Promise<{ order: ServerOrder; created: boolean }> {
     const existing = await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey);
-    if (existing) return { order: existing, created: false };
+    if (existing) {
+      if (
+        input.requestFingerprint &&
+        existing.requestFingerprint &&
+        existing.requestFingerprint !== input.requestFingerprint
+      ) {
+        throw new IdempotencyConflictError("idempotency key was already used for a different server order request");
+      }
+      return { order: existing, created: false };
+    }
 
     const cls = await this.store.getComputeClass(input.computeClassCode);
     if (!cls || !cls.active) throw new NotFoundError(`compute class ${input.computeClassCode}`);
@@ -247,6 +262,7 @@ export class ComputeOrchestrator {
       hostname: input.hostname,
       sshKeyId: input.sshKeyId,
       idempotencyKey: input.idempotencyKey,
+      requestFingerprint: input.requestFingerprint,
       attemptCount: 0,
       createdAt: now,
       updatedAt: now,
@@ -254,6 +270,14 @@ export class ComputeOrchestrator {
     const inserted = await this.store.insertOrder(order);
     if (!inserted) {
       const raced = await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey);
+      if (
+        raced &&
+        input.requestFingerprint &&
+        raced.requestFingerprint &&
+        raced.requestFingerprint !== input.requestFingerprint
+      ) {
+        throw new IdempotencyConflictError("idempotency key was already used for a different server order request");
+      }
       return { order: raced!, created: false };
     }
     await this.enqueue(order.id, "provision", `${order.id}:provision`);
@@ -327,28 +351,21 @@ export class ComputeOrchestrator {
     return op;
   }
 
-  /**
-   * Reconciliation tick: process all due operations once. In production this
-   * runs from a durable queue worker; tests call it directly. Concurrent
-   * workers never double-execute an operation (in-flight claim).
-   */
-  private readonly inFlightOps = new Set<string>();
-
   async reconcile(now?: string): Promise<ReconcileResult> {
     const at = now ?? new Date().toISOString();
     let succeeded = 0;
     let failed = 0;
     let abandoned = 0;
-    const due = await this.store.dueOperations(at);
+    const due = await this.store.claimDueOperations(at, this.workerId, this.operationLeaseMs, 100);
     for (const op of due) {
       // Skip operations claimed, finished or exhausted since the snapshot.
-      if (this.inFlightOps.has(op.id)) continue;
-      if (op.state === "running" || op.state === "succeeded" || op.state === "abandoned") continue;
+      if (op.state === "succeeded" || op.state === "abandoned") continue;
       if (op.attempts >= op.maxAttempts) continue;
-      this.inFlightOps.add(op.id);
       try {
         await this.executeOperation(op, at);
         op.state = "succeeded";
+        op.leaseOwner = undefined;
+        op.leaseExpiresAt = undefined;
         await this.store.updateOperation(op);
         succeeded += 1;
       } catch (error) {
@@ -362,6 +379,8 @@ export class ComputeOrchestrator {
               : true;
         if (!retryable || op.attempts >= op.maxAttempts) {
           op.state = "abandoned";
+          op.leaseOwner = undefined;
+          op.leaseExpiresAt = undefined;
           await this.store.updateOperation(op);
           abandoned += 1;
           const order = await this.store.getOrder(op.orderId);
@@ -375,11 +394,11 @@ export class ComputeOrchestrator {
           const backoffMs = this.retryBaseMs * 2 ** (op.attempts - 1);
           op.nextAttemptAt = new Date(Date.parse(at) + backoffMs).toISOString();
           op.state = "failed";
+          op.leaseOwner = undefined;
+          op.leaseExpiresAt = undefined;
           await this.store.updateOperation(op);
           failed += 1;
         }
-      } finally {
-        this.inFlightOps.delete(op.id);
       }
     }
     return { processed: due.length, succeeded, failed, abandoned };
@@ -407,6 +426,7 @@ export class ComputeOrchestrator {
           enrollToken: enrollSecret.secret,
           orgId: order.orgId,
           orderId: order.id,
+          nodeId: enrollSecret.expectedNodeId,
         });
         const startedAt = Date.now();
         try {
@@ -544,20 +564,22 @@ export class ComputeOrchestrator {
   private async issueEnrollmentToken(
     order: ServerOrder,
     at: string,
-  ): Promise<{ secret: string; tokenHash: string }> {
+  ): Promise<{ secret: string; tokenHash: string; expectedNodeId: string }> {
     await this.store.revokeIssuedEnrollmentTokensForOrder(order.id, at);
     const secret = randomBytes(32).toString("base64url");
     const tokenHash = sha256Hex(secret);
+    const expectedNodeId = `node-${order.id}`;
     await this.store.createEnrollmentToken({
       id: newId(),
       tokenHash,
       orgId: order.orgId,
       orderId: order.id,
+      expectedNodeId,
       state: "issued",
       expiresAt: new Date(Date.parse(at) + this.enrollTokenTtlMs).toISOString(),
       createdAt: at,
     });
-    return { secret, tokenHash };
+    return { secret, tokenHash, expectedNodeId };
   }
 
   private async bindEnrollmentInstance(tokenHash: string, providerInstanceId: string): Promise<void> {
@@ -605,6 +627,9 @@ export class ComputeOrchestrator {
     if (expected.expiresAt <= at) throw new EnrollmentError("enrollment token expired");
     if (expected.orgId !== input.orgId) throw new EnrollmentError("enrollment token org mismatch");
     if (expected.orderId !== input.orderId) throw new EnrollmentError("enrollment token order mismatch");
+    if (expected.expectedNodeId && expected.expectedNodeId !== input.nodeId) {
+      throw new EnrollmentError("enrollment node identity mismatch");
+    }
     // A bound token from a superseded provisioning attempt must not work.
     if (expected.providerInstanceId && expected.providerInstanceId !== order.providerInstanceId) {
       throw new EnrollmentError("enrollment token belongs to an older provisioning attempt");
@@ -613,18 +638,18 @@ export class ComputeOrchestrator {
     if (!hashesEqual(expected.tokenHash, tokenHash)) {
       throw new EnrollmentError("enrollment token mismatch");
     }
-    // Atomic consume: exactly one concurrent enrollment can win (§E7/E11).
-    const consumed = await this.store.consumeEnrollmentToken(tokenHash, at);
-    if (!consumed) throw new EnrollmentError("enrollment token already used");
-
     const agentToken = randomBytes(32).toString("base64url");
     const existing = await this.store.getNode(input.nodeId);
     if (existing) {
-      // Durable identity rotation for a re-imaged node id.
+      if (existing.orgId !== input.orgId || existing.orderId !== input.orderId) {
+        throw new EnrollmentError("node identity already belongs to another server");
+      }
+      // Atomic consume: exactly one concurrent enrollment/reimage can win (§E7/E11).
+      const consumed = await this.store.consumeEnrollmentToken(tokenHash, at);
+      if (!consumed) throw new EnrollmentError("enrollment token already used");
+      // Durable identity rotation for an authorized same-node reimage.
       existing.enrollTokenHash = tokenHash;
       existing.agentTokenHash = sha256Hex(agentToken);
-      existing.orgId = input.orgId;
-      existing.orderId = input.orderId;
       existing.version = input.version;
       existing.capabilities = input.capabilities ?? [];
       existing.lastHeartbeatAt = at;
@@ -632,6 +657,9 @@ export class ComputeOrchestrator {
       await this.store.updateNode(existing);
       return { node: existing, agentToken };
     }
+    // Atomic consume: exactly one concurrent first enrollment can win (§E7/E11).
+    const consumed = await this.store.consumeEnrollmentToken(tokenHash, at);
+    if (!consumed) throw new EnrollmentError("enrollment token already used");
     const record: MoxNodeRecord = {
       id: newId(),
       orgId: input.orgId,

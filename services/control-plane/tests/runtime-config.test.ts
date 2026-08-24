@@ -45,13 +45,30 @@ describe("control-plane Mox Runtime config", () => {
     expect(config.runtimeArgs).toEqual(["--stdio", "--profile", "production"]);
   });
 
-  it("parses per-user platform admin capabilities and keeps the legacy all-capability allowlist", () => {
+  it("parses platform admin roles and never escalates legacy ids to wildcard", () => {
+    expect(() =>
+      loadControlPlaneConfig({
+        ...baseEnv,
+        MOX_PLATFORM_ADMIN_USER_IDS: "admin-unmapped",
+      }),
+    ).toThrow(/no role\/capability mapping/);
+
+    expect(() =>
+      loadControlPlaneConfig({
+        ...baseEnv,
+        MOX_PLATFORM_ADMIN_CAPABILITIES: "admin-legacy:*",
+      }),
+    ).toThrow(/not mapped to superadmin/);
+
     const config = loadControlPlaneConfig({
       ...baseEnv,
       MOX_PLATFORM_ADMIN_USER_IDS: "admin-all",
+      MOX_PLATFORM_ADMIN_ROLES: "admin-all:superadmin,admin-support:support,admin-ops:ops_admin",
       MOX_PLATFORM_ADMIN_CAPABILITIES: "admin-read:admin.read|admin.notifications.write,admin-billing:admin.billing.write",
     });
-    expect(config.platformAdminCapabilities["admin-all"]).toEqual(["*"]);
+    expect(config.platformAdminRoles["admin-all"]).toBe("superadmin");
+    expect(config.platformAdminRoles["admin-support"]).toBe("support");
+    expect(config.platformAdminRoles["admin-ops"]).toBe("ops_admin");
     expect(config.platformAdminCapabilities["admin-read"]).toEqual(["admin.read", "admin.notifications.write"]);
     expect(config.platformAdminCapabilities["admin-billing"]).toEqual(["admin.billing.write"]);
   });

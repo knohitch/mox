@@ -208,6 +208,11 @@ export class AgentRuntime {
     return result.cancelled;
   }
 
+  async respondApproval(input: { orgId: string; runId: string; approvalId: string; outcome: "approved" | "denied" }): Promise<ApprovalRespondResult> {
+    this.requireRunForOrg(input.orgId, input.runId);
+    return this.opts.client.respondApproval({ approvalId: input.approvalId, outcome: input.outcome });
+  }
+
   /** List active runs, optionally filtered to one org (tenant isolation). */
   listRuns(orgId?: string): Array<RunRecord & { runId: string }> {
     const all = Array.from(this.runs.values());

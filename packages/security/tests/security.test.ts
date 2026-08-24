@@ -132,4 +132,33 @@ describe("gateway tokens (direct-access rejection)", () => {
     const partial = Buffer.from(JSON.stringify({ orgId: "org-1" }), "utf8").toString("base64url");
     expect(verifyGatewayToken(partial).ok).toBe(false);
   });
+
+  it("rejects unsigned JSON, tampering, and replay when a cache is supplied", () => {
+    const now = new Date("2026-01-01T00:00:00Z");
+    const { token } = mintGatewayToken({ ...claims, jti: "jti-1" }, now, "secret-a");
+    expect(verifyGatewayToken(token, now, { secret: "secret-a" }).ok).toBe(true);
+    expect(verifyGatewayToken(token.replace(/.$/, "x"), now, { secret: "secret-a" }).ok).toBe(false);
+    expect(verifyGatewayToken(token, now, { secret: "wrong-secret" }).ok).toBe(false);
+    const unsigned = Buffer.from(JSON.stringify({ orgId: "org-1", agentId: "a", sessionId: "s", expiresAt: "2099-01-01T00:00:00Z" }), "utf8").toString("base64url");
+    expect(verifyGatewayToken(unsigned, now).ok).toBe(false);
+    const seen = new Set<string>();
+    expect(verifyGatewayToken(token, now, { secret: "secret-a", seenJti: seen, consumeReplay: true }).ok).toBe(true);
+    const replay = verifyGatewayToken(token, now, { secret: "secret-a", seenJti: seen, consumeReplay: true });
+    expect(replay.ok).toBe(false);
+    if (!replay.ok) expect(replay.reason).toContain("replayed");
+  });
+
+  it("rejects wrong org, server, and session scopes", () => {
+    const now = new Date("2026-01-01T00:00:00Z");
+    const { token } = mintGatewayToken({ ...claims, serverId: "srv-1" }, now, "secret-a");
+    expect(verifyGatewayToken(token, now, { secret: "secret-a", expectedOrgId: "org-2" }).ok).toBe(false);
+    expect(verifyGatewayToken(token, now, { secret: "secret-a", expectedServerId: "srv-2" }).ok).toBe(false);
+    expect(verifyGatewayToken(token, now, { secret: "secret-a", expectedSessionId: "sess-2" }).ok).toBe(false);
+    expect(verifyGatewayToken(token, now, {
+      secret: "secret-a",
+      expectedOrgId: "org-1",
+      expectedServerId: "srv-1",
+      expectedSessionId: "sess-1",
+    }).ok).toBe(true);
+  });
 });

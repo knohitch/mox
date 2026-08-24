@@ -91,14 +91,20 @@ const MAX_BODY_BYTES = 1024 * 1024;
  * JSON parsing happens separately so webhook handlers can verify
  * signatures over byte-identical payloads.
  */
-export function readRawBody(req: IncomingMessage): Promise<Buffer> {
+export function readRawBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    const declared = Number(req.headers["content-length"] ?? 0);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      reject(Object.assign(new Error("request body too large"), { status: 413, code: "body_too_large" }));
+      req.destroy();
+      return;
+    }
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(Object.assign(new Error("request body too large"), { status: 413 }));
+      if (size > maxBytes) {
+        reject(Object.assign(new Error("request body too large"), { status: 413, code: "body_too_large" }));
         req.destroy();
         return;
       }
@@ -133,9 +139,10 @@ export interface HttpError extends Error {
   status?: number;
   code?: string;
   unavailable?: boolean;
+  reason?: string;
 }
 
-export function httpError(message: string, status = 400, extra: { code?: string; unavailable?: boolean } = {}): HttpError {
+export function httpError(message: string, status = 400, extra: { code?: string; unavailable?: boolean; reason?: string } = {}): HttpError {
   return Object.assign(new Error(message), { status, ...extra });
 }
 

@@ -143,6 +143,45 @@ function defineRestartSuite(harness: Harness): void {
     expect(replay.duplicate).toBe(true);
   });
 
+  it("concurrent duplicate webhooks across service instances apply once", async () => {
+    const { first, second } = await harness.makeBillingStores();
+    const provider = new FakeBillingProvider();
+    const one = new BillingService(first);
+    const two = new BillingService(second);
+    one.registerProvider(provider);
+    two.registerProvider(provider);
+    const product = await one.createProduct({ code: `concurrent-${randomUUID()}`, tier: "plus", displayName: "Concurrent" });
+    const version = await one.createPlanVersion(product.id, 1);
+    await one.activatePlanVersion(version.id);
+    await one.definePricingRegion({ code: "CC", displayName: "Concurrent", chargeCurrency: "USD", displayCurrency: "USD" });
+    const book = await one.upsertPriceBook({ productId: product.id, pricingRegionCode: "CC", mode: "fixed" });
+    await one.addFixedPriceVersion(book.id, 1999n, "USD");
+    const { session } = await one.createCheckout({
+      orgId: ORG,
+      productId: product.id,
+      planVersionId: version.id,
+      pricingRegionCode: "CC",
+      successUrl: "https://app.example/success",
+      cancelUrl: "https://app.example/cancel",
+      providerName: provider.name,
+    });
+    const body = JSON.stringify({
+      eventId: `evt_concurrent_${randomUUID()}`,
+      type: "checkout.completed",
+      subjectRef: session.providerRef!,
+      amountMinor: 1999,
+      currency: "USD",
+    });
+    const stamp = new Date().toISOString();
+    const headers = { "x-mox-timestamp": stamp, "x-mox-signature": signPayload("test-webhook-secret", body, stamp) };
+    const results = await Promise.all([
+      one.handleProviderWebhook(provider.name, headers, body),
+      two.handleProviderWebhook(provider.name, headers, body),
+    ]);
+    expect(results.filter((r) => r.applied)).toHaveLength(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(1);
+  });
+
   it("subscription history is preserved across cancel → resubscribe", async () => {
     const { first } = await harness.makeBillingStores();
     const provider = new FakeBillingProvider();
@@ -219,6 +258,34 @@ function defineRestartSuite(harness: Harness): void {
     expect(fake.provisionCalls.filter((c) => c.idempotencyKey === `${order.id}:provision`)).toHaveLength(1);
   });
 
+  it("concurrent VPS reconcilers across service instances claim one operation", async () => {
+    const { first, second } = await harness.makeOrchestratorStores();
+    const fake = new FakeComputeProvider();
+    const boot = new ComputeOrchestrator(first, { retryBaseMs: 1, controlPlaneUrl: "https://control-plane.test" });
+    const peer = new ComputeOrchestrator(second, { retryBaseMs: 1, controlPlaneUrl: "https://control-plane.test" });
+    boot.registerProvider(fake);
+    peer.registerProvider(fake);
+    await boot.registerProviderAccount({ providerName: "fake-compute", accountLabel: `primary-${randomUUID()}`, commercialStatus: "active", healthScore: 100, enabled: true });
+    const classCode = `CLS_${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    await boot.configureComputeClass({
+      code: classCode,
+      displayName: "Concurrent Small",
+      minVcpu: 2,
+      minRamGb: 4,
+      skuMap: [{ providerName: "fake-compute", regionCode: "fsn1", providerSku: "CX22" }],
+      active: true,
+    });
+    const { order } = await boot.orderServer({
+      orgId: ORG,
+      computeClassCode: classCode,
+      hostname: "ws-concurrent",
+      idempotencyKey: `op-${randomUUID()}`,
+    });
+    const at = new Date(Date.now() + 60_000).toISOString();
+    await Promise.all([boot.reconcile(at), peer.reconcile(at)]);
+    expect(fake.provisionCalls.filter((c) => c.idempotencyKey === `${order.id}:provision`)).toHaveLength(1);
+  });
+
   it("node expected-token state survives restart; enrollment consumes atomically", async () => {
     const { first, second } = await harness.makeOrchestratorStores();
     const fake = new FakeComputeProvider();
@@ -240,18 +307,19 @@ function defineRestartSuite(harness: Harness): void {
     // RESTART: the pre-persisted expectation lives in the durable tier, so a
     // fresh orchestrator validates the very same bootstrap secret.
     const restarted = new ComputeOrchestrator(second, { retryBaseMs: 1, controlPlaneUrl: "https://control-plane.test" });
-    const enrollInput = { orgId: ORG, orderId: order.id, nodeId: "node-restart", enrollToken: secret };
+    const expectedNodeId = `node-${order.id}`;
+    const enrollInput = { orgId: ORG, orderId: order.id, nodeId: expectedNodeId, enrollToken: secret };
     const firstEnroll = await restarted.enrollNode(enrollInput);
     expect(firstEnroll.node.agentTokenHash).toBeTruthy();
 
     // Heartbeat authenticates with the DURABLE agent token post-restart.
     const third = new ComputeOrchestrator(second, { retryBaseMs: 1, controlPlaneUrl: "https://control-plane.test" });
     await expect(
-      third.heartbeat("node-restart", { cpu: 5 }, { agentToken: firstEnroll.agentToken }, { now: new Date().toISOString() }),
+      third.heartbeat(expectedNodeId, { cpu: 5 }, { agentToken: firstEnroll.agentToken }, { now: new Date().toISOString() }),
     ).resolves.toBeUndefined();
 
     // Replay after restart still fails.
-    await expect(restarted.enrollNode({ ...enrollInput, nodeId: "node-other" })).rejects.toThrow(/already used/);
+    await expect(restarted.enrollNode(enrollInput)).rejects.toThrow(/already used/);
   });
 
   it("two simultaneous enrollments cannot both succeed", async () => {
@@ -271,10 +339,11 @@ function defineRestartSuite(harness: Harness): void {
     const { order } = await orch.orderServer({ orgId: ORG, computeClassCode: "COMPUTE_SMALL", hostname: "ws-race", idempotencyKey: "race-1" });
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     const secret = [...fake.provisionCalls.at(-1)!.cloudInitUserData.matchAll(/MOX_ENROLL_TOKEN=(\S+)/g)][0]![1]!;
+    const expectedNodeId = `node-${order.id}`;
 
     const results = await Promise.allSettled([
-      orch.enrollNode({ orgId: ORG, orderId: order.id, nodeId: "node-a", enrollToken: secret }),
-      orch.enrollNode({ orgId: ORG, orderId: order.id, nodeId: "node-b", enrollToken: secret }),
+      orch.enrollNode({ orgId: ORG, orderId: order.id, nodeId: expectedNodeId, enrollToken: secret }),
+      orch.enrollNode({ orgId: ORG, orderId: order.id, nodeId: expectedNodeId, enrollToken: secret }),
     ]);
     const fulfilled = results.filter((r) => r.status === "fulfilled");
     const rejected = results.filter((r) => r.status === "rejected");
@@ -304,6 +373,27 @@ function defineRestartSuite(harness: Harness): void {
     const list = await restarted.store.listForUser(ORG);
     expect(list).toHaveLength(1);
     expect(list[0]!.eventType).toBe("server.provisioned");
+  });
+
+  it("concurrent notification job runners claim one broadcast job", async () => {
+    const { first, second } = await harness.makeNotificationStores();
+    const userId = randomUUID();
+    const resolver = async () => [{ orgId: ORG, userId }];
+    const one = new NotificationService(first, resolver);
+    const two = new NotificationService(second, resolver);
+    const created = await one.createJob({
+      idempotencyKey: `job-${randomUUID()}`,
+      createdBy: "admin-concurrent",
+      audience: { type: "all" },
+      payload: { title: "One broadcast", body: "Only one row" },
+    });
+    expect(created.created).toBe(true);
+    await Promise.all([
+      one.runDueJobs(new Date().toISOString()),
+      two.runDueJobs(new Date().toISOString()),
+    ]);
+    const rows = await one.store.listForUser(ORG, userId);
+    expect(rows.filter((row) => row.dedupeKey === `job:${created.job.id}:${userId}`)).toHaveLength(1);
   });
 }
 

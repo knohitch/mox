@@ -43,6 +43,7 @@ export interface OrchestratorStore {
   getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined>;
   updateOperation(op: ServerOperation): Promise<void>;
   dueOperations(nowIso: string): Promise<ServerOperation[]>;
+  claimDueOperations(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<ServerOperation[]>;
 
   // Nodes
   upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord>;
@@ -152,7 +153,14 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
       this.opIndex.add(key);
       this.operations.set(op.id, op);
     } else {
-      await this.updateOperation(op);
+      const existing = await this.getOperation(op.orderId, op.kind, op.idempotencyKey);
+      if (!existing) return;
+      if (existing.state === "succeeded" || existing.state === "abandoned") return;
+      await this.updateOperation({
+        ...existing,
+        nextAttemptAt: op.nextAttemptAt,
+        maxAttempts: op.maxAttempts,
+      });
     }
   }
 
@@ -178,6 +186,34 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
           op.attempts < op.maxAttempts,
       )
       .sort((a, b) => a.nextAttemptAt.localeCompare(b.nextAttemptAt));
+  }
+
+  async claimDueOperations(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<ServerOperation[]> {
+    const now = Date.parse(nowIso);
+    const leaseExpiresAt = new Date(now + leaseMs).toISOString();
+    const claimed: ServerOperation[] = [];
+    const due = [...this.operations.values()]
+      .filter(
+        (op) =>
+          (
+            (op.state === "queued" || op.state === "failed") ||
+            (op.state === "running" && !!op.leaseExpiresAt && Date.parse(op.leaseExpiresAt) <= now)
+          ) &&
+          Date.parse(op.nextAttemptAt) <= now &&
+          op.attempts < op.maxAttempts,
+      )
+      .sort((a, b) => a.nextAttemptAt.localeCompare(b.nextAttemptAt));
+    for (const op of due) {
+      if (claimed.length >= limit) break;
+      if (op.leaseExpiresAt && Date.parse(op.leaseExpiresAt) > now) continue;
+      op.state = "running";
+      op.leaseOwner = workerId;
+      op.leaseExpiresAt = leaseExpiresAt;
+      op.updatedAt = nowIso;
+      this.operations.set(op.id, { ...op });
+      claimed.push({ ...op });
+    }
+    return claimed;
   }
 
   async upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord> {

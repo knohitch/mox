@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeComputeProvider, HetznerProvider } from "@mox/compute-providers";
-import { ComputeOrchestrator } from "../src/service.js";
+import { ComputeOrchestrator, IdempotencyConflictError } from "../src/service.js";
 import { InMemoryOrchestratorStore, sha256Hex } from "../src/store.js";
 
 function jsonRes(status: number, body: unknown): Response {
@@ -67,6 +67,35 @@ describe("compute orchestrator", () => {
     const order = await orch.getOrder(first.order.id);
     expect(order.state).toBe("running");
     expect(order.ipv4).toMatch(/^203\.0\.113\./);
+  });
+
+  it("same idempotency key with a different request fingerprint conflicts", async () => {
+    const { orch } = await orchestrator();
+    const first = await orch.orderServer({
+      orgId: "org-1",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-1",
+      idempotencyKey: "order-click-2",
+      requestFingerprint: "fp-small",
+    });
+    expect(first.created).toBe(true);
+    const replay = await orch.orderServer({
+      orgId: "org-1",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "ws-org-1",
+      idempotencyKey: "order-click-2",
+      requestFingerprint: "fp-small",
+    });
+    expect(replay.created).toBe(false);
+    await expect(
+      orch.orderServer({
+        orgId: "org-1",
+        computeClassCode: "COMPUTE_MEDIUM",
+        hostname: "ws-org-1",
+        idempotencyKey: "order-click-2",
+        requestFingerprint: "fp-medium",
+      }),
+    ).rejects.toBeInstanceOf(IdempotencyConflictError);
   });
 
   it("retries retryable provider failures with backoff until success", async () => {
@@ -197,7 +226,7 @@ describe("compute orchestrator", () => {
     const { node, agentToken } = await orch.enrollNode({
       orgId: "org-7",
       orderId: order.id,
-      nodeId: "node-a",
+      nodeId: `node-${order.id}`,
       enrollToken: secret,
       version: "0.1.0",
       capabilities: ["docker", "logs"],
@@ -209,19 +238,19 @@ describe("compute orchestrator", () => {
     expect(node.agentTokenHash).toBe(sha256Hex(agentToken));
 
     // Heartbeat requires the durable agent token, not the bootstrap secret.
-    await orch.heartbeat("node-a", { cpu: 12 }, { agentToken }, { now: "2026-03-01T00:30:00.000Z" });
+    await orch.heartbeat(`node-${order.id}`, { cpu: 12 }, { agentToken }, { now: "2026-03-01T00:30:00.000Z" });
     await expect(
-      orch.heartbeat("node-a", { cpu: 12 }, { agentToken: "wrong-token" }),
+      orch.heartbeat(`node-${order.id}`, { cpu: 12 }, { agentToken: "wrong-token" }),
     ).rejects.toThrow(/authentication failed/);
     await expect(
-      orch.heartbeat("node-a", { cpu: 12 }, { agentToken: secret }),
+      orch.heartbeat(`node-${order.id}`, { cpu: 12 }, { agentToken: secret }),
     ).rejects.toThrow(/authentication failed/);
 
     const lost = await orch.sweepLostNodes("2026-03-01T00:36:00.000Z");
-    expect(lost).toEqual(["node-a"]);
+    expect(lost).toEqual([`node-${order.id}`]);
     // A late authenticated heartbeat brings it back.
-    await orch.heartbeat("node-a", { cpu: 9 }, { agentToken }, { now: "2026-03-01T00:37:00.000Z" });
-    expect((await orch.store.getNode("node-a"))?.status).toBe("active");
+    await orch.heartbeat(`node-${order.id}`, { cpu: 9 }, { agentToken }, { now: "2026-03-01T00:37:00.000Z" });
+    expect((await orch.store.getNode(`node-${order.id}`))?.status).toBe("active");
   });
 
   it("rejects wrong, replayed, expired and org/order-mismatched enrollment tokens", async () => {
@@ -234,16 +263,16 @@ describe("compute orchestrator", () => {
     });
     await orch.reconcile();
     const secret = enrollSecrets(fake)[0]!;
-    const enrollInput = { orgId: "org-8", orderId: order.id, nodeId: "node-b", enrollToken: secret };
+    const enrollInput = { orgId: "org-8", orderId: order.id, nodeId: `node-${order.id}`, enrollToken: secret };
 
     const first = await orch.enrollNode(enrollInput);
-    expect(first.node.nodeId).toBe("node-b");
+    expect(first.node.nodeId).toBe(`node-${order.id}`);
 
     // Replay of the consumed token fails.
-    await expect(orch.enrollNode({ ...enrollInput, nodeId: "node-b2" })).rejects.toThrow(/already used/);
+    await expect(orch.enrollNode(enrollInput)).rejects.toThrow(/already used/);
     // Wrong token fails.
     await expect(
-      orch.enrollNode({ ...enrollInput, nodeId: "node-c", enrollToken: "tok-evil" }),
+      orch.enrollNode({ ...enrollInput, enrollToken: "tok-evil" }),
     ).rejects.toThrow(/unknown enrollment token/);
 
     // Org binding is verified against the server ORDER itself (00B §F).
@@ -256,10 +285,10 @@ describe("compute orchestrator", () => {
     await orch.reconcile();
     const secret2 = enrollSecrets(fake).at(-1)!;
     await expect(
-      orch.enrollNode({ orgId: "org-OTHER", orderId: order2.id, nodeId: "node-d", enrollToken: secret2 }),
+      orch.enrollNode({ orgId: "org-OTHER", orderId: order2.id, nodeId: `node-${order2.id}`, enrollToken: secret2 }),
     ).rejects.toThrow(/does not own this order/);
     await expect(
-      orch.enrollNode({ orgId: "org-8b", orderId: order.id, nodeId: "node-d", enrollToken: secret2 }),
+      orch.enrollNode({ orgId: "org-8b", orderId: order.id, nodeId: `node-${order.id}`, enrollToken: secret2 }),
     ).rejects.toThrow(/does not own this order/);
 
     // Expiry fails.
@@ -296,11 +325,97 @@ describe("compute orchestrator", () => {
       ttlOrch.enrollNode({
         orgId: "org-8c",
         orderId: order3.id,
-        nodeId: "node-e",
+        nodeId: `node-${order3.id}`,
         enrollToken: secret3,
         now: new Date(Date.now() + 120_000).toISOString(),
       }),
     ).rejects.toThrow(/expired/);
+  });
+
+  it("rejects cross-tenant nodeId takeover and only allows same-order reimage", async () => {
+    const { orch, fake } = await orchestrator();
+    const { order: victimOrder } = await orch.orderServer({
+      orgId: "org-victim",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "victim",
+      idempotencyKey: "victim",
+    });
+    await orch.reconcile();
+    const victimSecret = enrollSecrets(fake)[0]!;
+    const victimNodeId = `node-${victimOrder.id}`;
+    const first = await orch.enrollNode({
+      orgId: "org-victim",
+      orderId: victimOrder.id,
+      nodeId: victimNodeId,
+      enrollToken: victimSecret,
+    });
+    const firstAgentTokenHash = first.node.agentTokenHash;
+
+    const { order: attackerOrder } = await orch.orderServer({
+      orgId: "org-attacker",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "attacker",
+      idempotencyKey: "attacker",
+    });
+    await orch.reconcile();
+    const attackerSecret = enrollSecrets(fake).at(-1)!;
+    await expect(
+      orch.enrollNode({
+        orgId: "org-attacker",
+        orderId: attackerOrder.id,
+        nodeId: victimNodeId,
+        enrollToken: attackerSecret,
+      }),
+    ).rejects.toThrow(/node identity mismatch/);
+    const afterAttack = await orch.store.getNode(victimNodeId);
+    expect(afterAttack?.orgId).toBe("org-victim");
+    expect(afterAttack?.orderId).toBe(victimOrder.id);
+    expect(afterAttack?.agentTokenHash).toBe(first.node.agentTokenHash);
+
+    const reimageSecret = "legitimate-reimage-secret";
+    await orch.store.createEnrollmentToken({
+      id: crypto.randomUUID(),
+      tokenHash: sha256Hex(reimageSecret),
+      orgId: "org-victim",
+      orderId: victimOrder.id,
+      providerInstanceId: (await orch.getOrder(victimOrder.id)).providerInstanceId,
+      expectedNodeId: victimNodeId,
+      state: "issued",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      createdAt: new Date().toISOString(),
+    });
+    const reimage = await orch.enrollNode({
+      orgId: "org-victim",
+      orderId: victimOrder.id,
+      nodeId: victimNodeId,
+      enrollToken: reimageSecret,
+    });
+    expect(reimage.node.orgId).toBe("org-victim");
+    expect(reimage.node.orderId).toBe(victimOrder.id);
+    expect(reimage.node.agentTokenHash).not.toBe(firstAgentTokenHash);
+  });
+
+  it("rejects stale provider-instance enrollment tokens", async () => {
+    const { orch, fake } = await orchestrator();
+    const { order } = await orch.orderServer({
+      orgId: "org-instance",
+      computeClassCode: "COMPUTE_SMALL",
+      hostname: "instance",
+      idempotencyKey: "instance",
+    });
+    await orch.reconcile();
+    const secret = enrollSecrets(fake)[0]!;
+    const token = await orch.store.getEnrollmentToken(sha256Hex(secret));
+    expect(token).toBeTruthy();
+    await orch.store.updateEnrollmentToken({ ...token!, providerInstanceId: "provider-instance-from-old-attempt" });
+    await expect(
+      orch.enrollNode({
+        orgId: "org-instance",
+        orderId: order.id,
+        nodeId: `node-${order.id}`,
+        enrollToken: secret,
+      }),
+    ).rejects.toThrow(/older provisioning attempt/);
   });
 
   it("refuses to start without validated control-plane configuration (§F)", () => {

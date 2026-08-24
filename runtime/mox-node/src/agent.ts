@@ -4,7 +4,7 @@
  */
 
 import type { CommandExecutor, EnrollRequest, EnrollResponse, NodeMetrics, SignedCommand, WorkloadSpec } from "./core.js";
-import { DockerWorkloadManager, MOX_NODE_CAPABILITIES, MOX_NODE_VERSION } from "./core.js";
+import { DockerWorkloadManager, MOX_NODE_CAPABILITIES, MOX_NODE_VERSION, scrubStderr } from "./core.js";
 
 export interface MoxNodeConfig {
   controlPlaneUrl: string;
@@ -182,7 +182,7 @@ export class MoxNodeAgent {
       case "backup.run": {
         const paths = (cmd.payload.paths as string[] | undefined) ?? [];
         const res = await this.exec(["backup", ...paths]);
-        if (res.exitCode !== 0) throw new Error(`backup failed: ${res.stderr}`);
+        if (res.exitCode !== 0) throw new Error(`backup failed: ${scrubStderr(res.stderr)}`);
         break;
       }
       default:

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { IntegrationGateway } from "../src/gateway.js";
 import { ComposioProvider, McpProvider, OAuthApiProvider, WebhookAutomationProvider, type McpServerDescriptor } from "../src/providers.js";
 
+const publicResolve = async () => [{ address: "93.184.216.34" }];
+
 async function gateway() {
   const gw = new IntegrationGateway();
   const descriptor: McpServerDescriptor = {
@@ -206,6 +208,7 @@ describe("integration gateway", () => {
   it("webhook automation blocks SSRF targets before any outbound fetch", async () => {
     let called = false;
     const provider = new WebhookAutomationProvider("webhook-token", {
+      resolve: publicResolve,
       fetchImpl: async () => {
         called = true;
         return new Response("{}", { status: 200 });
@@ -233,8 +236,12 @@ describe("integration gateway", () => {
     let authHeader = "";
     const provider = new WebhookAutomationProvider("webhook-token", {
       resolveSecret: async (ref) => (ref === "vault://integration/token" ? "real-secret-token" : undefined),
+      resolve: publicResolve,
       fetchImpl: async (_url, init) => {
-        authHeader = String((init?.headers as Record<string, string> | undefined)?.authorization ?? "");
+        const headers = init?.headers instanceof Headers
+          ? init.headers
+          : new Headers(init?.headers as Record<string, string> | Array<[string, string]> | undefined);
+        authHeader = headers.get("authorization") ?? "";
         return new Response("{}", { status: 200 });
       },
     });
@@ -260,6 +267,7 @@ describe("integration gateway", () => {
   it("webhook automation fails closed when a secret ref cannot be resolved", async () => {
     let called = false;
     const provider = new WebhookAutomationProvider("webhook-token", {
+      resolve: publicResolve,
       fetchImpl: async () => {
         called = true;
         return new Response("{}", { status: 200 });

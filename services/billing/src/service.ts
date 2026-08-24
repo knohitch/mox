@@ -5,7 +5,7 @@
  */
 
 import { convert, type Money } from "@mox/money";
-import type { EntitlementService } from "@mox/entitlements";
+import type { EntitlementKey, EntitlementService } from "@mox/entitlements";
 import {
   BillingProvider,
   digestPayload,
@@ -36,6 +36,7 @@ export class BillingError extends Error {}
 export class InvalidTransitionError extends BillingError {}
 export class PriceUnavailableError extends BillingError {}
 export class NotFoundError extends BillingError {}
+export class CommercialAccessError extends BillingError {}
 
 /** Explicit, auditable subscription state machine. */
 const ALLOWED_TRANSITIONS: Record<SubscriptionState, SubscriptionState[]> = {
@@ -61,12 +62,26 @@ interface ResolvedPrice {
   mode: "fixed" | "fx_derived";
 }
 
+export interface CommercialAccessDecision {
+  entitled: boolean;
+  reason?: string;
+  subscription?: Subscription;
+  planVersionId?: string;
+}
+
+export interface CommercialAuthorizationDecision extends CommercialAccessDecision {
+  entitlementKey?: EntitlementKey;
+  value?: boolean | number | string;
+}
+
 export class BillingService {
   readonly store: BillingStore;
   private readonly providers = new Map<string, BillingProvider>();
   private readonly periodDays: number;
   private readonly graceDays: number;
   private readonly retentionDays: number;
+  private readonly workerId = `billing-${newId()}`;
+  private readonly claimLeaseMs = 60_000;
 
   constructor(
     store: BillingStore = new InMemoryBillingStore(),
@@ -93,6 +108,10 @@ export class BillingService {
     const provider = this.providers.get(name);
     if (!provider) throw new BillingError(`no billing provider registered under "${name}"`);
     return provider;
+  }
+
+  hasProvider(name: string): boolean {
+    return this.providers.has(name);
   }
 
   requireConfiguredProvider(name: string): BillingProvider {
@@ -360,7 +379,21 @@ export class BillingService {
     orgId?: string;
     providerRef?: string;
   }> {
-    const provider = this.provider(providerName);
+    const provider = this.providers.get(providerName);
+    if (!provider) {
+      const nowIso = new Date().toISOString();
+      await this.store.recordWebhook({
+        id: newId(),
+        providerName,
+        externalEventId: `rejected:unknown:${digestPayload(rawBody).slice(0, 32)}`,
+        type: "unverified",
+        payloadDigest: digestPayload(rawBody),
+        status: "rejected",
+        receivedAt: nowIso,
+        rejectionReason: "webhook rejected",
+      });
+      return { applied: false, rejected: true, reason: "webhook rejected" };
+    }
     let event;
     try {
       event = await provider.verifyWebhook(headers, rawBody);
@@ -370,45 +403,38 @@ export class BillingService {
       await this.store.recordWebhook({
         id: newId(),
         providerName,
-        externalEventId: `rejected:${digestPayload(rawBody).slice(0, 32)}:${headers["x-mox-timestamp"] ?? ""}`,
+        externalEventId: `rejected:${digestPayload(rawBody).slice(0, 32)}`,
         type: "unverified",
         payloadDigest: digestPayload(rawBody),
         status: "rejected",
         receivedAt: new Date().toISOString(),
-        rejectionReason: reason,
+        rejectionReason: "webhook signature rejected",
       });
-      return { applied: false, rejected: true, reason };
+      void reason;
+      return { applied: false, rejected: true, reason: "webhook signature rejected" };
     }
 
-    // Applied events are duplicates; rejected events may be redelivered.
-    const existing = await this.store.getWebhook(providerName, event.externalEventId);
-    if (existing?.status === "applied") {
+    const nowIso = new Date().toISOString();
+    const leaseUntil = new Date(Date.parse(nowIso) + this.claimLeaseMs).toISOString();
+    const claim = await this.store.claimWebhookApplication({
+      id: newId(),
+      providerName,
+      externalEventId: event.externalEventId,
+      type: event.type,
+      sequence: event.sequence,
+      payloadDigest: digestPayload(rawBody),
+      status: "processing",
+      receivedAt: nowIso,
+      processingOwner: this.workerId,
+      processingExpiresAt: leaseUntil,
+    }, this.workerId, leaseUntil);
+    if (claim === "applied") {
       return { applied: false, duplicate: true };
     }
-
-    let record: WebhookRecord;
-    if (!existing) {
-      const fresh = await this.store.recordWebhook({
-        id: newId(),
-        providerName,
-        externalEventId: event.externalEventId,
-        type: event.type,
-        sequence: event.sequence,
-        payloadDigest: digestPayload(rawBody),
-        status: "verified",
-        receivedAt: new Date().toISOString(),
-      });
-      if (!fresh) {
-        return { applied: false, duplicate: true };
-      }
-      record = (await this.store.getWebhook(providerName, event.externalEventId))!;
-    } else {
-      record = existing;
-      record.status = "verified";
-      record.rejectionReason = undefined;
-      record.payloadDigest = digestPayload(rawBody);
-      await this.store.updateWebhook(record);
+    if (claim === "busy") {
+      return { applied: false, duplicate: true, reason: "event is already being applied" };
     }
+    let record: WebhookRecord = (await this.store.getWebhook(providerName, event.externalEventId))!;
 
     try {
       await this.applyProviderEvent(event.type, event.subjectRef, event.payload, {
@@ -419,6 +445,9 @@ export class BillingService {
         occurredAt: event.occurredAt,
         amountMinor: event.amountMinor,
         currency: event.currency,
+        transactionRef: event.transactionRef,
+        invoiceRef: event.invoiceRef,
+        resolution: event.resolution,
       });
       // Normalized durable ledger (Prompt 01 §Durable): exactly-once per
       // (provider, externalEventId), safe metadata only.
@@ -434,12 +463,16 @@ export class BillingService {
         state: "applied",
         currency: event.currency,
         amountMinor: event.amountMinor,
+        providerTransactionRef: event.transactionRef,
+        invoiceRef: event.invoiceRef,
         payloadDigest: digestPayload(rawBody),
         occurredAt: event.occurredAt,
         receivedAt: new Date().toISOString(),
       });
       record.status = "applied";
       record.appliedAt = new Date().toISOString();
+      record.processingOwner = undefined;
+      record.processingExpiresAt = undefined;
       await this.store.updateWebhook(record);
       // Prompt 02 §Automatic events: expose committed facts so the caller
       // can feed the durable notification service.
@@ -462,6 +495,8 @@ export class BillingService {
     } catch (error) {
       record.status = "rejected";
       record.rejectionReason = error instanceof Error ? error.message : String(error);
+      record.processingOwner = undefined;
+      record.processingExpiresAt = undefined;
       await this.store.updateWebhook(record);
       return { applied: false, rejected: true, reason: record.rejectionReason };
     }
@@ -480,6 +515,9 @@ export class BillingService {
   }): Promise<{ applied: boolean; reason?: string }> {
     let session: CheckoutSession | undefined;
     if (input.sessionId) session = await this.store.getCheckoutSession(input.sessionId);
+    if (session && input.orgId && session.orgId !== input.orgId) {
+      return { applied: false, reason: "no pending checkout session" };
+    }
     if (!session && input.orgId) {
       const sessions = await this.store.findCheckoutSessionsByOrg(input.orgId);
       session = sessions
@@ -502,6 +540,8 @@ export class BillingService {
       amountMinor: verification.amountMinor,
       currency: verification.currency,
       environment: provider.environment,
+      providerName: session.providerName,
+      transactionRef: verification.transactionRef,
     });
     await this.store.recordProviderPayment({
       id: newId(),
@@ -513,6 +553,7 @@ export class BillingService {
       state: "reconciled",
       currency: verification.currency,
       amountMinor: verification.amountMinor,
+      providerTransactionRef: verification.transactionRef,
       payloadDigest: digestPayload(`${session.providerRef}:${verification.amountMinor ?? ""}`),
       occurredAt: verification.occurredAt,
       receivedAt: new Date().toISOString(),
@@ -529,6 +570,9 @@ export class BillingService {
     occurredAt?: string;
     amountMinor?: bigint | number;
     currency?: string;
+    transactionRef?: string;
+    invoiceRef?: string;
+    resolution?: "won" | "lost" | "accepted" | "unknown";
   }): Promise<void> {
     switch (type) {
       case "checkout.completed":
@@ -538,17 +582,26 @@ export class BillingService {
         const sub =
           (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
           (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
-        if (!sub) throw new BillingError(`payment.succeeded for unknown subject ${subjectRef}`);
+        if (!sub) {
+          const session = await this.store.findCheckoutSessionByProviderRef(subjectRef);
+          if (session) {
+            await this.applyCheckoutCompleted(subjectRef, { checkoutSessionId: session.id }, event);
+            return;
+          }
+          throw new BillingError(`payment.succeeded for unknown subject ${subjectRef}`);
+        }
+        this.assertProviderBinding(sub, event);
         // Out-of-order protection: older events never regress newer state.
-        if (!this.eventIsCurrent(sub, event)) return;
+        if (!this.eventIsCurrent(sub, event, { regressive: false })) return;
         if (event?.subscriptionRef && sub.providerRef !== event.subscriptionRef) {
           sub.providerRef = event.subscriptionRef;
         }
+        if (event?.providerName) sub.providerName = event.providerName;
         this.touchSubscriptionEvent(sub, event);
-        await this.markLatestOpenInvoicePaid(sub.id);
+        const invoice = await this.reconcilePaymentSucceededInvoice(sub, event);
         if (sub.state === "past_due" || sub.state === "grace_period" || sub.state === "suspended") {
           await this.transition(sub.id, "active", "payment_recovered", {
-            idempotencyKey: `recover:${sub.currentPeriodStart ?? ""}`,
+            idempotencyKey: `recover:${invoice.periodStart}:${event?.invoiceRef ?? event?.externalEventId ?? ""}`,
           });
           sub.failedRenewals = 0;
           sub.graceEndsAt = undefined;
@@ -558,11 +611,8 @@ export class BillingService {
           await this.store.updateSubscription(sub);
         } else if (sub.state === "active") {
           // Provider-managed renewal success advances the period server-side.
-          const periodStart = sub.currentPeriodEnd ?? sub.currentPeriodStart ?? new Date().toISOString();
-          sub.currentPeriodStart = periodStart;
-          sub.currentPeriodEnd = new Date(
-            new Date(periodStart).getTime() + this.periodDays * 24 * 3600 * 1000,
-          ).toISOString();
+          sub.currentPeriodStart = invoice.periodStart;
+          sub.currentPeriodEnd = invoice.periodEnd;
           await this.store.updateSubscription(sub);
         } else {
           await this.store.updateSubscription(sub);
@@ -574,10 +624,12 @@ export class BillingService {
           (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
           (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
         if (!sub) throw new BillingError(`payment.failed for unknown subject ${subjectRef}`);
-        if (!this.eventIsCurrent(sub, event)) return;
+        this.assertProviderBinding(sub, event);
+        if (!this.eventIsCurrent(sub, event, { regressive: true })) return;
         if (event?.subscriptionRef && sub.providerRef !== event.subscriptionRef) {
           sub.providerRef = event.subscriptionRef;
         }
+        if (event?.providerName) sub.providerName = event.providerName;
         sub.failedRenewals += 1;
         this.touchSubscriptionEvent(sub, event);
         await this.store.updateSubscription(sub);
@@ -593,11 +645,65 @@ export class BillingService {
           (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
           (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined);
         if (!sub) throw new BillingError(`subscription.canceled for unknown subject ${subjectRef}`);
-        if (!this.eventIsCurrent(sub, event)) return;
+        this.assertProviderBinding(sub, event);
+        if (!this.eventIsCurrent(sub, event, { regressive: true })) return;
         this.touchSubscriptionEvent(sub, event);
         await this.store.updateSubscription(sub);
         if (!["canceled", "retention", "deleted"].includes(sub.state)) {
           await this.cancelSubscription(sub.id, { actorType: "user", reason: "provider_canceled" });
+        }
+        break;
+      }
+      case "payment.refunded": {
+        const sub = await this.findBoundSubscription(subjectRef, event);
+        if (!sub) throw new BillingError(`payment.refunded for unknown subject ${subjectRef}`);
+        this.assertProviderBinding(sub, event);
+        if (!this.eventIsCurrent(sub, event, { regressive: true })) return;
+        this.touchSubscriptionEvent(sub, event);
+        await this.store.updateSubscription(sub);
+        const price = await this.requirePriceVersion(sub.priceVersionId);
+        if (event?.currency && event.currency !== price.currency) {
+          throw new BillingError(`refund currency mismatch: ${event.currency} != ${price.currency}`);
+        }
+        if (event?.amountMinor !== undefined && BigInt(event.amountMinor) >= BigInt(price.amountMinor)) {
+          if (!["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+            await this.transition(sub.id, "suspended", "full_refund_processed", {
+              idempotencyKey: `refund:${event.externalEventId ?? event.transactionRef ?? subjectRef}`,
+            });
+          }
+        }
+        break;
+      }
+      case "dispute.opened": {
+        const sub = await this.findBoundSubscription(subjectRef, event);
+        if (!sub) throw new BillingError(`dispute.opened for unknown subject ${subjectRef}`);
+        this.assertProviderBinding(sub, event);
+        if (!this.eventIsCurrent(sub, event, { regressive: true })) return;
+        this.touchSubscriptionEvent(sub, event);
+        await this.store.updateSubscription(sub);
+        if (!["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+          await this.transition(sub.id, "suspended", "dispute_or_chargeback_opened", {
+            idempotencyKey: `dispute-open:${event?.externalEventId ?? subjectRef}`,
+          });
+        }
+        break;
+      }
+      case "dispute.resolved": {
+        const sub = await this.findBoundSubscription(subjectRef, event);
+        if (!sub) throw new BillingError(`dispute.resolved for unknown subject ${subjectRef}`);
+        this.assertProviderBinding(sub, event);
+        if (!this.eventIsCurrent(sub, event, { regressive: true })) return;
+        this.touchSubscriptionEvent(sub, event);
+        await this.store.updateSubscription(sub);
+        if (event?.resolution === "won" && sub.state === "suspended") {
+          await this.transition(sub.id, "active", "dispute_won", {
+            idempotencyKey: `dispute-won:${event.externalEventId ?? subjectRef}`,
+          });
+        }
+        if ((event?.resolution === "lost" || event?.resolution === "accepted") && !["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+          await this.transition(sub.id, "suspended", "dispute_lost_or_accepted", {
+            idempotencyKey: `dispute-lost:${event.externalEventId ?? subjectRef}`,
+          });
         }
         break;
       }
@@ -610,8 +716,10 @@ export class BillingService {
   private eventIsCurrent(
     sub: Subscription,
     event?: { occurredAt?: string },
+    options: { regressive: boolean } = { regressive: true },
   ): boolean {
-    if (!event?.occurredAt || !sub.lastEventAt) return true;
+    if (!event?.occurredAt) return !sub.lastEventAt || !options.regressive;
+    if (!sub.lastEventAt) return true;
     return Date.parse(event.occurredAt) >= Date.parse(sub.lastEventAt);
   }
 
@@ -621,6 +729,7 @@ export class BillingService {
   ): void {
     if (event?.occurredAt) sub.lastEventAt = event.occurredAt;
     if (event?.environment) sub.providerEnvironment = event.environment;
+    if (event?.providerName) sub.providerName = event.providerName;
   }
 
   private async applyCheckoutCompleted(
@@ -632,6 +741,8 @@ export class BillingService {
       amountMinor?: bigint | number;
       currency?: string;
       environment?: string;
+      providerName?: string;
+      transactionRef?: string;
     },
   ): Promise<void> {
     // Authoritative lookup: embedded id first, then the persisted provider
@@ -646,11 +757,16 @@ export class BillingService {
     if (!session) throw new BillingError(`checkout.completed for unknown session ref ${providerCheckoutRef}`);
     if (session.state === "completed") return; // business-level dedupe
 
-    // Concurrent delivery guard: only one application per session may run.
-    // Synchronous set check/mark closes the await-boundary race.
-    if (this.applyingCheckouts.has(session.id)) return;
-    this.applyingCheckouts.add(session.id);
-    try {
+    const claimAt = new Date().toISOString();
+    const claimedSession = await this.store.claimCheckoutSession(
+      session.id,
+      this.workerId,
+      new Date(Date.parse(claimAt) + this.claimLeaseMs).toISOString(),
+      claimAt,
+    );
+    if (!claimedSession) return;
+    session = claimedSession;
+
       const priceVersion = await this.requirePriceVersion(session.priceVersionId);
       // Wrong amount/currency guard (Prompt 01): the provider-reported money
       // must match the server-pinned price exactly, or the event is rejected.
@@ -666,8 +782,13 @@ export class BillingService {
       if (event.currency !== priceVersion.currency) {
         throw new BillingError(`provider currency mismatch: ${event.currency} != ${priceVersion.currency}`);
       }
+      if (session.environment && event?.environment && session.environment !== event.environment) {
+        throw new BillingError(`provider environment mismatch: ${event.environment} != ${session.environment}`);
+      }
       session.state = "completed";
       session.environment = event?.environment ?? session.environment;
+      session.claimOwner = undefined;
+      session.claimExpiresAt = undefined;
       await this.store.updateCheckoutSession(session);
       await this.ensureBillingCustomer(session.orgId, session.providerName);
 
@@ -677,6 +798,7 @@ export class BillingService {
       if (existingSub) {
         existingSub.planVersionId = session.planVersionId;
         existingSub.priceVersionId = session.priceVersionId;
+        existingSub.providerName = session.providerName;
         existingSub.providerRef = providerCheckoutRef;
         existingSub.currentPeriodStart = now.toISOString();
         existingSub.currentPeriodEnd = periodEnd.toISOString();
@@ -699,6 +821,7 @@ export class BillingService {
         planVersionId: session.planVersionId,
         priceVersionId: session.priceVersionId,
         state: "trial",
+        providerName: session.providerName,
         providerRef: event?.subscriptionRef ?? providerCheckoutRef,
         providerEnvironment: event?.environment,
         lastEventAt: event?.occurredAt,
@@ -718,12 +841,7 @@ export class BillingService {
       await this.transition(sub.id, "active", "checkout_completed", {
         idempotencyKey: `checkout:${session.id}`,
       });
-    } finally {
-      this.applyingCheckouts.delete(session.id);
-    }
   }
-
-  private readonly applyingCheckouts = new Set<string>();
 
   // ---- Lifecycle engine ------------------------------------------------------
 
@@ -777,10 +895,8 @@ export class BillingService {
    * Renewal sweep. Charges subscriptions whose period has ended:
    * success advances the period; failure walks active→past_due→grace_period;
    * expired grace suspends. Concurrent workers never double-process a
-   * subscription (in-flight claim closes the await-boundary race).
+   * subscription because renewal rows are claimed durably.
    */
-  private readonly renewingSubs = new Set<string>();
-
   async runRenewals(now?: string): Promise<{ renewed: number; failed: number; suspended: number }> {
     const at = now ?? new Date().toISOString();
     let renewed = 0;
@@ -790,16 +906,17 @@ export class BillingService {
     const due = await this.store.listSubscriptionsInState(["active", "past_due", "grace_period"]);
     for (const sub of due) {
       if (!sub.currentPeriodEnd || sub.currentPeriodEnd > at || sub.providerRef === undefined) continue;
-      // Claim synchronously so racing workers skip in-flight subscriptions.
-      if (this.renewingSubs.has(sub.id)) continue;
-      this.renewingSubs.add(sub.id);
-      try {
-        const outcome = await this.renewOne(sub, at);
-        renewed += outcome.renewed;
-        failed += outcome.failed;
-      } finally {
-        this.renewingSubs.delete(sub.id);
-      }
+      const claimed = await this.store.claimSubscriptionRenewal(
+        sub.id,
+        sub.currentPeriodEnd,
+        this.workerId,
+        new Date(Date.parse(at) + this.claimLeaseMs).toISOString(),
+        at,
+      );
+      if (!claimed) continue;
+      const outcome = await this.renewOne(claimed, at);
+      renewed += outcome.renewed;
+      failed += outcome.failed;
     }
 
     // Suspend subscriptions whose grace window lapsed without payment.
@@ -852,6 +969,8 @@ export class BillingService {
       sub.currentPeriodEnd = invoice.periodEnd;
       sub.failedRenewals = 0;
       sub.graceEndsAt = undefined;
+      sub.renewalClaimOwner = undefined;
+      sub.renewalClaimExpiresAt = undefined;
       await this.store.updateSubscription(sub);
       if (sub.state !== "active") {
         await this.transition(sub.id, "active", "renewal_succeeded", {
@@ -865,6 +984,8 @@ export class BillingService {
     invoice.status = "failed";
     await this.store.updateInvoice(invoice);
     sub.failedRenewals = attempt;
+    sub.renewalClaimOwner = undefined;
+    sub.renewalClaimExpiresAt = undefined;
     await this.store.updateSubscription(sub);
     if (sub.state === "active") {
       await this.transition(sub.id, "past_due", `renewal_failed:${charge.failureReason}`, {
@@ -873,6 +994,8 @@ export class BillingService {
       });
     } else if (sub.state === "past_due" && attempt >= 2) {
       sub.graceEndsAt = new Date(new Date(at).getTime() + this.graceDays * 24 * 3600 * 1000).toISOString();
+      sub.renewalClaimOwner = undefined;
+      sub.renewalClaimExpiresAt = undefined;
       await this.store.updateSubscription(sub);
       await this.transition(sub.id, "grace_period", "grace_window_opened", {
         idempotencyKey: `grace:${periodStart}:${attempt}`,
@@ -942,6 +1065,65 @@ export class BillingService {
     return this.store.getActiveSubscriptionForOrg(orgId);
   }
 
+  async evaluateCommercialAccess(
+    orgId: string,
+    options: { now?: string; subscription?: Subscription } = {},
+  ): Promise<CommercialAccessDecision> {
+    const now = options.now ?? new Date().toISOString();
+    const sub = options.subscription ?? await this.store.getActiveSubscriptionForOrg(orgId);
+    if (!sub) return { entitled: false, reason: "no_subscription" };
+    if (!sub.planVersionId || sub.planVersionId === "plan-version-current") {
+      return { entitled: false, reason: "invalid_plan_version", subscription: sub };
+    }
+    const plan = await this.store.getPlanVersion(sub.planVersionId);
+    if (!plan) return { entitled: false, reason: "unknown_plan_version", subscription: sub };
+    if (sub.state === "trial") {
+      return sub.trialEndsAt && sub.trialEndsAt > now
+        ? { entitled: true, subscription: sub, planVersionId: sub.planVersionId }
+        : { entitled: false, reason: "trial_expired_or_not_configured", subscription: sub, planVersionId: sub.planVersionId };
+    }
+    if (sub.state === "active") {
+      if (!sub.currentPeriodStart || !sub.currentPeriodEnd) {
+        return { entitled: false, reason: "missing_period", subscription: sub, planVersionId: sub.planVersionId };
+      }
+      if (sub.currentPeriodStart > now) {
+        return { entitled: false, reason: "period_not_started", subscription: sub, planVersionId: sub.planVersionId };
+      }
+      if (sub.currentPeriodEnd <= now) {
+        return { entitled: false, reason: "expired_period", subscription: sub, planVersionId: sub.planVersionId };
+      }
+      return { entitled: true, subscription: sub, planVersionId: sub.planVersionId };
+    }
+    if (sub.state === "grace_period") {
+      return sub.graceEndsAt && sub.graceEndsAt > now
+        ? { entitled: true, subscription: sub, planVersionId: sub.planVersionId }
+        : { entitled: false, reason: "grace_expired", subscription: sub, planVersionId: sub.planVersionId };
+    }
+    return { entitled: false, reason: `state_${sub.state}`, subscription: sub, planVersionId: sub.planVersionId };
+  }
+
+  async requireCommercialEntitlement(
+    orgId: string,
+    entitlements: EntitlementService,
+    key: EntitlementKey,
+    options: { now?: string; min?: number; equals?: string } = {},
+  ): Promise<CommercialAuthorizationDecision> {
+    const access = await this.evaluateCommercialAccess(orgId, { now: options.now });
+    if (!access.entitled || !access.planVersionId) return { ...access, entitled: false, entitlementKey: key };
+    const resolved = await entitlements.resolve(orgId, key, access.planVersionId, options.now);
+    const value = resolved.value;
+    if (typeof value === "boolean" && value !== true) {
+      return { ...access, entitled: false, reason: `entitlement_${key}_disabled`, entitlementKey: key, value };
+    }
+    if (typeof value === "number" && options.min !== undefined && value < options.min) {
+      return { ...access, entitled: false, reason: `entitlement_${key}_insufficient`, entitlementKey: key, value };
+    }
+    if (typeof value === "string" && options.equals !== undefined && value !== options.equals) {
+      return { ...access, entitled: false, reason: `entitlement_${key}_mismatch`, entitlementKey: key, value };
+    }
+    return { ...access, entitlementKey: key, value };
+  }
+
   // ---- Add-ons -----------------------------------------------------------------
 
   async attachAddon(subscriptionId: string, addonCode: string, quantity: number, priceVersionId?: string): Promise<SubscriptionItem> {
@@ -964,9 +1146,32 @@ export class BillingService {
   // ---- Internals -----------------------------------------------------------
 
   private providerForSubscription(sub: Subscription): BillingProvider {
-    const name = sub.providerRef?.split(":")[0];
-    if (!name) throw new BillingError(`subscription ${sub.id} lacks a provider reference`);
+    const name = sub.providerName;
+    if (!name) throw new BillingError(`subscription ${sub.id} lacks authoritative provider identity`);
     return this.provider(name);
+  }
+
+  private async findBoundSubscription(
+    subjectRef: string,
+    event?: { subscriptionRef?: string; transactionRef?: string },
+  ): Promise<Subscription | undefined> {
+    return (
+      (await this.store.findSubscriptionByProviderRef(subjectRef)) ??
+      (event?.subscriptionRef ? await this.store.findSubscriptionByProviderRef(event.subscriptionRef) : undefined) ??
+      (event?.transactionRef ? await this.store.findSubscriptionByProviderRef(event.transactionRef) : undefined)
+    );
+  }
+
+  private assertProviderBinding(
+    sub: Subscription,
+    event?: { providerName?: string; environment?: string },
+  ): void {
+    if (event?.providerName && sub.providerName && sub.providerName !== event.providerName) {
+      throw new BillingError(`provider mismatch: ${event.providerName} != ${sub.providerName}`);
+    }
+    if (event?.environment && sub.providerEnvironment && sub.providerEnvironment !== event.environment) {
+      throw new BillingError(`provider environment mismatch: ${event.environment} != ${sub.providerEnvironment}`);
+    }
   }
 
   private async requireSubscription(id: string): Promise<Subscription> {
@@ -999,12 +1204,54 @@ export class BillingService {
     return region;
   }
 
-  private async markLatestOpenInvoicePaid(subscriptionId: string): Promise<void> {
-    const invoices = await this.store.listInvoices(subscriptionId);
-    const open = [...invoices].reverse().find((i) => i.status === "open" || i.status === "failed");
-    if (!open) return;
-    open.status = "paid";
-    open.paidAt = new Date().toISOString();
-    await this.store.updateInvoice(open);
+  private async reconcilePaymentSucceededInvoice(
+    sub: Subscription,
+    event?: {
+      amountMinor?: bigint | number;
+      currency?: string;
+      invoiceRef?: string;
+      transactionRef?: string;
+      externalEventId?: string;
+    },
+  ): Promise<Invoice> {
+    if (event?.amountMinor === undefined || !event.currency) {
+      throw new BillingError("provider payment success missing amount or currency");
+    }
+    const priceVersion = await this.requirePriceVersion(sub.priceVersionId);
+    const expected = BigInt(priceVersion.amountMinor);
+    if (BigInt(event.amountMinor) !== expected) {
+      throw new BillingError(`provider renewal amount mismatch: got ${event.amountMinor} ${event.currency}, expected ${expected}`);
+    }
+    if (event.currency !== priceVersion.currency) {
+      throw new BillingError(`provider renewal currency mismatch: ${event.currency} != ${priceVersion.currency}`);
+    }
+    if (expected > 0n && BigInt(event.amountMinor) === 0n) {
+      throw new BillingError("zero-value provider payment cannot renew a paid plan");
+    }
+
+    const periodStart = sub.currentPeriodEnd ?? sub.currentPeriodStart ?? new Date().toISOString();
+    let invoice = await this.store.findInvoiceByPeriodAttempt(sub.id, periodStart, 1);
+    if (!invoice) {
+      invoice = await this.store.createInvoice({
+        id: newId(),
+        subscriptionId: sub.id,
+        periodStart,
+        periodEnd: new Date(new Date(periodStart).getTime() + this.periodDays * 24 * 3600 * 1000).toISOString(),
+        amount: { currency: priceVersion.currency, amountMinor: expected },
+        status: "open",
+        providerInvoiceRef: event.invoiceRef ?? event.transactionRef ?? event.externalEventId,
+        attempt: 1,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    if (invoice.status === "paid") return invoice;
+    if (invoice.amount.currency !== event.currency || BigInt(invoice.amount.amountMinor) !== BigInt(event.amountMinor)) {
+      throw new BillingError("provider payment does not match existing invoice");
+    }
+    invoice.status = "paid";
+    invoice.paidAt = new Date().toISOString();
+    invoice.providerInvoiceRef = invoice.providerInvoiceRef ?? event.invoiceRef ?? event.transactionRef ?? event.externalEventId;
+    await this.store.updateInvoice(invoice);
+    return invoice;
   }
 }

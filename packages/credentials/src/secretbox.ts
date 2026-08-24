@@ -13,8 +13,16 @@ import {
  */ 
  
 export function deriveKey(secret: string): Buffer { 
-  if (/[0-9a-fA-F]{64}$/.test(secret)) return Buffer.from(secret, "hex"); 
-  return createHash("sha256").update(secret, "utf8").digest(); 
+  const trimmed = secret.trim();
+  if (!trimmed) throw new Error("credentials key is required");
+  if (trimmed.startsWith("hex:")) {
+    const hex = trimmed.slice("hex:".length);
+    if (!/^[0-9a-fA-F]{64}$/.test(hex)) throw new Error("credentials hex key must be exactly 32 bytes");
+    return Buffer.from(hex, "hex");
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(trimmed)) return Buffer.from(trimmed, "hex"); 
+  if (/^[0-9a-fA-F]+$/.test(trimmed)) throw new Error("credentials hex key must be exactly 32 bytes");
+  return createHash("sha256").update(trimmed, "utf8").digest(); 
 } 
  
 export function seal(key: Buffer, plaintext: string): string { 

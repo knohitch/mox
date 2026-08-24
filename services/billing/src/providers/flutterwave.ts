@@ -113,6 +113,9 @@ export class FlutterwaveProvider implements BillingProvider {
         currency?: string;
         created_at?: string;
         subscription_id?: number | string;
+        flw_ref?: string;
+        tx_id?: number | string;
+        chargeback_id?: number | string;
       };
     };
     try {
@@ -143,6 +146,30 @@ export class FlutterwaveProvider implements BillingProvider {
           type: "subscription.canceled",
           subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : "",
           occurredAt: data.created_at,
+          payload: parsed,
+        };
+      case "refund.completed":
+      case "refund.processed":
+        return {
+          externalEventId: `${parsed.event}:${data.id ?? data.tx_id ?? data.tx_ref}`,
+          type: "payment.refunded",
+          subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : data.tx_ref ?? "",
+          transactionRef: data.tx_ref ?? data.flw_ref,
+          occurredAt: data.created_at,
+          amountMinor: data.amount !== undefined ? majorToMinor(data.amount, data.currency ?? "USD") : undefined,
+          currency: data.currency,
+          payload: parsed,
+        };
+      case "chargeback.created":
+      case "chargeback.initiated":
+        return {
+          externalEventId: `${parsed.event}:${data.chargeback_id ?? data.id ?? data.tx_ref}`,
+          type: "dispute.opened",
+          subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : data.tx_ref ?? "",
+          transactionRef: data.tx_ref ?? data.flw_ref,
+          occurredAt: data.created_at,
+          amountMinor: data.amount !== undefined ? majorToMinor(data.amount, data.currency ?? "USD") : undefined,
+          currency: data.currency,
           payload: parsed,
         };
       default:

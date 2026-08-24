@@ -1,5 +1,6 @@
 import type { AgentEvent } from "@mox/contracts";
 import { redact } from "@mox/credentials";
+import { sanitizeForPersistence } from "@mox/security";
 
 /**
  * Persistence boundary: local session, credential and settings stores are
@@ -27,7 +28,7 @@ export class InMemorySessionEventStore implements SessionEventStore {
       // A run belongs to exactly one org for its whole life.
       throw new Error(`run ${runId} is not owned by org ${orgId}`);
     }
-    entry.events.push(event);
+    entry.events.push(redactForStorage(event));
   }
 
   async replay(orgId: string, runId: string): Promise<AgentEvent[]> {
@@ -90,5 +91,5 @@ export function redactForStorage(event: AgentEvent): AgentEvent {
       clone[key] = redact(clone[key]);
     }
   }
-  return event.constructor === Object ? (clone as AgentEvent) : event;
+  return sanitizeForPersistence(event.constructor === Object ? (clone as AgentEvent) : event);
 }

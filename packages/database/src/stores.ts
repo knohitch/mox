@@ -1,4 +1,5 @@
 import type { SessionEvent } from "@mox/contracts";
+import { sanitizeForPersistence } from "@mox/security";
 import { requireTenant, TenantScopeError, type TenantContext } from "./tenant.js";
 
 /**
@@ -57,7 +58,7 @@ export class InMemorySessionEventStore implements SessionEventStore {
     }
     const seq = this.nextSeq;
     this.nextSeq += 1;
-    this.rows.set(key, { orgId: scopeOrg, seq, event });
+    this.rows.set(key, { orgId: scopeOrg, seq, event: sanitizeForPersistence(event) });
     void subject;
     return { seq, duplicate: false };
   }

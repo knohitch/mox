@@ -8,6 +8,37 @@
 
 export class ConfigError extends Error {}
 
+export type PlatformAdminRole = "superadmin" | "billing_admin" | "ops_admin" | "support";
+
+export type PlatformAdminCapability =
+  | "admin.read"
+  | "admin.support.write"
+  | "admin.customers.write"
+  | "admin.billing.write"
+  | "admin.compute.write"
+  | "admin.intelligence.write"
+  | "admin.notifications.write"
+  | "admin.operations.write";
+
+export const PLATFORM_ROLE_CAPABILITIES: Record<PlatformAdminRole, readonly PlatformAdminCapability[] | readonly ["*"]> = {
+  superadmin: ["*"],
+  billing_admin: ["admin.read", "admin.billing.write", "admin.notifications.write"],
+  ops_admin: ["admin.read", "admin.compute.write", "admin.intelligence.write", "admin.operations.write", "admin.notifications.write"],
+  support: ["admin.read", "admin.support.write"],
+};
+
+const PLATFORM_CAPABILITY_SET = new Set<string>([
+  "admin.read",
+  "admin.support.write",
+  "admin.customers.write",
+  "admin.billing.write",
+  "admin.compute.write",
+  "admin.intelligence.write",
+  "admin.notifications.write",
+  "admin.operations.write",
+  "*",
+]);
+
 export interface ControlPlaneConfig {
   env: "production" | "development" | "test";
   port: number;
@@ -29,6 +60,7 @@ export interface ControlPlaneConfig {
   sessionTtlMs: number;
   /** Optional CORS allowlist for API origins (credentials excluded). */
   corsOrigins: string[];
+  trustedProxyIps: string[];
   /**
    * Explicit platform-admin user ids (Prompt 01 §Provider config):
    * membership in this list grants all admin capabilities. Org owner/admin
@@ -36,6 +68,8 @@ export interface ControlPlaneConfig {
    * until an operator provisions ids explicitly.
    */
   platformAdminUserIds: string[];
+  /** Preferred platform-admin RBAC mapping. Only superadmin expands to "*". */
+  platformAdminRoles: Record<string, PlatformAdminRole>;
   /**
    * Optional per-admin capability allowlist. Keys are user ids; values are
    * admin capability names or "*" for all. This is evaluated server-side.
@@ -88,7 +122,29 @@ function parsePlatformAdminCapabilities(raw: string | undefined): Record<string,
       .map((cap) => cap.trim())
       .filter(Boolean);
     if (capabilities.length === 0) throw new ConfigError(`no capabilities configured for platform admin ${userId}`);
+    for (const capability of capabilities) {
+      if (!PLATFORM_CAPABILITY_SET.has(capability)) {
+        throw new ConfigError(`unknown platform admin capability for ${userId}: ${capability}`);
+      }
+    }
     out[userId] = capabilities;
+  }
+  return out;
+}
+
+function parsePlatformAdminRoles(raw: string | undefined): Record<string, PlatformAdminRole> {
+  const out: Record<string, PlatformAdminRole> = {};
+  for (const entry of (raw ?? "").split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) throw new ConfigError(`invalid MOX_PLATFORM_ADMIN_ROLES entry: ${trimmed}`);
+    const userId = trimmed.slice(0, idx).trim();
+    const role = trimmed.slice(idx + 1).trim() as PlatformAdminRole;
+    if (!Object.prototype.hasOwnProperty.call(PLATFORM_ROLE_CAPABILITIES, role)) {
+      throw new ConfigError(`invalid platform admin role for ${userId}: ${role}`);
+    }
+    out[userId] = role;
   }
   return out;
 }
@@ -140,9 +196,19 @@ export function loadControlPlaneConfig(
     .split(",")
     .map((id) => id.trim())
     .filter(Boolean);
+  const platformAdminRoles = parsePlatformAdminRoles(env["MOX_PLATFORM_ADMIN_ROLES"]);
   const platformAdminCapabilities = parsePlatformAdminCapabilities(env["MOX_PLATFORM_ADMIN_CAPABILITIES"]);
+  for (const [id, capabilities] of Object.entries(platformAdminCapabilities)) {
+    if (capabilities.includes("*") && platformAdminRoles[id] !== "superadmin") {
+      throw new ConfigError(`platform admin ${id} uses wildcard capability but is not mapped to superadmin`);
+    }
+  }
   for (const id of platformAdminUserIds) {
-    platformAdminCapabilities[id] = ["*"];
+    if (!platformAdminRoles[id] && !platformAdminCapabilities[id]?.length) {
+      throw new ConfigError(
+        `platform admin ${id} has no role/capability mapping; set MOX_PLATFORM_ADMIN_ROLES or MOX_PLATFORM_ADMIN_CAPABILITIES`,
+      );
+    }
   }
 
   return {
@@ -159,7 +225,12 @@ export function loadControlPlaneConfig(
       .split(",")
       .map((o) => o.trim())
       .filter(Boolean),
+    trustedProxyIps: (env["MOX_TRUSTED_PROXY_IPS"] ?? "")
+      .split(",")
+      .map((ip) => ip.trim())
+      .filter(Boolean),
     platformAdminUserIds,
+    platformAdminRoles,
     platformAdminCapabilities,
     runtimeMode,
     runtimeCommand,

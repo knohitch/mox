@@ -79,6 +79,39 @@ describe("billing", () => {
     expect((await fx.billing.getActiveSubscription("org-1"))?.state).toBe("active");
   });
 
+  it("concurrent duplicate checkout webhooks apply business value once", async () => {
+    const fx = await fixture();
+    const { session } = await fx.billing.createCheckout({
+      orgId: "org-concurrent",
+      productId: fx.productIds.max!,
+      planVersionId: fx.planVersionIds.max!,
+      pricingRegionCode: "GLOBAL",
+      successUrl: "s",
+      cancelUrl: "c",
+      providerName: fx.providerName,
+    });
+    const { headers, raw } = signedBody(fx.secret, {
+      eventId: "evt_concurrent_once",
+      type: "checkout.completed",
+      subjectRef: session.providerRef,
+      checkoutSessionId: session.id,
+      amountMinor: 9900,
+      currency: "USD",
+    });
+
+    const results = await Promise.all([
+      fx.billing.handleProviderWebhook(fx.providerName, headers, raw),
+      fx.billing.handleProviderWebhook(fx.providerName, headers, raw),
+      fx.billing.handleProviderWebhook(fx.providerName, headers, raw),
+    ]);
+
+    expect(results.filter((r) => r.applied)).toHaveLength(1);
+    expect(results.filter((r) => r.duplicate)).toHaveLength(2);
+    const sub = await fx.billing.getActiveSubscription("org-concurrent");
+    expect(sub?.state).toBe("active");
+    expect(await fx.billing.listTransitions(sub!.id)).toHaveLength(1);
+  });
+
   it("rejects forged webhook signatures without touching state", async () => {
     const fx = await fixture();
     const { session } = await fx.billing.createCheckout({
@@ -198,9 +231,122 @@ describe("billing", () => {
     expect((await fx.billing.getActiveSubscription("org-3"))?.state).toBe("suspended");
 
     // Recovery payment returns the subscription to active.
-    const recover = signedBody(fx.secret, { eventId: "e2", type: "payment.succeeded", subjectRef: session.providerRef });
+    const recover = signedBody(fx.secret, {
+      eventId: "e2",
+      type: "payment.succeeded",
+      subjectRef: session.providerRef,
+      amountMinor: 2000,
+      currency: "USD",
+      invoiceRef: "in_recover_1",
+    });
     await fx.billing.handleProviderWebhook(fx.providerName, recover.headers, recover.raw);
     expect((await fx.billing.getActiveSubscription("org-3"))?.state).toBe("active");
+  });
+
+  it("commercial access denies expired active rows but allows valid active and grace policy", async () => {
+    const fx = await fixture();
+    const { session } = await fx.billing.createCheckout({
+      orgId: "org-access",
+      productId: fx.productIds.plus!,
+      planVersionId: fx.planVersionIds.plus!,
+      pricingRegionCode: "GLOBAL",
+      successUrl: "s",
+      cancelUrl: "c",
+      providerName: fx.providerName,
+    });
+    const complete = signedBody(fx.secret, { eventId: "access-1", type: "checkout.completed", subjectRef: session.providerRef, checkoutSessionId: session.id, amountMinor: 2000, currency: "USD" });
+    await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
+    const sub = (await fx.billing.getActiveSubscription("org-access"))!;
+
+    expect((await fx.billing.evaluateCommercialAccess("org-access")).entitled).toBe(true);
+    sub.currentPeriodEnd = new Date(Date.now() - DAY).toISOString();
+    await fx.billing.store.updateSubscription(sub);
+    expect(await fx.billing.evaluateCommercialAccess("org-access")).toMatchObject({ entitled: false, reason: "expired_period" });
+
+    sub.state = "grace_period";
+    sub.graceEndsAt = new Date(Date.now() + DAY).toISOString();
+    await fx.billing.store.updateSubscription(sub);
+    expect((await fx.billing.evaluateCommercialAccess("org-access")).entitled).toBe(true);
+
+    await fx.billing.adminSuspend(sub.id, "admin", "test");
+    expect(await fx.billing.evaluateCommercialAccess("org-access")).toMatchObject({ entitled: false, reason: "state_suspended" });
+  });
+
+  it("refunds, disputes, bad bindings, and missing ordering data fail closed", async () => {
+    const fx = await fixture();
+    const { session } = await fx.billing.createCheckout({
+      orgId: "org-refund",
+      productId: fx.productIds.plus!,
+      planVersionId: fx.planVersionIds.plus!,
+      pricingRegionCode: "GLOBAL",
+      successUrl: "s",
+      cancelUrl: "c",
+      providerName: fx.providerName,
+    });
+    const complete = signedBody(fx.secret, {
+      eventId: "refund-complete",
+      type: "checkout.completed",
+      subjectRef: session.providerRef,
+      checkoutSessionId: session.id,
+      occurredAt: "2026-08-24T10:00:00.000Z",
+      amountMinor: 2000,
+      currency: "USD",
+    });
+    await fx.billing.handleProviderWebhook(fx.providerName, complete.headers, complete.raw);
+
+    const missingOrder = signedBody(fx.secret, {
+      eventId: "missing-order-fail",
+      type: "payment.failed",
+      subjectRef: session.providerRef,
+    });
+    await fx.billing.handleProviderWebhook(fx.providerName, missingOrder.headers, missingOrder.raw);
+    expect((await fx.billing.getActiveSubscription("org-refund"))?.state).toBe("active");
+
+    const wrongPayment = signedBody(fx.secret, {
+      eventId: "wrong-payment",
+      type: "payment.refunded",
+      subjectRef: "foreign-payment",
+      occurredAt: "2026-08-24T10:01:00.000Z",
+      amountMinor: 2000,
+      currency: "USD",
+    });
+    const wrong = await fx.billing.handleProviderWebhook(fx.providerName, wrongPayment.headers, wrongPayment.raw);
+    expect(wrong.rejected).toBe(true);
+
+    const dispute = signedBody(fx.secret, {
+      eventId: "dispute-open",
+      type: "dispute.opened",
+      subjectRef: session.providerRef,
+      occurredAt: "2026-08-24T10:02:00.000Z",
+      amountMinor: 2000,
+      currency: "USD",
+    });
+    const firstDispute = await fx.billing.handleProviderWebhook(fx.providerName, dispute.headers, dispute.raw);
+    expect(firstDispute.applied).toBe(true);
+    expect((await fx.billing.getActiveSubscription("org-refund"))?.state).toBe("suspended");
+    const duplicateDispute = await fx.billing.handleProviderWebhook(fx.providerName, dispute.headers, dispute.raw);
+    expect(duplicateDispute.duplicate).toBe(true);
+
+    const won = signedBody(fx.secret, {
+      eventId: "dispute-won",
+      type: "dispute.resolved",
+      subjectRef: session.providerRef,
+      occurredAt: "2026-08-24T10:03:00.000Z",
+      resolution: "won",
+    });
+    await fx.billing.handleProviderWebhook(fx.providerName, won.headers, won.raw);
+    expect((await fx.billing.getActiveSubscription("org-refund"))?.state).toBe("active");
+
+    const refund = signedBody(fx.secret, {
+      eventId: "full-refund",
+      type: "payment.refunded",
+      subjectRef: session.providerRef,
+      occurredAt: "2026-08-24T10:04:00.000Z",
+      amountMinor: 2000,
+      currency: "USD",
+    });
+    await fx.billing.handleProviderWebhook(fx.providerName, refund.headers, refund.raw);
+    expect((await fx.billing.getActiveSubscription("org-refund"))?.state).toBe("suspended");
   });
 
   it("renews successfully when the charge succeeds", async () => {

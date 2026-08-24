@@ -84,6 +84,7 @@ export interface DispatchedMessage {
   recipient: string;
   title: string;
   body: string;
+  dedupeKey?: string;
   at: string;
 }
 
@@ -150,6 +151,9 @@ export interface NotificationJobRecord {
   completedAt?: string;
   fanoutTotal: number;
   fanoutDone: number;
+  attempts: number;
+  claimOwner?: string;
+  claimExpiresAt?: string;
   error?: string;
   createdBy: string;
   idempotencyKey: string;

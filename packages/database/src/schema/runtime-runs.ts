@@ -71,6 +71,7 @@ export const approvalRequests = pgTable(
   "approval_requests", 
   { 
     id: uuid("id").primaryKey().defaultRandom(), 
+    approvalRef: text("approval_ref"),
     orgId: uuid("org_id") 
       .notNull() 
       .references(() => organizations.id, { onDelete: "cascade" }), 
@@ -78,15 +79,25 @@ export const approvalRequests = pgTable(
       .notNull() 
       .references(() => agents.id, { onDelete: "cascade" }), 
     runId: uuid("run_id").references(() => runtimeRuns.id, { onDelete: "set null" }), 
+    threadId: uuid("thread_id").references(() => threads.id, { onDelete: "set null" }),
+    requesterUserId: uuid("requester_user_id"),
+    toolName: text("tool_name"),
+    action: text("action"),
+    policyReason: text("policy_reason"),
+    correlationId: text("correlation_id"),
     kind: text("kind").notNull(), 
     summary: text("summary").notNull(), 
     payload: jsonb("payload"), 
     state: approvalState("state").notNull().default("open"), 
+    outcome: text("outcome"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(), 
     resolvedAt: timestamp("resolved_at", { withTimezone: true }), 
     resolvedByUserId: uuid("resolved_by_user_id"), 
   }, 
-  (t) => [index("approval_requests_org_state_idx").on(t.orgId, t.state)], 
+  (t) => [
+    index("approval_requests_org_state_idx").on(t.orgId, t.state),
+    uniqueIndex("approval_requests_ref_key").on(t.approvalRef),
+  ],
 ); 
  
 export const jobs = pgTable( 

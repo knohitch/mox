@@ -90,6 +90,7 @@ export class ReferenceAgentEngine implements AgentEngine {
           allowedTools: definition.permissions.allowedTools,
           deniedTools: definition.permissions.deniedTools,
           requireApprovalFor: definition.permissions.requireApprovalFor,
+          maxSpendPerDayCents: definition.permissions.maxSpendPerDayCents,
         },
         async (question: ApprovalQuestion) => {
           await emit(

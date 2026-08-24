@@ -52,8 +52,8 @@ export class NotificationService {
   private readonly transports = new Map<string, RouteTransport>();
   private readonly unreadSubscribers = new Set<UnreadSubscriber>();
   private readonly publishedHandlers = new Set<(published: PublishedNotification) => void>();
-  /** Durable-job runner claim: single in-process execution per job. */
-  private readonly runningJobs = new Set<string>();
+  private readonly workerId = `notifications-${randomUUID()}`;
+  private readonly jobLeaseMs = 60_000;
 
   constructor(store: NotificationStore, private readonly resolveAudience?: AudienceResolver) {
     this.store = store;
@@ -208,6 +208,7 @@ export class NotificationService {
         recipient: event.userId ?? event.orgId,
         title,
         body,
+        dedupeKey: `${event.eventId}:${route}:${event.userId ?? event.orgId}`,
         at: new Date().toISOString(),
       };
       try {
@@ -255,7 +256,7 @@ export class NotificationService {
     if (!input.payload.title || !input.payload.body) {
       throw new Error("notification title and body are required");
     }
-    const existing = await this.store.getJobByIdempotencyKey(input.idempotencyKey);
+    const existing = await this.store.getJobByIdempotencyKey(input.createdBy, input.idempotencyKey);
     if (existing) return { job: existing, created: false };
 
     const nowIso = new Date().toISOString();
@@ -274,13 +275,14 @@ export class NotificationService {
       scheduledAt: input.scheduledAt,
       fanoutTotal: 0,
       fanoutDone: 0,
+      attempts: 0,
       createdBy: input.createdBy,
       idempotencyKey: input.idempotencyKey,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
     const inserted = await this.store.insertJob(job);
-    const canonical = inserted.existing ?? (await this.store.getJobByIdempotencyKey(job.idempotencyKey)) ?? job;
+    const canonical = inserted.existing ?? (await this.store.getJobByIdempotencyKey(job.createdBy, job.idempotencyKey)) ?? job;
     return { job: canonical, created: inserted.created };
   }
 
@@ -308,15 +310,17 @@ export class NotificationService {
     let processed = 0;
     let delivered = 0;
 
-    for (const due of await this.store.dueJobs(at)) {
+    for (const due of await this.store.claimDueJobs(at, this.workerId, this.jobLeaseMs, limits.maxJobs)) {
       if (processed >= limits.maxJobs) break;
-      if (this.runningJobs.has(due.id)) continue;
-      this.runningJobs.add(due.id);
       try {
         delivered += await this.fanOut(due);
         processed += 1;
-      } finally {
-        this.runningJobs.delete(due.id);
+      } catch (error) {
+        due.status = "failed";
+        due.error = error instanceof Error ? error.message : String(error);
+        due.claimOwner = undefined;
+        due.claimExpiresAt = undefined;
+        await this.store.updateJob(due);
       }
     }
     return { processed, delivered };
@@ -371,6 +375,8 @@ export class NotificationService {
 
     job.status = "completed";
     job.completedAt = new Date().toISOString();
+    job.claimOwner = undefined;
+    job.claimExpiresAt = undefined;
     await this.store.updateJob(job);
     return delivered;
   }

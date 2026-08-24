@@ -81,6 +81,7 @@ export interface BillingStore {
   /** Authoritative lookup by the persisted provider-side reference. */
   findCheckoutSessionByProviderRef(providerRef: string): Promise<CheckoutSession | undefined>;
   updateCheckoutSession(session: CheckoutSession): Promise<void>;
+  claimCheckoutSession(id: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<CheckoutSession | undefined>;
 
   // Invoices
   createInvoice(invoice: Invoice): Promise<Invoice>;
@@ -93,6 +94,7 @@ export interface BillingStore {
   recordWebhook(record: WebhookRecord): Promise<boolean>;
   getWebhook(providerName: string, externalEventId: string): Promise<WebhookRecord | undefined>;
   updateWebhook(record: WebhookRecord): Promise<void>;
+  claimWebhookApplication(record: WebhookRecord, owner: string, leaseUntilIso: string): Promise<"claimed" | "applied" | "busy">;
 
   /**
    * Normalized provider-payment ledger (Prompt 01 §Durable). Returns false
@@ -101,6 +103,8 @@ export interface BillingStore {
    */
   recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean>;
   listProviderPayments(orgId: string): Promise<ProviderPaymentRecord[]>;
+
+  claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined>;
 }
 
 export class InMemoryBillingStore implements BillingStore {
@@ -324,6 +328,16 @@ export class InMemoryBillingStore implements BillingStore {
     if (session.providerRef) this.checkoutByProviderRef.set(session.providerRef, session.id);
   }
 
+  async claimCheckoutSession(id: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<CheckoutSession | undefined> {
+    const session = this.checkoutSessions.get(id);
+    if (!session || session.state === "completed") return undefined;
+    if (session.claimExpiresAt && session.claimExpiresAt > nowIso) return undefined;
+    session.claimOwner = owner;
+    session.claimExpiresAt = leaseUntilIso;
+    this.checkoutSessions.set(id, session);
+    return { ...session };
+  }
+
   async createInvoice(invoice: Invoice): Promise<Invoice> {
     this.invoices.set(invoice.id, invoice);
     return invoice;
@@ -376,6 +390,24 @@ export class InMemoryBillingStore implements BillingStore {
     this.webhooks.set(`${record.providerName}:${record.externalEventId}`, record);
   }
 
+  async claimWebhookApplication(record: WebhookRecord, owner: string, leaseUntilIso: string): Promise<"claimed" | "applied" | "busy"> {
+    const key = `${record.providerName}:${record.externalEventId}`;
+    const existing = this.webhooks.get(key);
+    if (existing?.status === "applied") return "applied";
+    if (existing?.status === "processing" && existing.processingExpiresAt && existing.processingExpiresAt > record.receivedAt) {
+      return "busy";
+    }
+    this.webhooks.set(key, {
+      ...(existing ?? record),
+      ...record,
+      status: "processing",
+      processingOwner: owner,
+      processingExpiresAt: leaseUntilIso,
+      rejectionReason: undefined,
+    });
+    return "claimed";
+  }
+
   private readonly providerPayments = new Map<string, ProviderPaymentRecord>();
 
   async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
@@ -389,6 +421,16 @@ export class InMemoryBillingStore implements BillingStore {
     return [...this.providerPayments.values()]
       .filter((p) => p.orgId === orgId)
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+  }
+
+  async claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined> {
+    const sub = this.subscriptions.get(id);
+    if (!sub || sub.currentPeriodEnd !== periodEndIso) return undefined;
+    if (sub.renewalClaimExpiresAt && sub.renewalClaimExpiresAt > nowIso) return undefined;
+    sub.renewalClaimOwner = owner;
+    sub.renewalClaimExpiresAt = leaseUntilIso;
+    this.subscriptions.set(id, sub);
+    return { ...sub };
   }
 }
 

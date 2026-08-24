@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Money } from "@mox/money";
 import type { BillingStore } from "@mox/billing";
 import type {
@@ -491,6 +491,24 @@ export class PgBillingStore implements BillingStore {
       .where(eq(checkoutSessions.id, asUuid(session.id)));
   }
 
+  async claimCheckoutSession(id: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<CheckoutSession | undefined> {
+    const rows = await this.db
+      .update(checkoutSessions)
+      .set({
+        claimOwner: owner,
+        claimExpiresAt: new Date(leaseUntilIso),
+      })
+      .where(
+        and(
+          eq(checkoutSessions.id, asUuid(id)),
+          sql`${checkoutSessions.state} <> 'completed'`,
+          sql`(${checkoutSessions.claimExpiresAt} IS NULL OR ${checkoutSessions.claimExpiresAt} <= ${new Date(nowIso)})`,
+        ),
+      )
+      .returning();
+    return rows[0] ? toCheckoutSession(rows[0]) : undefined;
+  }
+
   // ---- Invoices ---------------------------------------------------------------
 
   async createInvoice(invoice: Invoice): Promise<Invoice> {
@@ -597,6 +615,8 @@ export class PgBillingStore implements BillingStore {
         payloadDigest: record.payloadDigest,
         status: record.status,
         appliedAt: date(record.appliedAt),
+        processingOwner: record.status === "processing" ? (record.processingOwner ?? null) : null,
+        processingExpiresAt: record.status === "processing" ? date(record.processingExpiresAt) : null,
         rejectionReason: record.rejectionReason ?? null,
         sequence: record.sequence ?? null,
       })
@@ -608,7 +628,53 @@ export class PgBillingStore implements BillingStore {
       );
   }
 
-  private readonly providerPayments = new Map<string, ProviderPaymentRecord>();
+  async claimWebhookApplication(record: WebhookRecord, owner: string, leaseUntilIso: string): Promise<"claimed" | "applied" | "busy"> {
+    const values = {
+      id: asUuid(record.id),
+      providerName: record.providerName,
+      externalEventId: record.externalEventId,
+      type: record.type,
+      sequence: record.sequence ?? null,
+      payloadDigest: record.payloadDigest,
+      status: "processing" as const,
+      receivedAt: new Date(record.receivedAt),
+      processingOwner: owner,
+      processingExpiresAt: new Date(leaseUntilIso),
+      rejectionReason: null,
+    };
+    const inserted = await this.db
+      .insert(verifiedWebhookEvents)
+      .values(values)
+      .onConflictDoNothing({
+        target: [verifiedWebhookEvents.providerName, verifiedWebhookEvents.externalEventId],
+      })
+      .returning({ id: verifiedWebhookEvents.id });
+    if (inserted.length > 0) return "claimed";
+
+    const existing = await this.getWebhook(record.providerName, record.externalEventId);
+    if (existing?.status === "applied") return "applied";
+    const updated = await this.db
+      .update(verifiedWebhookEvents)
+      .set({
+        type: record.type,
+        sequence: record.sequence ?? null,
+        payloadDigest: record.payloadDigest,
+        status: "processing",
+        processingOwner: owner,
+        processingExpiresAt: new Date(leaseUntilIso),
+        rejectionReason: null,
+      })
+      .where(
+        and(
+          eq(verifiedWebhookEvents.providerName, record.providerName),
+          eq(verifiedWebhookEvents.externalEventId, record.externalEventId),
+          sql`${verifiedWebhookEvents.status} <> 'applied'`,
+          sql`(${verifiedWebhookEvents.status} <> 'processing' OR ${verifiedWebhookEvents.processingExpiresAt} IS NULL OR ${verifiedWebhookEvents.processingExpiresAt} <= ${new Date(record.receivedAt)})`,
+        ),
+      )
+      .returning({ id: verifiedWebhookEvents.id });
+    return updated.length > 0 ? "claimed" : "busy";
+  }
 
   /** Exactly-once ledger insert per (provider, externalEventId). */
   async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
@@ -665,6 +731,26 @@ export class PgBillingStore implements BillingStore {
       receivedAt: row.receivedAt.toISOString(),
       reconciledAt: iso(row.reconciledAt),
     }));
+  }
+
+  async claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined> {
+    const rows = await this.db
+      .update(subscriptions)
+      .set({
+        renewalClaimOwner: owner,
+        renewalClaimExpiresAt: new Date(leaseUntilIso),
+        updatedAt: new Date(nowIso),
+      })
+      .where(
+        and(
+          eq(subscriptions.id, asUuid(id)),
+          eq(subscriptions.currentPeriodEnd, new Date(periodEndIso)),
+          inArray(subscriptions.state, ["active", "past_due", "grace_period"]),
+          sql`(${subscriptions.renewalClaimExpiresAt} IS NULL OR ${subscriptions.renewalClaimExpiresAt} <= ${new Date(nowIso)})`,
+        ),
+      )
+      .returning();
+    return rows[0] ? toSubscription(rows[0]) : undefined;
   }
 }
 
@@ -726,6 +812,7 @@ function toSubscriptionRow(sub: Subscription) {
     planVersionId: asUuid(sub.planVersionId),
     priceVersionId: asUuid(sub.priceVersionId),
     state: sub.state,
+    providerName: sub.providerName ?? null,
     providerRef: sub.providerRef ?? null,
     providerEnvironment: sub.providerEnvironment ?? null,
     lastEventAt: date(sub.lastEventAt),
@@ -736,6 +823,8 @@ function toSubscriptionRow(sub: Subscription) {
     retentionUntil: date(sub.retentionUntil),
     failedRenewals: sub.failedRenewals,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+    renewalClaimOwner: sub.renewalClaimOwner ?? null,
+    renewalClaimExpiresAt: date(sub.renewalClaimExpiresAt),
     canceledAt: date(sub.canceledAt),
     suspendedAt: date(sub.suspendedAt),
     deletedAt: date(sub.deletedAt),
@@ -749,6 +838,7 @@ function toSubscription(row: SubscriptionRow): Subscription {
     planVersionId: row.planVersionId,
     priceVersionId: row.priceVersionId,
     state: row.state,
+    providerName: row.providerName ?? undefined,
     providerRef: row.providerRef ?? undefined,
     providerEnvironment: row.providerEnvironment ?? undefined,
     lastEventAt: iso(row.lastEventAt),
@@ -759,6 +849,8 @@ function toSubscription(row: SubscriptionRow): Subscription {
     retentionUntil: iso(row.retentionUntil),
     failedRenewals: row.failedRenewals,
     cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+    renewalClaimOwner: row.renewalClaimOwner ?? undefined,
+    renewalClaimExpiresAt: iso(row.renewalClaimExpiresAt),
     canceledAt: iso(row.canceledAt),
     suspendedAt: iso(row.suspendedAt),
     deletedAt: iso(row.deletedAt),
@@ -774,9 +866,12 @@ function toCheckoutRow(session: CheckoutSession) {
     priceVersionId: asUuid(session.priceVersionId),
     state: session.state,
     providerName: session.providerName,
+    environment: session.environment ?? null,
     providerRef: session.providerRef ?? null,
     redirectUrl: session.redirectUrl ?? null,
     expiresAt: date(session.expiresAt),
+    claimOwner: session.claimOwner ?? null,
+    claimExpiresAt: date(session.claimExpiresAt),
   };
 }
 
@@ -788,9 +883,12 @@ function toCheckoutSession(row: CheckoutRow): CheckoutSession {
     priceVersionId: row.priceVersionId,
     state: row.state,
     providerName: row.providerName,
+    environment: row.environment ?? undefined,
     providerRef: row.providerRef ?? undefined,
     redirectUrl: row.redirectUrl ?? undefined,
     expiresAt: iso(row.expiresAt),
+    claimOwner: row.claimOwner ?? undefined,
+    claimExpiresAt: iso(row.claimExpiresAt),
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -822,6 +920,8 @@ function toWebhook(row: WebhookRow): WebhookRecord {
     status: row.status,
     receivedAt: row.receivedAt.toISOString(),
     appliedAt: iso(row.appliedAt),
+    processingOwner: row.processingOwner ?? undefined,
+    processingExpiresAt: iso(row.processingExpiresAt),
     rejectionReason: row.rejectionReason ?? undefined,
   };
 }

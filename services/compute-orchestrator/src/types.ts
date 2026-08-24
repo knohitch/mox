@@ -74,6 +74,7 @@ export interface ServerOrder {
   sshKeyId?: string;
   reverseDns?: string;
   idempotencyKey: string;
+  requestFingerprint?: string;
   attemptCount: number;
   lastError?: string;
   retentionUntil?: string;
@@ -104,6 +105,8 @@ export interface ServerOperation {
   attempts: number;
   maxAttempts: number;
   nextAttemptAt: string;
+  leaseOwner?: string;
+  leaseExpiresAt?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -140,6 +143,8 @@ export interface NodeEnrollmentTokenRecord {
   orderId: string;
   /** Bound once the provider instance id is known post-provision. */
   providerInstanceId?: string;
+  /** Server-issued node identity expected from cloud-init. */
+  expectedNodeId?: string;
   state: "issued" | "consumed" | "expired" | "revoked";
   expiresAt: string;
   consumedAt?: string;

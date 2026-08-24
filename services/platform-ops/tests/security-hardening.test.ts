@@ -14,7 +14,7 @@ import { BillingService, FakeBillingProvider, InMemoryBillingStore, seedCatalog,
 describe("tenant isolation", () => {
   it("terminal access is denied across tenants", async () => {
     const entitlements = new EntitlementService(new InMemoryEntitlementStore());
-    await entitlements.setPlanValues("plan-version-current", { cli_sessions: true });
+    await entitlements.setPlanValues("plan-owner", { cli_sessions: true });
     const svc = new AgentControlService(new InMemoryAgentControlStore(), {
       entitlements,
       serverOwnership: {
@@ -22,10 +22,15 @@ describe("tenant isolation", () => {
           return id === "srv-a" ? "org-owner" : undefined;
         },
       },
+      commercialPlans: {
+        async entitledPlanVersionId(orgId) {
+          return orgId === "org-owner" ? "plan-owner" : undefined;
+        },
+      },
     });
     await expect(
       svc.openTerminal({ orgId: "org-attacker", userId: "u-x", serverOrderId: "srv-a" }),
-    ).rejects.toThrow(/owned by your organization/);
+    ).rejects.toThrow(/commercially entitled/);
     // The victim's own access still works.
     await expect(
       svc.openTerminal({ orgId: "org-owner", userId: "u-victim", serverOrderId: "srv-a" }),

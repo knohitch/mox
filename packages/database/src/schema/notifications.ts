@@ -97,9 +97,13 @@ export const dispatchedMessages = pgTable(
     recipient: text("recipient").notNull(),
     title: text("title").notNull(),
     body: text("body").notNull(),
+    dedupeKey: text("dedupe_key"),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("dispatched_messages_org_idx").on(t.orgId)],
+  (t) => [
+    index("dispatched_messages_org_idx").on(t.orgId),
+    uniqueIndex("dispatched_messages_org_dedupe_key").on(t.orgId, t.dedupeKey),
+  ],
 );
 
 
@@ -126,6 +130,9 @@ export const notificationJobs = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     fanoutTotal: integer("fanout_total").notNull().default(0),
     fanoutDone: integer("fanout_done").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    claimOwner: text("claim_owner"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
     error: text("error"),
     createdBy: text("created_by").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
@@ -133,7 +140,7 @@ export const notificationJobs = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("notification_jobs_idem_key").on(t.idempotencyKey),
+    uniqueIndex("notification_jobs_actor_idem_key").on(t.createdBy, t.idempotencyKey),
     index("notification_jobs_status_idx").on(t.status, t.scheduledAt),
   ],
 );

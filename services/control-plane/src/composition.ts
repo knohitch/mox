@@ -22,6 +22,7 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { AgentEvent, SessionEvent } from "@mox/contracts";
 import {
   createDb,
+  approvalRequests,
   billingProviderConfigs,
   PgBillingStore,
   PgEntitlementStore,
@@ -32,7 +33,6 @@ import {
   PgSessionEventStore,
   PgThreadStore,
   memberships,
-  users,
 } from "@mox/database";
 import { BillingService } from "@mox/billing";
 import type { BillingProvider } from "@mox/billing";
@@ -47,6 +47,7 @@ import { EntitlementService } from "@mox/entitlements";
 import { NotificationService } from "@mox/notification-service";
 import { AgentRuntime, assertMoxRuntimeMode, verifyFullMoxRuntime, type SessionEventStoreLike } from "@mox/agent-runtime";
 import { launchStdioRuntime } from "@mox/runtime-client";
+import { sanitizeForPersistence } from "@mox/security";
 import type { ControlPlaneConfig } from "./config.js";
 
 export interface ControlPlaneServices {
@@ -147,7 +148,7 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     await verifyFullMoxRuntime(runtimeClient, config.env);
     runtime = new AgentRuntime({
       client: runtimeClient,
-      events: new RuntimeEventStoreAdapter(events),
+      events: new RuntimeEventStoreAdapter(events, db),
       maxRestartsPerRun: 2,
     });
   }
@@ -169,14 +170,39 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
 }
 
 class RuntimeEventStoreAdapter implements SessionEventStoreLike {
-  constructor(private readonly store: PgSessionEventStore) {}
+  constructor(
+    private readonly store: PgSessionEventStore,
+    private readonly db: ReturnType<typeof createDb>["db"],
+  ) {}
 
   async append(orgId: string, runId: string, event: AgentEvent): Promise<void> {
-    const sessionEvent = agentEventToSessionEvent(orgId, runId, event);
+    const sessionEvent = sanitizeForPersistence(agentEventToSessionEvent(orgId, runId, event));
     const subject = sessionEvent.roomId
       ? ({ kind: "room" as const, id: sessionEvent.roomId })
       : ({ kind: "thread" as const, id: sessionEvent.threadId ?? orgId });
     await this.store.append({ orgId }, subject, sessionEvent);
+    if (sessionEvent.type === "approval.requested" && sessionEvent.agentId) {
+      await this.db
+        .insert(approvalRequests)
+        .values({
+          approvalRef: sessionEvent.approvalId,
+          orgId,
+          agentId: sessionEvent.agentId,
+          threadId: sessionEvent.threadId ?? null,
+          kind: "runtime",
+          summary: sessionEvent.summary,
+          payload: sanitizeForPersistence({
+            approvalId: sessionEvent.approvalId,
+            runId,
+            threadId: sessionEvent.threadId,
+            agentId: sessionEvent.agentId,
+            policyReason: sessionEvent.summary,
+          }) as object,
+          policyReason: sessionEvent.summary,
+          correlationId: runId,
+        })
+        .onConflictDoNothing({ target: approvalRequests.approvalRef });
+    }
   }
 
   async replay(orgId: string, runId: string): Promise<AgentEvent[]> {

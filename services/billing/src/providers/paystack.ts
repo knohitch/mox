@@ -138,6 +138,10 @@ export class PaystackProvider implements BillingProvider {
         createdAt?: string;
         subscription_code?: string;
         subscription?: { subscription_code?: string };
+        transaction?: { reference?: string; id?: number; amount?: number; currency?: string };
+        refund_reference?: string;
+        resolved_at?: string;
+        resolution?: string;
       };
     };
     try {
@@ -187,6 +191,39 @@ export class PaystackProvider implements BillingProvider {
           type: "subscription.canceled",
           subjectRef: data.subscription_code ?? "",
           occurredAt,
+          payload: parsed,
+        };
+      case "refund.processed":
+        return {
+          externalEventId: `refund.processed:${data.id ?? data.refund_reference ?? data.transaction?.id}`,
+          type: "payment.refunded",
+          subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          transactionRef: data.transaction?.reference ?? data.reference,
+          occurredAt: data.createdAt,
+          amountMinor: data.amount !== undefined ? BigInt(data.amount) : data.transaction?.amount !== undefined ? BigInt(data.transaction.amount) : undefined,
+          currency: data.currency ?? data.transaction?.currency,
+          payload: parsed,
+        };
+      case "charge.dispute.create":
+      case "charge.dispute.remind":
+        return {
+          externalEventId: `${parsed.event}:${data.id ?? data.transaction?.id}`,
+          type: "dispute.opened",
+          subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          transactionRef: data.transaction?.reference ?? data.reference,
+          occurredAt: data.createdAt,
+          amountMinor: data.amount !== undefined ? BigInt(data.amount) : undefined,
+          currency: data.currency,
+          payload: parsed,
+        };
+      case "charge.dispute.resolve":
+        return {
+          externalEventId: `${parsed.event}:${data.id ?? data.transaction?.id}`,
+          type: "dispute.resolved",
+          subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          transactionRef: data.transaction?.reference ?? data.reference,
+          occurredAt: data.resolved_at ?? data.createdAt,
+          resolution: data.resolution === "declined" ? "won" : data.resolution === "merchant-accepted" ? "accepted" : "unknown",
           payload: parsed,
         };
       default:

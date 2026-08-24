@@ -1,5 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
+import { sanitizeForPersistence } from "@mox/security";
 import type { MoxDb } from "./client.js";
 import { longTermMemories, sessionEvents, threadMessages, threads } from "./schema/index.js";
 import { requireTenant, type TenantContext } from "./tenant.js";
@@ -36,21 +37,22 @@ export class PgSessionEventStore implements SessionEventStore {
     }
     // subject ids are UUIDs in the hosted schema; the demo/in-memory stores
     // accept opaque ids for tests.
+    const safeEvent = sanitizeForPersistence(event);
     const inserted = await this.db
       .insert(sessionEvents)
       .values({
-        eventId: event.eventId,
+        eventId: safeEvent.eventId,
         orgId: tenant.orgId,
         subjectKind: subject.kind,
         subjectId: asUuid(subject.id),
         agentId: null,
-        runId: event.runId ?? null,
-        turnId: event.turnId ?? null,
-        correlationId: event.correlationId,
-        causationId: event.causationId ?? null,
-        type: event.type,
-        payload: event as unknown as object,
-        at: new Date(event.at),
+        runId: safeEvent.runId ?? null,
+        turnId: safeEvent.turnId ?? null,
+        correlationId: safeEvent.correlationId,
+        causationId: safeEvent.causationId ?? null,
+        type: safeEvent.type,
+        payload: safeEvent as unknown as object,
+        at: new Date(safeEvent.at),
       })
       .onConflictDoNothing({ target: sessionEvents.eventId })
       .returning({ seq: sessionEvents.seq });

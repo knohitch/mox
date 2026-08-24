@@ -119,6 +119,7 @@ export const serverOrders = pgTable(
     rootCredentialRefId: uuid("root_credential_ref_id"),
     reverseDns: text("reverse_dns"),
     idempotencyKey: text("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint"),
     attemptCount: integer("attempt_count").notNull().default(0),
     lastError: text("last_error"),
     retentionUntil: timestamp("retention_until", { withTimezone: true }),
@@ -149,6 +150,8 @@ export const serverOperations = pgTable(
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -217,6 +220,8 @@ export const nodeEnrollmentTokens = pgTable(
       .references(() => serverOrders.id, { onDelete: "cascade" }),
     /** Bound when the provider instance id becomes known post-provision. */
     providerInstanceId: text("provider_instance_id"),
+    /** Server-issued node id expected from the bootstrap environment. */
+    expectedNodeId: text("expected_node_id"),
     state: enrollmentTokenState("state").notNull().default("issued"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),

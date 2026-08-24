@@ -5,6 +5,8 @@ import {
   readBoundedBody,
   DEFAULT_FETCH_LIMITS,
   ResponseTooLargeError,
+  safeOutboundFetch,
+  UnsafeOutboundUrlError,
 } from "../src/index.js";
 
 describe("ssrf guard", () => {
@@ -27,11 +29,16 @@ describe("ssrf guard", () => {
 
   it("blocks loopback/private/link-local literal addresses", () => {
     expect(assertSafeOutboundUrl("https://127.0.0.1/admin").reason).toBe("private_address");
+    expect(assertSafeOutboundUrl("https://localhost./admin").reason).toBe("blocked_hostname");
     expect(assertSafeOutboundUrl("https://10.1.2.3/internal").reason).toBe("private_address");
+    expect(assertSafeOutboundUrl("https://172.16.0.1/internal").reason).toBe("private_address");
     expect(assertSafeOutboundUrl("https://192.168.1.10/router").reason).toBe("private_address");
+    expect(assertSafeOutboundUrl("https://[fe80::1]/x").reason).toBe("private_address");
     expect(assertSafeOutboundUrl("https://169.254.169.254/latest/meta-data/").reason).toBe("private_address");
     expect(assertSafeOutboundUrl("https://[::1]/x").reason).toBe("private_address");
     expect(assertSafeOutboundUrl("https://[::ffff:10.0.0.5]/x").reason).toBe("private_address");
+    expect(assertSafeOutboundUrl("https://[64:ff9b::a00:5]/x").reason).toBe("private_address");
+    expect(assertSafeOutboundUrl("https://203.0.113.10/x").reason).toBe("private_address");
     expect(isPrivateIp("172.20.3.4")).toBe(true);
     expect(isPrivateIp("8.8.8.8")).toBe(false);
   });
@@ -48,6 +55,61 @@ describe("ssrf guard", () => {
     const result = assertSafeOutboundUrl("https://2130706433/");
     expect(result.ok).toBe(false);
     expect(["private_address", "encoded_address"]).toContain(result.reason);
+    expect(assertSafeOutboundUrl("https://0x7f000001/").ok).toBe(false);
+  });
+
+  it("rejects disallowed ports before outbound fetch", async () => {
+    expect(assertSafeOutboundUrl("https://example.com:8443/").reason).toBe("port_not_allowed");
+    await expect(
+      safeOutboundFetch("https://example.com:8443/", {}, { resolve: async () => [{ address: "93.184.216.34" }] }),
+    ).rejects.toMatchObject({ reason: "port_not_allowed" });
+  });
+
+  it("validates resolved DNS records and redirect hops", async () => {
+    await expect(
+      safeOutboundFetch("https://metadata.example/", {}, {
+        resolve: async () => [{ address: "169.254.169.254" }],
+        fetchImpl: async () => new Response("never"),
+      }),
+    ).rejects.toBeInstanceOf(UnsafeOutboundUrlError);
+
+    await expect(
+      safeOutboundFetch("https://public.example/", {}, {
+        redirect: "follow",
+        resolve: async () => [{ address: "93.184.216.34" }],
+        fetchImpl: async () => new Response("", { status: 302, headers: { location: "https://127.0.0.1/admin" } }),
+      }),
+    ).rejects.toMatchObject({ reason: "private_address" });
+  });
+
+  it("allows public HTTPS through the safe outbound primitive", async () => {
+    const result = await safeOutboundFetch("https://api.example.com/data", {}, {
+      resolve: async () => [{ address: "93.184.216.34" }],
+      fetchImpl: async () => new Response("ok", { status: 200 }),
+    });
+    expect(result.response.status).toBe(200);
+    expect(new TextDecoder().decode(result.body)).toBe("ok");
+  });
+
+  it("enforces timeout and response-size limits in safe outbound fetch", async () => {
+    await expect(
+      safeOutboundFetch("https://api.example.com/large", {}, {
+        resolve: async () => [{ address: "93.184.216.34" }],
+        limits: { maxResponseBytes: 4, timeoutMs: 1000 },
+        fetchImpl: async () => new Response("too-large"),
+      }),
+    ).rejects.toBeInstanceOf(ResponseTooLargeError);
+
+    await expect(
+      safeOutboundFetch("https://api.example.com/slow", {}, {
+        resolve: async () => [{ address: "93.184.216.34" }],
+        limits: { maxResponseBytes: 100, timeoutMs: 1 },
+        fetchImpl: async (_url, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          }),
+      }),
+    ).rejects.toThrow(/aborted/);
   });
 
   it("supports hostname allowlists for locked-down integrations", () => {

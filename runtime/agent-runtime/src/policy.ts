@@ -28,6 +28,7 @@ export interface DefinitionPolicyInputs {
   allowedTools?: readonly string[];
   deniedTools?: readonly string[];
   requireApprovalFor?: readonly string[];
+  maxSpendPerDayCents?: number;
 }
 
 /** The seam the runtime consults before any tool executes. */
@@ -67,7 +68,15 @@ export class PermissionsPolicyEngine implements RuntimePolicyEngine {
         return DENY(`tool ${input.toolName} is not in the custom allow list`, input);
       }
     }
-    const needsApproval = this.dangerRank(input.dangerLevel) >= this.dangerRank("write");
+    if (input.dangerLevel === "spend" && input.maxSpendPerDayCents !== undefined) {
+      return DENY(
+        "spend budget enforcement requires durable cost authority and is unavailable in this runtime",
+        input,
+      );
+    }
+    const categories = this.categories(input);
+    const requiresConfiguredApproval = input.requireApprovalFor?.some((category) => categories.includes(category)) ?? false;
+    const needsApproval = requiresConfiguredApproval || this.dangerRank(input.dangerLevel) >= this.dangerRank("write");
     if (needsApproval && !(input.approvedTools?.has(input.toolName) ?? false)) {
       return {
         decisionId: DecisionId.parse(randomUUID()),
@@ -98,6 +107,15 @@ export class PermissionsPolicyEngine implements RuntimePolicyEngine {
       default:
         return 2; // unknown → treated as most dangerous (fail closed)
     }
+  }
+
+  private categories(input: Pick<PolicyInput, "toolName" | "dangerLevel">): string[] {
+    const categories = new Set<string>();
+    if (input.dangerLevel === "spend") categories.add("spend");
+    if (input.dangerLevel === "network") categories.add("external-send");
+    if (input.toolName.startsWith("computer")) categories.add("computer");
+    if (/deploy|deployment|server|compute/i.test(input.toolName)) categories.add("deployment");
+    return [...categories];
   }
 }
 

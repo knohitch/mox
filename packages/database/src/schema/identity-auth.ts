@@ -118,3 +118,39 @@ export const externalIdentities = pgTable(
   },
   (t) => [uniqueIndex("external_identities_provider_subject_key").on(t.providerId, t.subject)],
 );
+
+/**
+ * Durable abuse-control counters for auth and setup endpoints. These rows
+ * are intentionally low-cardinality buckets, not raw credential telemetry.
+ */
+export const authRateLimits = pgTable(
+  "auth_rate_limits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scope: text("scope").notNull(),
+    bucketKey: text("bucket_key").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    count: integer("count").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("auth_rate_limits_scope_bucket_key").on(t.scope, t.bucketKey),
+    index("auth_rate_limits_locked_idx").on(t.lockedUntil),
+  ],
+);
+
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: text("kind").notNull(),
+    scope: text("scope").notNull(),
+    bucketKey: text("bucket_key").notNull(),
+    requestIp: text("request_ip"),
+    userAgent: text("user_agent"),
+    detail: jsonb("detail").notNull().default({}),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("security_events_kind_at_idx").on(t.kind, t.at)],
+);

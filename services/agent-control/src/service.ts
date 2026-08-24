@@ -66,12 +66,17 @@ export interface ServerOwnershipLookup {
   ownerOf(serverOrderId: string): Promise<string | undefined>;
 }
 
+export interface CommercialPlanResolver {
+  entitledPlanVersionId(orgId: string): Promise<string | undefined>;
+}
+
 export class AgentControlService {
   readonly store: AgentControlStore;
   private readonly entitlements?: EntitlementService;
   private readonly nodeChannel?: NodeChannel;
   private readonly imageResolver: DeployImageResolver;
   private readonly serverOwnership?: ServerOwnershipLookup;
+  private readonly commercialPlans?: CommercialPlanResolver;
 
   constructor(
     store: AgentControlStore = new InMemoryAgentControlStore(),
@@ -80,6 +85,7 @@ export class AgentControlService {
       nodeChannel?: NodeChannel;
       imageResolver?: DeployImageResolver;
       serverOwnership?: ServerOwnershipLookup;
+      commercialPlans?: CommercialPlanResolver;
     } = {},
   ) {
     this.store = store;
@@ -87,6 +93,7 @@ export class AgentControlService {
     this.nodeChannel = options.nodeChannel;
     this.imageResolver = options.imageResolver ?? new DefaultImageResolver();
     this.serverOwnership = options.serverOwnership;
+    this.commercialPlans = options.commercialPlans;
   }
 
   // ---- Authoring -------------------------------------------------------------
@@ -127,7 +134,8 @@ export class AgentControlService {
   async publish(orgId: string, slug: string, input: { userId: string; changelog?: string }): Promise<AgentVersionRecord> {
     const record = await this.getDraft(orgId, slug);
     if (record.draft.authoring.mode === "developer" && this.entitlements) {
-      const entitled = await this.entitlements.isEnabled(orgId, "developer_mode", "plan-version-current");
+      const planVersionId = await this.requireEntitledPlanVersion(orgId);
+      const entitled = await this.entitlements.isEnabled(orgId, "developer_mode", planVersionId);
       if (!entitled) throw new NotEntitledError("developer mode is not enabled for this plan");
     }
     const history = await this.store.listVersions(record.agentId);
@@ -172,7 +180,8 @@ export class AgentControlService {
     nodeId?: string;
   }): Promise<DeploymentRecord> {
     if (this.entitlements) {
-      const limit = await this.entitlements.limitOf(input.orgId, "active_concurrent_agents", "plan-version-current");
+      const planVersionId = await this.requireEntitledPlanVersion(input.orgId);
+      const limit = await this.entitlements.limitOf(input.orgId, "active_concurrent_agents", planVersionId);
       if (limit >= 0) {
         // Org-wide live-agent count; the agent being replaced doesn't block
         // its own redeploy.
@@ -287,7 +296,8 @@ export class AgentControlService {
    */
   async openTerminal(input: { orgId: string; userId: string; serverOrderId: string }): Promise<TerminalSession> {
     if (this.entitlements) {
-      const entitled = await this.entitlements.isEnabled(input.orgId, "cli_sessions", "plan-version-current");
+      const planVersionId = await this.requireEntitledPlanVersion(input.orgId);
+      const entitled = await this.entitlements.isEnabled(input.orgId, "cli_sessions", planVersionId);
       if (!entitled) throw new NotEntitledError("terminal access is not enabled for this plan");
     }
     const owner = await this.serverOwnership?.ownerOf(input.serverOrderId);
@@ -303,5 +313,13 @@ export class AgentControlService {
       openedAt: nowIso(),
       commandCount: 0,
     };
+  }
+
+  private async requireEntitledPlanVersion(orgId: string): Promise<string> {
+    const planVersionId = await this.commercialPlans?.entitledPlanVersionId(orgId);
+    if (!planVersionId || planVersionId === "plan-version-current") {
+      throw new NotEntitledError("commercially entitled subscription is required");
+    }
+    return planVersionId;
   }
 }

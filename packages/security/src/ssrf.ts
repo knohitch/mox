@@ -10,6 +10,9 @@
  * provides `isPrivateIp` for that second check.
  */
 
+import { lookup } from "node:dns/promises";
+import net from "node:net";
+
 export interface UrlGuardResult {
   ok: boolean;
   reason?: string;
@@ -18,7 +21,7 @@ export interface UrlGuardResult {
   hostname: string;
 }
 
-const BLOCKED_SUFFIXES = [".internal", ".local", ".localhost", ".home.arpa"];
+const BLOCKED_SUFFIXES = [".internal", ".local", ".localhost", ".home.arpa", ".invalid"];
 
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
@@ -69,12 +72,45 @@ export function isPrivateIp(ip: string): boolean {
     }
     return true; // unparseable mapped address: fail closed
   }
-  if (mapped === "::1" || mapped === "::" || mapped.startsWith("fe80:") || mapped.startsWith("fc") || mapped.startsWith("fd")) {
+  if (
+    mapped === "::1" ||
+    mapped === "::" ||
+    mapped.startsWith("fe80:") ||
+    mapped.startsWith("fc") ||
+    mapped.startsWith("fd") ||
+    mapped.startsWith("ff")
+  ) {
+    return true;
+  }
+  if (mapped.startsWith("64:ff9b::")) {
+    const maybeV4 = mapped.slice("64:ff9b::".length);
+    if (maybeV4.includes(".")) return isPrivateIp(maybeV4);
+    const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(maybeV4);
+    if (hexMatch?.[1] && hexMatch[2]) {
+      const hi = parseInt(hexMatch[1], 16);
+      const lo = parseInt(hexMatch[2], 16);
+      return isPrivateIp(`${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`);
+    }
     return true;
   }
   const v4 = ipv4ToInt(mapped);
   if (v4 !== null) {
-    const privateRanges = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8", "100.64.0.0/10", "0.0.0.0/8"];
+    const privateRanges = [
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16",
+      "127.0.0.0/8",
+      "100.64.0.0/10",
+      "0.0.0.0/8",
+      "192.0.0.0/24",
+      "192.0.2.0/24",
+      "198.18.0.0/15",
+      "198.51.100.0/24",
+      "203.0.113.0/24",
+      "224.0.0.0/4",
+      "240.0.0.0/4",
+    ];
     return privateRanges.some((range) => ipv4InCidr(mapped, range));
   }
   return false;
@@ -109,7 +145,7 @@ export function assertSafeOutboundUrl(
     return { ok: false, reason: "port_not_allowed", hostname: parsed.hostname };
   }
 
-  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const hostname = canonicalHostname(parsed.hostname);
   if (BLOCKED_HOSTNAMES.has(hostname) || BLOCKED_SUFFIXES.some((suffix) => hostname.endsWith(suffix))) {
     return { ok: false, reason: "blocked_hostname", hostname };
   }
@@ -131,7 +167,12 @@ export function assertSafeOutboundUrl(
     if (!allowed) return { ok: false, reason: "host_not_allowlisted", hostname };
   }
 
+  parsed.hostname = hostname.includes(":") ? `[${hostname}]` : hostname;
   return { ok: true, url: parsed.toString(), hostname };
+}
+
+export function canonicalHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/g, "");
 }
 
 /** Response-size + timeout policy for outbound fetches. */
@@ -144,6 +185,90 @@ export const DEFAULT_FETCH_LIMITS: FetchLimits = {
   maxResponseBytes: 5 * 1024 * 1024,
   timeoutMs: 15_000,
 };
+
+export interface SafeOutboundOptions {
+  allowedHosts?: string[];
+  allowHttp?: boolean;
+  allowedPorts?: number[];
+  limits?: FetchLimits;
+  redirect?: "manual" | "follow";
+  maxRedirects?: number;
+  fetchImpl?: typeof fetch;
+  resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>;
+}
+
+export class UnsafeOutboundUrlError extends Error {
+  constructor(public readonly reason: string) {
+    super(`unsafe outbound URL: ${reason}`);
+    this.name = "UnsafeOutboundUrlError";
+  }
+}
+
+export async function safeOutboundFetch(
+  rawUrl: string,
+  init: RequestInit = {},
+  options: SafeOutboundOptions = {},
+): Promise<{ response: Response; body: Uint8Array; url: string }> {
+  const limits = options.limits ?? DEFAULT_FETCH_LIMITS;
+  let current = rawUrl;
+  const redirects = options.redirect === "follow" ? options.maxRedirects ?? 3 : 0;
+  let previousHost: string | undefined;
+  for (let hop = 0; hop <= redirects; hop += 1) {
+    const checked = assertSafeOutboundUrl(current, {
+      allowedHosts: options.allowedHosts,
+      allowHttp: options.allowHttp,
+    });
+    if (!checked.ok || !checked.url) throw new UnsafeOutboundUrlError(checked.reason ?? "url_denied");
+    const parsed = new URL(checked.url);
+    const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+    const allowedPorts = options.allowedPorts ?? [443];
+    if (!allowedPorts.includes(port)) throw new UnsafeOutboundUrlError("port_not_allowed");
+    await validateResolvedAddresses(checked.hostname, options.resolve);
+    const headers = new Headers(init.headers);
+    if (previousHost && previousHost !== checked.hostname) {
+      headers.delete("authorization");
+      headers.delete("cookie");
+      headers.delete("proxy-authorization");
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), limits.timeoutMs);
+    try {
+      const response = await (options.fetchImpl ?? fetch)(checked.url, {
+        ...init,
+        headers,
+        redirect: "manual",
+        signal: init.signal ?? controller.signal,
+      });
+      if (response.status >= 300 && response.status < 400 && response.headers.get("location") && hop < redirects) {
+        previousHost = checked.hostname;
+        current = new URL(response.headers.get("location")!, checked.url).toString();
+        continue;
+      }
+      const body = await readBoundedBody(response, limits);
+      return { response, body, url: checked.url };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw new UnsafeOutboundUrlError("redirect_not_allowed");
+}
+
+async function validateResolvedAddresses(
+  hostname: string,
+  resolver: SafeOutboundOptions["resolve"],
+): Promise<void> {
+  if (net.isIP(hostname)) {
+    if (isPrivateIp(hostname)) throw new UnsafeOutboundUrlError("private_address");
+    return;
+  }
+  const addresses = resolver ? await resolver(hostname) : await lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0) throw new UnsafeOutboundUrlError("dns_no_records");
+  for (const entry of addresses) {
+    if (!net.isIP(entry.address) || isPrivateIp(entry.address)) {
+      throw new UnsafeOutboundUrlError("dns_private_address");
+    }
+  }
+}
 
 export class ResponseTooLargeError extends Error {
   constructor() {

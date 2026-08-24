@@ -37,7 +37,7 @@ export const subscriptionState = pgEnum("subscription_state", [
 ]);
 export const priceBookMode = pgEnum("price_book_mode", ["fixed", "fx_derived", "disabled"]);
 export const checkoutState = pgEnum("checkout_state", ["created", "redirected", "completed", "expired"]);
-export const webhookStatus = pgEnum("webhook_status", ["received", "verified", "applied", "rejected"]);
+export const webhookStatus = pgEnum("webhook_status", ["received", "verified", "processing", "applied", "rejected"]);
 export const itemKind = pgEnum("subscription_item_kind", ["base", "addon"]);
 export const invoiceStatus = pgEnum("invoice_status", ["open", "paid", "failed", "void"]);
 
@@ -203,6 +203,8 @@ export const subscriptions = pgTable(
       .notNull()
       .references(() => priceVersions.id, { onDelete: "restrict" }),
     state: subscriptionState("state").notNull().default("trial"),
+    /** Authoritative provider adapter name; providerRef is opaque. */
+    providerName: text("provider_name"),
     /** Provider-side subscription reference, set only from verified webhooks. */
     providerRef: text("provider_ref"),
     /** test/live environment owning the provider ref (Prompt 01). */
@@ -219,6 +221,8 @@ export const subscriptions = pgTable(
     retentionUntil: timestamp("retention_until", { withTimezone: true }),
     failedRenewals: integer("failed_renewals").notNull().default(0),
     cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    renewalClaimOwner: text("renewal_claim_owner"),
+    renewalClaimExpiresAt: timestamp("renewal_claim_expires_at", { withTimezone: true }),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
     suspendedAt: timestamp("suspended_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -282,6 +286,8 @@ export const checkoutSessions = pgTable(
     providerRef: text("provider_ref"),
     redirectUrl: text("redirect_url"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
+    claimOwner: text("claim_owner"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -325,6 +331,8 @@ export const verifiedWebhookEvents = pgTable(
     status: webhookStatus("status").notNull().default("received"),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
+    processingOwner: text("processing_owner"),
+    processingExpiresAt: timestamp("processing_expires_at", { withTimezone: true }),
     rejectionReason: text("rejection_reason"),
   },
   (t) => [uniqueIndex("verified_webhook_events_provider_external_key").on(t.providerName, t.externalEventId)],

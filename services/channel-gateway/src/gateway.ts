@@ -3,6 +3,7 @@
  * dedupe, delivery receipts and the inbound→agent→outbound pipeline.
  */
 
+import { safeOutboundFetch, UnsafeOutboundUrlError } from "@mox/security";
 import type { ChannelAdapter, CanonicalInbound, OutboundReply } from "./adapters.js";
 
 export interface ChannelConnectionRecord {
@@ -108,7 +109,10 @@ export interface OutboundTransport {
 }
 
 export class HttpOutboundTransport implements OutboundTransport {
-  constructor(private readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(
+    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>,
+  ) {}
 
   async send(
     connection: ChannelConnectionRecord,
@@ -116,13 +120,18 @@ export class HttpOutboundTransport implements OutboundTransport {
   ): Promise<{ delivered: boolean; error?: string }> {
     if (!connection.outboundUrl) return { delivered: false, error: "no_outbound_url" };
     try {
-      const res = await this.fetchImpl(connection.outboundUrl, {
+      const { response } = await safeOutboundFetch(connection.outboundUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
+      }, {
+        fetchImpl: this.fetchImpl,
+        resolve: this.resolve,
+        allowedPorts: [443],
       });
-      return res.ok ? { delivered: true } : { delivered: false, error: `HTTP ${res.status}` };
+      return response.ok ? { delivered: true } : { delivered: false, error: `HTTP ${response.status}` };
     } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) return { delivered: false, error: `outbound_url_denied:${error.reason}` };
       return { delivered: false, error: String(error) };
     }
   }

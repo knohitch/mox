@@ -25,8 +25,8 @@ const KEY_LENGTH = 32;
 export const PASSWORD_ALGORITHM = "scrypt";
 
 export function assertPasswordPolicy(password: string): void {
-  if (!password || password.length < 8) {
-    throw new Error("password must be at least 8 characters");
+  if (!password || password.length < 12) {
+    throw new Error("password must be at least 12 characters");
   }
 }
 

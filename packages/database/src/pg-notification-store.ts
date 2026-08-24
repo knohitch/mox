@@ -1,5 +1,4 @@
 import type {
-  AdminAudience,
   AudienceType,
   DispatchedMessage,
   InAppNotification,
@@ -29,8 +28,8 @@ function visibleSql(userId: string | undefined): SQL {
   const at = inAppNotifications.audienceType;
   const uid = inAppNotifications.userId;
   return userId
-    ? sql`(${at} <> 'user' OR ${uid} = ${userId})`
-    : sql`${at} <> 'user'`;
+    ? sql`((${at} = 'org' AND ${uid} IS NULL) OR ${uid} = ${userId})`
+    : sql`(${at} = 'org' AND ${uid} IS NULL)`;
 }
 
 export class PgNotificationStore implements NotificationStore {
@@ -170,7 +169,7 @@ export class PgNotificationStore implements NotificationStore {
   }
 
   async recordDispatch(message: DispatchedMessage): Promise<void> {
-    await this.db.insert(dispatchedMessages).values({
+    const values = {
       id: message.id,
       orgId: message.orgId,
       userId: message.userId ?? null,
@@ -179,8 +178,15 @@ export class PgNotificationStore implements NotificationStore {
       recipient: message.recipient,
       title: message.title,
       body: message.body,
+      dedupeKey: message.dedupeKey ?? null,
       at: new Date(message.at),
-    });
+    };
+    const insert = this.db.insert(dispatchedMessages).values(values);
+    if (message.dedupeKey) {
+      await insert.onConflictDoNothing({ target: [dispatchedMessages.orgId, dispatchedMessages.dedupeKey] });
+      return;
+    }
+    await insert;
   }
 
   async listDispatches(orgId: string): Promise<DispatchedMessage[]> {
@@ -198,6 +204,7 @@ export class PgNotificationStore implements NotificationStore {
       recipient: row.recipient,
       title: row.title,
       body: row.body,
+      dedupeKey: row.dedupeKey ?? undefined,
       at: row.at.toISOString(),
     }));
   }
@@ -317,13 +324,13 @@ export class PgNotificationStore implements NotificationStore {
     const inserted = await this.db
       .insert(notificationJobs)
       .values(toJobRow(job))
-      .onConflictDoNothing({ target: notificationJobs.idempotencyKey })
+      .onConflictDoNothing({ target: [notificationJobs.createdBy, notificationJobs.idempotencyKey] })
       .returning({ id: notificationJobs.id });
     if (inserted.length === 0) {
-      const existing = await this.getJobByIdempotencyKey(job.idempotencyKey);
+      const existing = await this.getJobByIdempotencyKey(job.createdBy, job.idempotencyKey);
       return existing ? { created: false, existing } : { created: true };
     }
-    const created = await this.getJobByIdempotencyKey(job.idempotencyKey);
+    const created = await this.getJobByIdempotencyKey(job.createdBy, job.idempotencyKey);
     return created ? { created: true, existing: created } : { created: true };
   }
 
@@ -332,11 +339,11 @@ export class PgNotificationStore implements NotificationStore {
     return rows[0] ? rowToJob(rows[0]) : undefined;
   }
 
-  async getJobByIdempotencyKey(key: string): Promise<NotificationJobRecord | undefined> {
+  async getJobByIdempotencyKey(createdBy: string, key: string): Promise<NotificationJobRecord | undefined> {
     const rows = await this.db
       .select()
       .from(notificationJobs)
-      .where(eq(notificationJobs.idempotencyKey, key))
+      .where(and(eq(notificationJobs.createdBy, createdBy), eq(notificationJobs.idempotencyKey, key)))
       .limit(1);
     return rows[0] ? rowToJob(rows[0]) : undefined;
   }
@@ -345,7 +352,7 @@ export class PgNotificationStore implements NotificationStore {
     await this.db
       .update(notificationJobs)
       .set({ ...toJobRow(job), updatedAt: new Date() })
-      .where(eq(notificationJobs.idempotencyKey, job.idempotencyKey));
+      .where(and(eq(notificationJobs.createdBy, job.createdBy), eq(notificationJobs.idempotencyKey, job.idempotencyKey)));
   }
 
   async dueJobs(nowIso: string): Promise<NotificationJobRecord[]> {
@@ -361,6 +368,43 @@ export class PgNotificationStore implements NotificationStore {
       .orderBy(asc(notificationJobs.scheduledAt))
       .limit(50);
     return rows.map(rowToJob);
+  }
+
+  async claimDueJobs(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<NotificationJobRecord[]> {
+    const now = new Date(nowIso);
+    const leaseUntil = new Date(now.getTime() + leaseMs);
+    const result = await this.db.execute(sql`
+      WITH claimable AS (
+        SELECT id
+        FROM notification_jobs
+        WHERE (
+          status IN ('draft', 'scheduled')
+          AND (scheduled_at IS NULL OR scheduled_at <= ${now})
+        )
+        OR (
+          status = 'running'
+          AND claim_expires_at IS NOT NULL
+          AND claim_expires_at <= ${now}
+        )
+        ORDER BY scheduled_at ASC NULLS FIRST, created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT ${limit}
+      )
+      UPDATE notification_jobs AS job
+      SET status = 'running',
+          started_at = coalesce(job.started_at, ${now}),
+          claim_owner = ${workerId},
+          claim_expires_at = ${leaseUntil},
+          attempts = job.attempts + 1,
+          updated_at = ${now}
+      FROM claimable
+      WHERE job.id = claimable.id
+      RETURNING job.*
+    `);
+    const rows = Array.isArray((result as { rows?: unknown[] }).rows)
+      ? (result as { rows: Record<string, unknown>[] }).rows
+      : [];
+    return rows.map(rowToJobFromSqlRow);
   }
 }
 
@@ -432,6 +476,9 @@ function toJobRow(job: NotificationJobRecord) {
     completedAt: job.completedAt ? new Date(job.completedAt) : null,
     fanoutTotal: job.fanoutTotal,
     fanoutDone: job.fanoutDone,
+    attempts: job.attempts,
+    claimOwner: job.claimOwner ?? null,
+    claimExpiresAt: job.claimExpiresAt ? new Date(job.claimExpiresAt) : null,
     error: job.error ?? null,
     createdBy: job.createdBy,
     idempotencyKey: job.idempotencyKey,
@@ -456,10 +503,45 @@ function rowToJob(row: typeof notificationJobs.$inferSelect): NotificationJobRec
     completedAt: row.completedAt?.toISOString(),
     fanoutTotal: row.fanoutTotal,
     fanoutDone: row.fanoutDone,
+    attempts: row.attempts,
+    claimOwner: row.claimOwner ?? undefined,
+    claimExpiresAt: row.claimExpiresAt?.toISOString(),
     error: row.error ?? undefined,
     createdBy: row.createdBy,
     idempotencyKey: row.idempotencyKey,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function rowToJobFromSqlRow(row: Record<string, unknown>): NotificationJobRecord {
+  const dateIso = (value: unknown): string => value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
+  const maybeDateIso = (value: unknown): string | undefined =>
+    value === null || value === undefined ? undefined : dateIso(value);
+  return {
+    id: String(row.id),
+    orgId: row.org_id ? String(row.org_id) : undefined,
+    audienceType: String(row.audience_type) as AudienceType,
+    audiencePayload: (row.audience_payload ?? {}) as Record<string, unknown>,
+    title: String(row.title),
+    body: String(row.body),
+    severity: String(row.severity) as Severity,
+    category: String(row.category) as NotificationJobRecord["category"],
+    resourceType: row.resource_type ? String(row.resource_type) : undefined,
+    resourceId: row.resource_id ? String(row.resource_id) : undefined,
+    status: String(row.status) as NotificationJobRecord["status"],
+    scheduledAt: maybeDateIso(row.scheduled_at),
+    startedAt: maybeDateIso(row.started_at),
+    completedAt: maybeDateIso(row.completed_at),
+    fanoutTotal: Number(row.fanout_total ?? 0),
+    fanoutDone: Number(row.fanout_done ?? 0),
+    attempts: Number(row.attempts ?? 0),
+    claimOwner: row.claim_owner ? String(row.claim_owner) : undefined,
+    claimExpiresAt: maybeDateIso(row.claim_expires_at),
+    error: row.error ? String(row.error) : undefined,
+    createdBy: String(row.created_by),
+    idempotencyKey: String(row.idempotency_key),
+    createdAt: dateIso(row.created_at),
+    updatedAt: dateIso(row.updated_at),
   };
 }

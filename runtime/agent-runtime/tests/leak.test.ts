@@ -41,15 +41,29 @@ describe("no plaintext credential leakage", () => {
 
   it("event store persists redacted events and never stores raw secrets", async () => {
     const store = new InMemorySessionEventStore();
-    const raw = ev({ output: { token: "super-secret-token" } });
+    const raw = ev({ output: { token: "super-secret-token", text: "DATABASE_URL=postgres://user:pass@db.internal/app" } });
     await store.append("org-1", "run-1", raw);
     const replayed = await store.replay("org-1", "run-1");
     expect(replayed).toHaveLength(1);
-    // The store is a dumb sink; callers must pass through redactForStorage.
-    // Verify the documented composition keeps secrets out of durable bytes:
-    await store.append("org-1", "run-2", redactForStorage(raw));
-    const run2 = await store.replay("org-1", "run-2");
-    expect(JSON.stringify(run2[0])).not.toContain("super-secret-token");
+    const rawBytes = JSON.stringify(replayed[0]);
+    expect(rawBytes).not.toContain("super-secret-token");
+    expect(rawBytes).not.toContain("postgres://user:pass@db.internal/app");
+  });
+
+  it("sanitizes model-context replay for shell output and private keys", async () => {
+    const store = new InMemorySessionEventStore();
+    const privateKey = ["-----BEGIN", "PRIVATE KEY-----\nabc123\n-----END", "PRIVATE KEY-----"].join(" ");
+    await store.append("org-1", "run-secret", ev({
+      output: {
+        stdout: `ok ${privateKey}`,
+        url: "https://storage.example.com/object?X-Amz-Signature=abc123&X-Amz-Credential=AKIASECRET",
+      },
+    }));
+    const replayed = await store.replay("org-1", "run-secret");
+    const bytes = JSON.stringify(replayed);
+    expect(bytes).not.toContain("BEGIN PRIVATE KEY");
+    expect(bytes).not.toContain("X-Amz-Signature=abc123");
+    expect(bytes).toContain("[redacted]");
   });
 
   it("credential grant provider resolves refs but grants are not echoed into events", async () => {

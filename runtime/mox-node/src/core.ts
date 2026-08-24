@@ -8,6 +8,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { scrubLogLine } from "@mox/security";
 
 export const MOX_NODE_VERSION = "0.1.0";
 
@@ -129,6 +130,13 @@ export interface CommandResult {
   stderr: string;
 }
 
+export function scrubStderr(stderr: string, maxBytes = 4096): string {
+  const scrubbed = scrubLogLine(stderr);
+  const buf = Buffer.from(scrubbed, "utf8");
+  if (buf.byteLength <= maxBytes) return scrubbed;
+  return `${buf.subarray(0, maxBytes).toString("utf8")}[truncated]`;
+}
+
 /** Thin executor seam so tests never need real Docker. */
 export type CommandExecutor = (args: string[]) => Promise<CommandResult>;
 
@@ -137,7 +145,7 @@ export class DockerWorkloadManager {
 
   async listRunning(): Promise<ContainerState[]> {
     const res = await this.exec(["ps", "--format", "{{json .}}"]);
-    if (res.exitCode !== 0) throw new Error(`docker ps failed: ${res.stderr}`);
+    if (res.exitCode !== 0) throw new Error(`docker ps failed: ${scrubStderr(res.stderr)}`);
     const states: ContainerState[] = [];
     for (const line of res.stdout.split("\n")) {
       if (!line.trim()) continue;
@@ -161,7 +169,7 @@ export class DockerWorkloadManager {
     if (spec.memoryMb) args.push("--memory", `${spec.memoryMb}m`);
     args.push(spec.image);
     const res = await this.exec(args);
-    if (res.exitCode !== 0) throw new Error(`docker run failed: ${res.stderr}`);
+    if (res.exitCode !== 0) throw new Error(`docker run failed: ${scrubStderr(res.stderr)}`);
   }
 
   async stop(name: string): Promise<void> {
@@ -170,7 +178,7 @@ export class DockerWorkloadManager {
 
   async logs(name: string, tailLines: number): Promise<string> {
     const res = await this.exec(["logs", "--tail", String(tailLines), name]);
-    if (res.exitCode !== 0) throw new Error(`docker logs failed: ${res.stderr}`);
+    if (res.exitCode !== 0) throw new Error(`docker logs failed: ${scrubStderr(res.stderr)}`);
     return res.stdout;
   }
 

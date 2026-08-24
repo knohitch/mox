@@ -201,7 +201,7 @@ describe("ComputerGateway — isolation", () => {
     const h = harness();
     const sessionId = await open(h);
     await expect(
-      h.gateway.openSession(tokenFor("org-2", AGENT), {}),
+      h.gateway.openSession(tokenFor("org-2", AGENT, "org-2-session"), {}),
     ).resolves.toBeDefined();
     await expect(
       h.gateway.executeAction(tokenFor("org-2", AGENT), sessionId, { kind: "screenshot" }, undefined, NOW),

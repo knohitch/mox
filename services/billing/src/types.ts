@@ -89,6 +89,8 @@ export interface Subscription {
   planVersionId: string;
   priceVersionId: string;
   state: SubscriptionState;
+  /** Authoritative provider adapter name; never inferred from providerRef. */
+  providerName?: string;
   providerRef?: string;
   /** test/live — set from the provider configuration that owns the ref. */
   providerEnvironment?: string;
@@ -105,6 +107,8 @@ export interface Subscription {
   retentionUntil?: string;
   failedRenewals: number;
   cancelAtPeriodEnd: boolean;
+  renewalClaimOwner?: string;
+  renewalClaimExpiresAt?: string;
   canceledAt?: string;
   suspendedAt?: string;
   deletedAt?: string;
@@ -126,6 +130,8 @@ export interface CheckoutSession {
   providerRef?: string;
   redirectUrl?: string;
   expiresAt?: string;
+  claimOwner?: string;
+  claimExpiresAt?: string;
   createdAt: string;
 }
 
@@ -153,7 +159,7 @@ export interface Invoice {
   paidAt?: string;
 }
 
-export type WebhookStatus = "received" | "verified" | "applied" | "rejected";
+export type WebhookStatus = "received" | "verified" | "processing" | "applied" | "rejected";
 
 export interface WebhookRecord {
   id: string;
@@ -165,6 +171,8 @@ export interface WebhookRecord {
   status: WebhookStatus;
   receivedAt: string;
   appliedAt?: string;
+  processingOwner?: string;
+  processingExpiresAt?: string;
   rejectionReason?: string;
 }
 

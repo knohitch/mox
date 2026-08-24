@@ -16,6 +16,8 @@ export interface MoxNodeCloudInitInput {
   enrollToken: string;
   orgId: string;
   orderId: string;
+  /** Server-issued node identity; customer VPS must not choose this. */
+  nodeId: string;
   /** Extra packages/config kept minimal on purpose. */
   extraPackages?: string[];
 }
@@ -36,6 +38,7 @@ export function buildMoxNodeCloudInit(input: MoxNodeCloudInitInput): string {
     `      MOX_ENROLL_TOKEN=${input.enrollToken}`,
     `      MOX_ORG_ID=${input.orgId}`,
     `      MOX_ORDER_ID=${input.orderId}`,
+    `      MOX_NODE_ID=${input.nodeId}`,
     "runcmd:",
     "  - systemctl enable --now docker",
     `  - curl -fsSL ${input.controlPlaneUrl}/node/install.sh | bash -s -- /etc/mox-node/enroll.env`,

@@ -33,7 +33,10 @@ export interface ProviderEvent {
     | "checkout.completed"
     | "payment.succeeded"
     | "payment.failed"
-    | "subscription.canceled";
+    | "subscription.canceled"
+    | "payment.refunded"
+    | "dispute.opened"
+    | "dispute.resolved";
   sequence?: number;
   /** Checkout session or subscription provider reference. */
   subjectRef: string;
@@ -50,6 +53,10 @@ export interface ProviderEvent {
   /** Integer minor units when the provider includes money in the event. */
   amountMinor?: bigint | number;
   currency?: string;
+  /** Provider invoice/payment/capture id used as a durable business anchor. */
+  invoiceRef?: string;
+  /** Provider-specific terminal dispute result when present. */
+  resolution?: "won" | "lost" | "accepted" | "unknown";
   payload: unknown;
 }
 
@@ -207,6 +214,11 @@ export class FakeBillingProvider implements BillingProvider {
       sequence?: number;
       amountMinor?: number | string;
       currency?: string;
+      subscriptionRef?: string;
+      occurredAt?: string;
+      invoiceRef?: string;
+      transactionRef?: string;
+      resolution?: "won" | "lost" | "accepted" | "unknown";
     };
     try {
       parsed = JSON.parse(rawBody) as typeof parsed;
@@ -223,8 +235,13 @@ export class FakeBillingProvider implements BillingProvider {
       type: parsed.type as ProviderEvent["type"],
       sequence: parsed.sequence ?? this.eventCounter,
       subjectRef: parsed.subjectRef,
+      subscriptionRef: parsed.subscriptionRef,
+      transactionRef: parsed.transactionRef,
+      invoiceRef: parsed.invoiceRef,
+      occurredAt: parsed.occurredAt,
       amountMinor: parsed.amountMinor !== undefined ? BigInt(parsed.amountMinor) : undefined,
       currency: parsed.currency,
+      resolution: parsed.resolution,
       payload: parsed,
     };
   }

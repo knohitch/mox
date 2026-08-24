@@ -4,6 +4,7 @@
  * honestly (503 + machine-readable code) — never masked with demo data.
  */
 
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
@@ -34,11 +35,15 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       const boundPort = typeof address === "object" && address ? address.port : port;
       void url;
 
-      // Prompt 02 background ticker: scheduled notification jobs, node
-      // offline sweeps (node.offline events) and expiry purges.
+      // Background lifecycle seam. Billing, compute and notification workers
+      // claim durable rows before side effects, so multiple replicas can tick.
       const ticker = setInterval(() => {
         void (async () => {
           try {
+            await services.billing.runRenewals();
+            await services.billing.runRetentionSweep();
+            await services.orchestrator.reconcile();
+            await services.orchestrator.runRetentionSweep();
             await services.notifications.runDueJobs();
             const lost = await services.orchestrator.sweepLostNodes();
             for (const nodeId of lost) {
@@ -82,6 +87,8 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
     try {
       if (!req.url) throw httpError("missing request target", 400);
       const parsed = new URL(req.url, `http://localhost:${port}`);
+      const requestId = randomUUID();
+      res.setHeader("x-request-id", requestId);
 
       applyCors(req, res);
       if (req.method === "OPTIONS") {
@@ -99,7 +106,7 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       if (["POST", "PATCH", "PUT"].includes(req.method ?? "")) {
         // Prompt 00C §D: exact bytes captured BEFORE any parsing so webhook
         // signature verification sees the untouched payload.
-        rawBody = await readRawBody(req);
+        rawBody = await readRawBody(req, parsed.pathname.startsWith("/webhooks/billing/") ? 256 * 1024 : undefined);
       }
       const result = await match.handler({
         req,
@@ -113,7 +120,7 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
         sendJson(res, 200, result);
       }
     } catch (error) {
-      respondWithError(res, error);
+      respondWithError(req, res, error);
     } finally {
       logRequest(req, res, started);
     }
@@ -133,23 +140,38 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       res.setHeader("access-control-allow-origin", origin);
       res.setHeader("access-control-allow-credentials", "true");
       res.setHeader("access-control-allow-methods", "GET,POST,PATCH,DELETE,OPTIONS");
-      res.setHeader("access-control-allow-headers", "content-type,x-mox-csrf,authorization");
+      res.setHeader("access-control-allow-headers", "content-type,x-mox-csrf,authorization,idempotency-key");
       res.setHeader("access-control-max-age", "600");
     }
   }
 
-  function respondWithError(res: import("node:http").ServerResponse, error: unknown): void {
+  function respondWithError(
+    req: import("node:http").IncomingMessage,
+    res: import("node:http").ServerResponse,
+    error: unknown,
+  ): void {
     if (res.writableEnded) return;
     if (error instanceof AuthError) {
-      sendJson(res, error.status, { error: error.message, code: "unauthenticated" });
+      sendJson(res, error.status, {
+        error: error.status >= 500 ? "internal server error" : error.message,
+        code: error.status >= 500 ? "internal_error" : "unauthenticated",
+      });
       return;
     }
-    const err = error as { status?: number; message?: string; code?: string; unavailable?: boolean };
+    const err = error as { status?: number; message?: string; code?: string; unavailable?: boolean; reason?: string };
     const status = typeof err.status === "number" ? err.status : 500;
+    const maskInternal = status >= 500 && !err.code;
+    if (maskInternal) {
+      process.stderr.write(
+        requestLogLine(req.method ?? "GET", req.url ?? "-", status, 0) +
+          ` requestId=${String(res.getHeader("x-request-id") ?? "")} error=${err.message ?? "internal error"}\n`,
+      );
+    }
     sendJson(res, status, {
-      error: err.message ?? "internal error",
-      ...(err.code ? { code: err.code } : {}),
-      ...(status >= 500 || err.unavailable ? { unavailable: true } : {}),
+      error: maskInternal ? "internal server error" : err.message ?? "internal error",
+      code: maskInternal ? "internal_error" : err.code,
+      ...(!maskInternal && err.reason ? { reason: err.reason } : {}),
+      ...(maskInternal || err.unavailable ? { unavailable: true } : {}),
     });
   }
 
