@@ -12,7 +12,94 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$pgBin = Split-Path -Parent (Get-Command psql).Source
+function Get-MissingPostgresExecutables {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string[]]$Required
+    )
+    if (-not $Candidate -or -not (Test-Path -LiteralPath $Candidate -PathType Container)) {
+        return $Required
+    }
+    $missing = @()
+    foreach ($exe in $Required) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Candidate $exe) -PathType Leaf)) {
+            $missing += $exe
+        }
+    }
+    return $missing
+}
+
+function Resolve-PostgresBin {
+    $required = @("psql.exe", "initdb.exe", "pg_ctl.exe", "pg_isready.exe")
+    $inspected = New-Object System.Collections.Generic.List[string]
+    $pgBinValue = $env:PGBIN
+    $pathPsql = Get-Command psql -ErrorAction SilentlyContinue
+
+    $tryCandidate = {
+        param([string]$Candidate)
+        if (-not $Candidate) { return $null }
+        $expanded = [Environment]::ExpandEnvironmentVariables($Candidate.Trim('"'))
+        $inspected.Add($expanded)
+        $missing = @(Get-MissingPostgresExecutables -Candidate $expanded -Required $required)
+        if ($missing.Count -eq 0) {
+            return (Resolve-Path -LiteralPath $expanded).Path
+        }
+        return $null
+    }
+
+    $resolved = & $tryCandidate $pgBinValue
+    if ($resolved) { return $resolved }
+
+    if ($pathPsql) {
+        $resolved = & $tryCandidate (Split-Path -Parent $pathPsql.Source)
+        if ($resolved) { return $resolved }
+    }
+
+    $programRoots = @(
+        $env:ProgramFiles,
+        [Environment]::GetEnvironmentVariable("ProgramW6432"),
+        [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    ) | Where-Object { $_ } | Select-Object -Unique
+
+    $installedCandidates = @()
+    foreach ($root in $programRoots) {
+        $postgresRoot = Join-Path $root "PostgreSQL"
+        $inspected.Add($postgresRoot)
+        if (-not (Test-Path -LiteralPath $postgresRoot -PathType Container)) { continue }
+        $installedCandidates += Get-ChildItem -LiteralPath $postgresRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Path = Join-Path $_.FullName "bin"
+                    Version = if ($_.Name -match '^\d+(\.\d+)?$') { [version]$_.Name } else { [version]"0.0" }
+                }
+            }
+    }
+
+    foreach ($candidate in ($installedCandidates | Sort-Object Version -Descending)) {
+        $resolved = & $tryCandidate $candidate.Path
+        if ($resolved) { return $resolved }
+    }
+
+    $diagnostic = New-Object System.Collections.Generic.List[string]
+    $diagnostic.Add("PostgreSQL binaries were not found.")
+    $diagnostic.Add("PGBIN: " + ($(if ($pgBinValue) { $pgBinValue } else { "<unset>" })))
+    $diagnostic.Add("psql on PATH: " + ($(if ($pathPsql) { $pathPsql.Source } else { "no" })))
+    $diagnostic.Add("paths inspected:")
+    foreach ($path in ($inspected | Select-Object -Unique)) {
+        $missing = @(Get-MissingPostgresExecutables -Candidate $path -Required $required)
+        $diagnostic.Add("  - ${path} (missing: " + ($(if ($missing.Count -eq 0) { "<none>" } else { $missing -join ", " })) + ")")
+    }
+    $diagnostic.Add("Required executables: " + ($required -join ", "))
+    throw ($diagnostic -join [Environment]::NewLine)
+}
+
+$pgBin = Resolve-PostgresBin
+$env:PATH = "$pgBin;$env:PATH"
+$psql = Join-Path $pgBin "psql.exe"
+$initdb = Join-Path $pgBin "initdb.exe"
+$pgCtl = Join-Path $pgBin "pg_ctl.exe"
+$pgIsReady = Join-Path $pgBin "pg_isready.exe"
+
 # Pick a FREE ephemeral port: other local clusters may already occupy 5433.
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
 $listener.Start()
@@ -30,23 +117,22 @@ Write-Host "data dir: $dataDir"
 try {
     # 1. Fresh disposable cluster (empty DB, superuser postgres/postgres).
     Set-Content -Path $pwFile -Value "postgres" -NoNewline -Encoding ASCII
-    & (Join-Path $pgBin "initdb.exe") -D $dataDir -U postgres --pwfile=$pwFile -E UTF8 -A trust | Out-Null
+    & $initdb -D $dataDir -U postgres --pwfile=$pwFile -E UTF8 -A trust | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "initdb failed" }
 
-    & (Join-Path $pgBin "pg_ctl.exe") -D $dataDir -o "-p $port -c listen_addresses=127.0.0.1" -l $logFile start
+    & $pgCtl -D $dataDir -o "-p $port -c listen_addresses=127.0.0.1" -l $logFile start
     if ($LASTEXITCODE -ne 0) { throw "pg_ctl start failed (see $logFile)" }
 
     # Wait for readiness.
     $ready = $false
     for ($i = 0; $i -lt 30 -and -not $ready; $i++) {
-        & (Join-Path $pgBin "pg_isready.exe") -h 127.0.0.1 -p $port | Out-Null
+        & $pgIsReady -h 127.0.0.1 -p $port | Out-Null
         $ready = ($LASTEXITCODE -eq 0)
         if (-not $ready) { Start-Sleep -Milliseconds 500 }
     }
     if (-not $ready) { throw "cluster never became ready" }
 
     $env:PGPASSWORD = "postgres"
-    $psql = Join-Path $pgBin "psql.exe"
     $baseUrl = "postgresql://postgres@127.0.0.1:${port}"
 
     # 2. Empty business database + migrations applied through current head.
@@ -79,10 +165,14 @@ try {
     Remove-Item Env:MOX_TEST_DATABASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
     Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
-    & (Join-Path $pgBin "pg_ctl.exe") -D $dataDir stop 2>$null | Out-Null
+    if ($pgCtl -and $dataDir -and (Test-Path -LiteralPath $dataDir -PathType Container)) {
+        & $pgCtl -D $dataDir stop 2>$null | Out-Null
+    }
     if (-not $KeepData) {
         Start-Sleep -Milliseconds 800
-        Remove-Item -Recurse -Force $dataDir -ErrorAction SilentlyContinue
+        if ($dataDir) {
+            Remove-Item -Recurse -Force $dataDir -ErrorAction SilentlyContinue
+        }
         Remove-Item -Force $pwFile -ErrorAction SilentlyContinue
     }
 }
