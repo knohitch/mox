@@ -107,6 +107,12 @@ export interface ServerOperation {
   nextAttemptAt: string;
   leaseOwner?: string;
   leaseExpiresAt?: string;
+  /**
+   * Security Repair 05B §A: fencing token set by every successful claim.
+   * Post-claim writebacks must present the claimed version; a worker whose
+   * lease was stolen updates zero rows and must stop.
+   */
+  leaseVersion?: number;
   lastError?: string;
   createdAt: string;
   updatedAt: string;

@@ -1,8 +1,10 @@
 import {
+  bigint,
   index,
   integer,
   jsonb,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -99,10 +101,22 @@ export const dispatchedMessages = pgTable(
     body: text("body").notNull(),
     dedupeKey: text("dedupe_key"),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Security Repair 05B §K: durable dispatch outbox state.
+     * pending → sending → sent | failed | uncertain. Crash between the
+     * transport send and the durable record leaves `sending`, which the
+     * sweep moves to `uncertain` (visible, never silently resent) unless
+     * the transport supports provider-side idempotency.
+     */
+    deliveryState: text("delivery_state").notNull().default("sent"),
+    attempts: integer("attempts").notNull().default(1),
+    lastError: text("last_error"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("dispatched_messages_org_idx").on(t.orgId),
     uniqueIndex("dispatched_messages_org_dedupe_key").on(t.orgId, t.dedupeKey),
+    index("dispatched_messages_state_idx").on(t.deliveryState, t.updatedAt),
   ],
 );
 
@@ -133,6 +147,8 @@ export const notificationJobs = pgTable(
     attempts: integer("attempts").notNull().default(0),
     claimOwner: text("claim_owner"),
     claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    /** Security Repair 05B §A: fencing token for job claim writebacks. */
+    claimVersion: bigint("claim_version", { mode: "bigint" }).notNull().default(0n),
     error: text("error"),
     createdBy: text("created_by").notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
@@ -142,5 +158,40 @@ export const notificationJobs = pgTable(
   (t) => [
     uniqueIndex("notification_jobs_actor_idem_key").on(t.createdBy, t.idempotencyKey),
     index("notification_jobs_status_idx").on(t.status, t.scheduledAt),
+  ],
+);
+
+/**
+ * Security Repair 05B §I: cluster-wide SSE admission. The state row is the
+ * per-(scope,key) counter guarded by a row lock; sse_connections holds one
+ * expiring lease per active stream. A process crash leaves only leases that
+ * expire and are swept — capacity cannot leak indefinitely.
+ */
+export const sseAdmissionState = pgTable(
+  "sse_admission_state",
+  {
+    scope: text("scope").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    active: integer("active").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.scope, t.scopeKey] })],
+);
+
+export const sseConnections = pgTable(
+  "sse_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id").notNull(),
+    scope: text("scope").notNull(),
+    scopeKey: text("scope_key").notNull(),
+    owner: text("owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("sse_connections_lease_idx").on(t.leaseExpiresAt),
+    index("sse_connections_conn_idx").on(t.connectionId),
+    index("sse_connections_scope_idx").on(t.scope, t.scopeKey),
   ],
 );

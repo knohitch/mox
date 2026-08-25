@@ -27,6 +27,7 @@ import {
 // Real wall-clock base: gateway token verification uses the default real-time
 // clock, so tests anchor token minting and policy clocks to it.
 const NOW = new Date();
+const GATEWAY_SECRET = "test-gateway-secret-Ab3#x9KpQw7Tz2Lm5Vr8Ys1Nc";
 
 function definition(): AgentDefinition {
   return {
@@ -60,6 +61,7 @@ function world(orgId: string, agentId: string): World {
       now: () => NOW,
     }),
     entitlements: StaticEntitlementChecker.allowAll(),
+    gatewaySecret: GATEWAY_SECRET,
     approvals: {
       requestApproval: async (input) => ({
         approvalId: ApprovalId.parse("apr-e2e"),
@@ -83,7 +85,7 @@ function world(orgId: string, agentId: string): World {
     agentId,
     // Host-minted, session-bound tokens; "bootstrap" proves scope for open.
     tokenFor: (sessionId) =>
-      mintGatewayToken({ orgId, agentId, sessionId, ttlSeconds: 3600 }, NOW).token,
+      mintGatewayToken({ orgId, agentId, sessionId, ttlSeconds: 3600 }, NOW, GATEWAY_SECRET).token,
   });
 
   const registry = new ToolRegistry();
@@ -141,6 +143,7 @@ describe("computer tool over the reference engine (Mox Runtime to gateway to pro
     const auditEvents: string[] = [];
     const denyGateway = new ComputerGateway({
       provider: new PlaywrightComputerProvider(),
+      gatewaySecret: GATEWAY_SECRET,
       policy: new PolicyEngine({
         rules: [{ ruleId: "no-nav", effect: "deny", expression: 'effectClass == "navigate"' }],
         now: () => NOW,
@@ -169,7 +172,7 @@ describe("computer tool over the reference engine (Mox Runtime to gateway to pro
         orgId: "org-1",
         agentId: "agent-1",
         tokenFor: (sessionId) =>
-          mintGatewayToken({ orgId: "org-1", agentId: "agent-1", sessionId, ttlSeconds: 60 }, NOW).token,
+          mintGatewayToken({ orgId: "org-1", agentId: "agent-1", sessionId, ttlSeconds: 60 }, NOW, GATEWAY_SECRET).token,
       }),
     );
 

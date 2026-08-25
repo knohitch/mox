@@ -9,6 +9,7 @@ import { createServer, type Server } from "node:http";
 import { sql } from "drizzle-orm";
 import type { ControlPlaneServices } from "./composition.js";
 import { DEFAULT_WEBHOOK_ABUSE } from "./config.js";
+import { ClusterSseAdmission, DEFAULT_SSE_LIMITS } from "./sse-admission.js";
 import { verifyDependencies } from "./composition.js";
 import { AuthError } from "./auth.js";
 import { buildApiRouter } from "./api.js";
@@ -89,7 +90,15 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
               });
             }
             await services.notifications.store.purgeExpired(nowIso);
-            // Security Repair 05A §G: security-event logging must not grow
+            // Security Repair 05B §I: expire dead SSE leases so crashed
+            // streams reclaim cluster capacity.
+            await new ClusterSseAdmission(
+              services.db,
+              services.config.sseLimits ?? DEFAULT_SSE_LIMITS,
+            ).sweep(nowIso);
+            // Security Repair 05B §K: outbox dispatch retries/uncertainty.
+            await services.notifications.runDispatchRetries(nowIso);
+            // Security Repair 05B §G: security-event logging must not grow
             // without bound either (30-day retention).
             await services.db.execute(sql`DELETE FROM security_events WHERE at < now() - interval '30 days'`);
           } catch {

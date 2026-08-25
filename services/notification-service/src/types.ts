@@ -75,6 +75,8 @@ export interface InAppNotification {
   updatedAt: string;
 }
 
+export type DispatchState = "pending" | "sending" | "sent" | "failed" | "uncertain";
+
 export interface DispatchedMessage {
   id: string;
   orgId: string;
@@ -86,6 +88,16 @@ export interface DispatchedMessage {
   body: string;
   dedupeKey?: string;
   at: string;
+  /**
+   * Security Repair 05B §K: durable dispatch outbox state.
+   * pending → sending → sent | failed | uncertain. A crash between the
+   * transport send and the durable terminal record leaves `sending`, which
+   * the sweep surfaces as `uncertain` — never silently resent unless the
+   * transport guarantees provider-side idempotency.
+   */
+  deliveryState?: DispatchState;
+  attempts?: number;
+  lastError?: string;
 }
 
 /** A canonical platform event emitted by any Mox service. */
@@ -154,6 +166,8 @@ export interface NotificationJobRecord {
   attempts: number;
   claimOwner?: string;
   claimExpiresAt?: string;
+  /** Security Repair 05B §A: fencing token set by every job claim. */
+  claimVersion?: number;
   error?: string;
   createdBy: string;
   idempotencyKey: string;

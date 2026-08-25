@@ -40,6 +40,12 @@ export class NotFoundError extends OrchestratorError {}
 export class NotApprovedError extends OrchestratorError {}
 export class IdempotencyConflictError extends OrchestratorError {}
 export class TerminalFailureError extends OrchestratorError {}
+export class QuotaExceededError extends OrchestratorError {
+  constructor() {
+    super("server quota exceeded for current plan");
+    this.name = "QuotaExceededError";
+  }
+}
 /** Raised when a bootstrap enrollment attempt fails validation/consumption. */
 export class EnrollmentError extends OrchestratorError {}
 
@@ -70,6 +76,8 @@ interface ReconcileResult {
   succeeded: number;
   failed: number;
   abandoned: number;
+  /** Claims lost to a newer worker mid-execution (fencing, finding A). */
+  lost: number;
 }
 
 function validateControlPlaneUrl(raw: string, allowInsecure: boolean): string {
@@ -226,7 +234,10 @@ export class ComputeOrchestrator {
   /**
    * Order a dedicated VPS. Idempotent per (org, idempotencyKey): a
    * double-click returns the same order instead of buying two servers.
-   * Returns the order immediately in requested/provisioning state.
+   * Quota check + reservation are ONE serialized PostgreSQL decision
+   * (Security Repair 05B §B): different keys can never both observe spare
+   * capacity, and an over-quota order is never inserted for later cleanup.
+   * Returns the order immediately in provisioning state.
    */
   async orderServer(input: {
     orgId: string;
@@ -236,6 +247,8 @@ export class ComputeOrchestrator {
     requestFingerprint?: string;
     sshKeyId?: string;
     subscriptionItemId?: string;
+    /** Entitlement server-count quota (canonical plan quantity). */
+    maxServers?: number;
   }): Promise<{ order: ServerOrder; created: boolean }> {
     const existing = await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey);
     if (existing) {
@@ -267,9 +280,30 @@ export class ComputeOrchestrator {
       createdAt: now,
       updatedAt: now,
     };
-    const inserted = await this.store.insertOrder(order);
-    if (!inserted) {
-      const raced = await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey);
+    const operation: ServerOperation = {
+      id: newId(),
+      orderId: order.id,
+      kind: "provision",
+      state: "queued",
+      idempotencyKey: `${order.id}:provision`,
+      attempts: 0,
+      maxAttempts: this.defaultMaxAttempts,
+      nextAttemptAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const reserved = await this.store.createOrderReserved({
+      order,
+      operation,
+      // Quota is an entitlement-layer gate; callers that do not enforce a
+      // commercial limit (tests, internal paths) pass no cap.
+      maxServers: input.maxServers ?? Number.MAX_SAFE_INTEGER,
+    });
+    if (reserved.status === "quota_exceeded") {
+      throw new QuotaExceededError();
+    }
+    if (reserved.status === "idempotent") {
+      const raced = reserved.order ?? (await this.store.findOrderByIdempotencyKey(input.orgId, input.idempotencyKey));
       if (
         raced &&
         input.requestFingerprint &&
@@ -280,10 +314,7 @@ export class ComputeOrchestrator {
       }
       return { order: raced!, created: false };
     }
-    await this.enqueue(order.id, "provision", `${order.id}:provision`);
-    order.state = "provisioning";
-    await this.store.updateOrder(order);
-    return { order, created: true };
+    return { order: reserved.order!, created: true };
   }
 
   async getOrder(id: string): Promise<ServerOrder> {
@@ -309,18 +340,25 @@ export class ComputeOrchestrator {
     return this.enqueue(order.id, "resize", `${order.id}:resize`, { sku: candidate.providerSku });
   }
 
-  async requestReboot(orderId: string): Promise<ServerOperation> {
+  async requestReboot(orderId: string, requestId?: string): Promise<ServerOperation> {
     await this.getOrder(orderId);
-    return this.enqueue(orderId, "reboot", `${orderId}:reboot`);
+    // Security Repair 05B §J: reboots are repeatable server actions. The
+    // operation identity includes the caller's REQUEST id (or a fresh one),
+    // never a permanent per-order key: replaying the same request is
+    // idempotent, a new request creates a NEW reboot operation.
+    const identity = requestId ?? newId();
+    return this.enqueue(orderId, "reboot", `${orderId}:reboot:${identity}`);
   }
 
   /**
    * Cancel + destroy through the PROVIDER API — works even when the
-   * customer's Mox Node is offline or disabled.
+   * customer's Mox Node is offline or disabled. Duplicate cancels in
+   * terminal states are idempotent no-ops (Security Repair 05B §J); a
+   * cancel on an errored order is an intentional retry.
    */
   async cancelOrder(orderId: string): Promise<void> {
     const order = await this.getOrder(orderId);
-    if (["canceled", "destroyed"].includes(order.state)) return;
+    if (["canceled", "destroyed", "retention"].includes(order.state)) return;
     order.canceledAt = new Date().toISOString();
     order.state = "cancelling";
     await this.store.updateOrder(order);
@@ -348,7 +386,10 @@ export class ComputeOrchestrator {
       updatedAt: new Date().toISOString(),
     };
     await this.store.upsertOperation(op);
-    return op;
+    // Return the CANONICAL row: a replayed request must observe the
+    // original operation identity (finding J).
+    const canonical = await this.store.getOperation(orderId, op.kind, op.idempotencyKey);
+    return canonical ?? op;
   }
 
   async reconcile(now?: string): Promise<ReconcileResult> {
@@ -356,17 +397,27 @@ export class ComputeOrchestrator {
     let succeeded = 0;
     let failed = 0;
     let abandoned = 0;
+    let lost = 0;
     const due = await this.store.claimDueOperations(at, this.workerId, this.operationLeaseMs, 100);
     for (const op of due) {
       // Skip operations claimed, finished or exhausted since the snapshot.
       if (op.state === "succeeded" || op.state === "abandoned") continue;
       if (op.attempts >= op.maxAttempts) continue;
+      // Security Repair 05B §A: every post-claim writeback must prove it
+      // still owns the claim. A worker whose lease was stolen updates zero
+      // rows and stops — no order writes, no stale business events.
+      const claimedVersion = op.leaseVersion ?? 0;
       try {
-        await this.executeOperation(op, at);
+        const orderPatch = await this.executeOperation(op, at);
         op.state = "succeeded";
-        op.leaseOwner = undefined;
-        op.leaseExpiresAt = undefined;
-        await this.store.updateOperation(op);
+        // NOTE: lease fields stay on `op` until the fenced writeback has
+        // matched them — the store releases them in the SET payload.
+        const owned = await this.store.updateOperationFenced(op, claimedVersion);
+        if (!owned) {
+          lost += 1;
+          continue;
+        }
+        if (orderPatch) await this.store.updateOrder(orderPatch);
         succeeded += 1;
       } catch (error) {
         op.attempts += 1;
@@ -379,32 +430,63 @@ export class ComputeOrchestrator {
               : true;
         if (!retryable || op.attempts >= op.maxAttempts) {
           op.state = "abandoned";
-          op.leaseOwner = undefined;
-          op.leaseExpiresAt = undefined;
-          await this.store.updateOperation(op);
+          const owned = await this.store.updateOperationFenced(op, claimedVersion);
+          if (!owned) {
+            lost += 1;
+            continue;
+          }
           abandoned += 1;
+          // Order-state effects are emitted ONLY by the still-authoritative
+          // worker (finding A).
           const order = await this.store.getOrder(op.orderId);
-          if (order && !["cancelling", "canceled", "destroyed"].includes(order.state)) {
-            order.state = "error";
-            order.lastError = op.lastError;
-            await this.store.updateOrder(order);
+          if (order) {
+            if (op.kind === "cancel") {
+              // An abandoned cancel must reach a visible, reconciliable
+              // state instead of indefinite cancelling limbo (finding J).
+              if (order.state === "cancelling") {
+                order.state = "error";
+                order.lastError = `cancel abandoned: ${op.lastError}`;
+                await this.store.updateOrder(order);
+              }
+            } else if (!["cancelling", "canceled", "retention", "destroyed"].includes(order.state)) {
+              order.state = "error";
+              order.lastError = op.lastError;
+              await this.store.updateOrder(order);
+            }
+          }
+          // A final failed provision attempt must not leave a usable
+          // bootstrap token behind (still our claim — fenced above).
+          if (op.kind === "provision") {
+            await this.store.revokeIssuedEnrollmentTokensForOrder(op.orderId, at);
           }
           if (op.kind !== "cancel") failed += 1;
         } else {
           const backoffMs = this.retryBaseMs * 2 ** (op.attempts - 1);
           op.nextAttemptAt = new Date(Date.parse(at) + backoffMs).toISOString();
           op.state = "failed";
-          op.leaseOwner = undefined;
-          op.leaseExpiresAt = undefined;
-          await this.store.updateOperation(op);
+          const owned = await this.store.updateOperationFenced(op, claimedVersion);
+          if (!owned) {
+            lost += 1;
+            continue;
+          }
+          // Retrying provisions revoke the dangling token so the next
+          // attempt issues a fresh expectation (fenced: we still own it).
+          if (op.kind === "provision") {
+            await this.store.revokeIssuedEnrollmentTokensForOrder(op.orderId, at);
+          }
           failed += 1;
         }
       }
     }
-    return { processed: due.length, succeeded, failed, abandoned };
+    return { processed: due.length, succeeded, failed, abandoned, lost };
   }
 
-  private async executeOperation(op: ServerOperation, at: string): Promise<void> {
+  /**
+   * Executes the provider-side work WITHOUT writing order state. Returns
+   * the desired order patch; the caller persists it only after the fenced
+   * operation writeback proves the claim is still owned (finding A).
+   */
+  private async executeOperation(op: ServerOperation, at: string): Promise<ServerOrder | undefined> {
     const order = await this.store.getOrder(op.orderId);
     if (!order) throw new NotFoundError(`order ${op.orderId} vanished`);
 
@@ -446,6 +528,10 @@ export class ComputeOrchestrator {
             latencyMs: Date.now() - startedAt,
             at: new Date().toISOString(),
           });
+          // Bind the pending enrollment expectation to the exact instance
+          // now that the provider id is known (§E3/§F). State-guarded: a
+          // revoked (superseded) token is never re-bound.
+          await this.bindEnrollmentInstance(enrollSecret.tokenHash, result.instance.providerInstanceId);
           order.providerName = candidate.providerName;
           order.providerAccountId = account?.id;
           order.regionCode = candidate.regionCode;
@@ -454,10 +540,7 @@ export class ComputeOrchestrator {
           order.ipv4 = result.instance.ipv4;
           order.ipv6 = result.instance.ipv6;
           order.state = "running";
-          await this.store.updateOrder(order);
-          // Bind the pending enrollment expectation to the exact instance
-          // now that the provider id is known (§E3/§F).
-          await this.bindEnrollmentInstance(enrollSecret.tokenHash, result.instance.providerInstanceId);
+          return order;
         } catch (error) {
           this.healthScorer?.record({
             providerName: candidate.providerName,
@@ -467,12 +550,8 @@ export class ComputeOrchestrator {
             latencyMs: Date.now() - startedAt,
             at: new Date().toISOString(),
           });
-          // A failed attempt must not leave a usable bootstrap token behind.
-          await this.store.revokeIssuedEnrollmentTokensForOrder(order.id, new Date().toISOString());
           throw error;
         }
-        void at;
-        break;
       }
       case "resize": {
         const provider = this.requireProviderForOrder(order);
@@ -481,14 +560,13 @@ export class ComputeOrchestrator {
         op.providerOperationId = operation.providerOperationId;
         order.providerSku = sku;
         order.state = "running";
-        await this.store.updateOrder(order);
-        break;
+        return order;
       }
       case "reboot": {
         const provider = this.requireProviderForOrder(order);
         const operation = await provider.reboot(order.providerInstanceId!);
         op.providerOperationId = operation.providerOperationId;
-        break;
+        return undefined;
       }
       case "cancel": {
         const provider = this.requireProviderForOrder(order);
@@ -497,8 +575,7 @@ export class ComputeOrchestrator {
         }
         order.state = "retention";
         order.retentionUntil = new Date(Date.parse(at) + this.retentionDays * 24 * 3600 * 1000).toISOString();
-        await this.store.updateOrder(order);
-        break;
+        return order;
       }
       case "start":
       case "stop":
@@ -511,8 +588,7 @@ export class ComputeOrchestrator {
         op.providerOperationId = operation.providerOperationId;
         if (op.kind === "start") order.state = "running";
         if (op.kind === "stop") order.state = "stopped";
-        await this.store.updateOrder(order);
-        break;
+        return order;
       }
       default:
         throw new OrchestratorError(`unknown operation kind ${op.kind satisfies never}`);

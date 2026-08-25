@@ -101,9 +101,23 @@ const SECRET_VALUE_PATTERNS = [
   /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi,
   /\b(sk|xoxb|xoxp|ghp|gho|ghs|github_pat|AKIA|ASIA)[A-Za-z0-9_-]{8,}\b/g,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b/g,
-  /\b(postgres(?:ql)?:\/\/|mysql:\/\/|mongodb(?:\+srv)?:\/\/|redis:\/\/)[^\s"'<>]+/gi,
+  /\b(postgres(?:ql)?:\/\/|mysql:\/\/|mongodb(?:\+srv)?:\/\/|redis:\/\/|amqp:\/\/)[^\s"'<>]+/gi,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /\bhttps:\/\/[^\s"'<>?]+\/[^\s"'<>]*\?(?:[^\s"'<>]*?(?:X-Amz-Signature|X-Amz-Credential|Signature|sig|token|access_token|api_key)=)[^\s"'<>]+/gi,
+  // Security Repair 05B §E: assignment/colon-delimited secrets.
+  /\b(?:password|passwd|pwd)\s*[=:]\s*[^\s"'&<>]+/gi,
+  /\b(?:token|secret|api[-_]?key|credential)\s*[=:]\s*[A-Za-z0-9._~+/=-]{8,}/gi,
+  // GitLab / Google / npm / Slack / GitHub PAT-style keys.
+  /\bglpat-[A-Za-z0-9_-]{16,}\b/g,
+  /\bAIza[0-9A-Za-z_-]{30,}\b/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}\b/g,
+  // Stripe/Paystack-style live keys.
+  /\b(?:sk|rk|pk)_live_[A-Za-z0-9]{16,}\b/g,
+  /\bwhsec_[A-Za-z0-9]{16,}\b/g,
+  // Cookie headers (credentials never persist).
+  /\b(?:set-cookie|cookie):\s*[^\r\n]+/gi,
 ];
 
 export interface SanitizedArtifactRef {
@@ -134,11 +148,28 @@ export function redactMetadata(value: unknown, depth = 0): unknown {
 export function scrubLogLine(line: string): string {
   let out = line;
   for (const pattern of SECRET_VALUE_PATTERNS) out = out.replace(pattern, "[redacted]");
-  return redactCardCandidates(out);
+  out = redactCardCandidates(out);
+  return redactLongBase64Candidates(out);
+}
+
+/**
+ * Long base64-like runs (≥40 chars, mixed case + digits, with base64
+ * separators) are treated as secrets. Benign ids (UUIDs, hostnames, slugs)
+ * never reach the length/diversity threshold.
+ */
+function redactLongBase64Candidates(value: string): string {
+  return value.replace(/[A-Za-z0-9_+/=-]{40,}/g, (candidate) => {
+    const trimmed = candidate.replace(/=+$/, "");
+    const hasUpper = /[A-Z]/.test(trimmed);
+    const hasLower = /[a-z]/.test(trimmed);
+    const hasDigit = /[0-9]/.test(trimmed);
+    const hasSeparator = /[+/_-]/.test(trimmed);
+    return hasUpper && hasLower && hasDigit && hasSeparator ? "[redacted]" : candidate;
+  });
 }
 
 function redactCardCandidates(value: string): string {
-  return value.replace(/\b(?:\d[ -]?){13,19}\b/g, (candidate) => {
+  return value.replace(/(?<![\d-])\b(?:\d[ -]?){13,19}\b(?![\d-])/g, (candidate) => {
     const digits = candidate.replace(/\D/g, "");
     return digits.length >= 13 && digits.length <= 19 && luhnValid(digits) ? "[redacted-card]" : candidate;
   });
@@ -262,18 +293,67 @@ export interface GatewayTokenClaims {
   expiresAt: string;
 }
 
+/** Raised when the gateway signing secret is missing/weak (finding C). */
+export class GatewaySecretError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GatewaySecretError";
+  }
+}
+
+/** The public fallback value that used to ship in source — now rejected. */
+export const LEGACY_PUBLIC_GATEWAY_SECRET = "mox-local-gateway-token-secret-for-tests";
+
+/**
+ * Security Repair 05B §C: the gateway signing secret MUST be explicitly
+ * configured and strong. There is no production fallback: a missing secret
+ * throws (startup configuration failure / capability not_configured), the
+ * legacy public test value is refused outright, and weak values fail the
+ * length/entropy policy. Explicitly injected secrets (tests) go through
+ * the same policy.
+ */
+function requireStrongGatewaySecret(secret: string, source: "env" | "injected"): string {
+  if (!secret || secret.trim() === "") {
+    throw new GatewaySecretError(
+      source === "env"
+        ? "MOX_GATEWAY_TOKEN_SECRET is not configured; computer capability is not_configured"
+        : "gateway token secret is required",
+    );
+  }
+  if (secret === LEGACY_PUBLIC_GATEWAY_SECRET) {
+    throw new GatewaySecretError("refusing the public hardcoded gateway test secret — configure a real secret");
+  }
+  if (secret.length < 32) {
+    throw new GatewaySecretError("gateway token secret must be at least 32 characters");
+  }
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^A-Za-z0-9]/].filter((pattern) => pattern.test(secret)).length;
+  if (classes < 3) {
+    throw new GatewaySecretError(
+      "gateway token secret must use at least 3 of: lowercase, uppercase, digits, symbols",
+    );
+  }
+  return secret;
+}
+
+export function gatewayTokenSecretFromEnv(env: NodeJS.ProcessEnv = process.env): string {
+  return requireStrongGatewaySecret(env.MOX_GATEWAY_TOKEN_SECRET ?? "", "env");
+}
+
 export function mintGatewayToken(
   claims: Omit<GatewayTokenClaims, "expiresAt" | "jti"> & { ttlSeconds: number; jti?: string },
   now: Date = new Date(),
-  secret = gatewayTokenSecret(),
+  secret?: string,
 ): { token: string; claims: GatewayTokenClaims } {
+  const effective = secret !== undefined
+    ? requireStrongGatewaySecret(secret, "injected")
+    : gatewayTokenSecretFromEnv();
   const full: GatewayTokenClaims = {
     ...claims,
     jti: claims.jti ?? randomUUID(),
     expiresAt: new Date(now.getTime() + claims.ttlSeconds * 1000).toISOString(),
   };
   const payload = Buffer.from(JSON.stringify(full), "utf8").toString("base64url");
-  const signature = signGatewayPayload(payload, secret);
+  const signature = signGatewayPayload(payload, effective);
   const token = `${payload}.${signature}`;
   return { token, claims: full };
 }
@@ -294,11 +374,18 @@ export function verifyGatewayToken(
     expectedSessionId?: string;
   } = {},
 ): DirectAccessRejection {
+  let effectiveSecret: string;
+  try {
+    effectiveSecret = options.secret ?? gatewayTokenSecretFromEnv();
+  } catch {
+    // Fail closed: without a configured secret no token can ever verify.
+    return { ok: false, reason: "gateway secret not configured" };
+  }
   let claims: GatewayTokenClaims;
   try {
     const [payload, signature, extra] = token.split(".");
     if (!payload || !signature || extra !== undefined) return { ok: false, reason: "gateway token must be signed" };
-    const expected = signGatewayPayload(payload, options.secret ?? gatewayTokenSecret());
+    const expected = signGatewayPayload(payload, effectiveSecret);
     const a = Buffer.from(expected);
     const b = Buffer.from(signature);
     if (a.length !== b.length || !timingSafeEqual(a, b)) {
@@ -324,15 +411,16 @@ export function verifyGatewayToken(
   if (options.expectedSessionId && claims.sessionId !== options.expectedSessionId) {
     return { ok: false, reason: "gateway token session mismatch" };
   }
+  // Replay semantics (documented in the 05B report): gateway tokens are
+  // INTENTIONALLY reusable for their short TTL and are bound to exact
+  // org/agent/session. Hosts that additionally require one-time use pass
+  // seenJti + consumeReplay; without those the hook is inert and makes no
+  // replay-protection claim.
   if (options.consumeReplay && options.seenJti) {
     if (options.seenJti.has(claims.jti)) return { ok: false, reason: "gateway token replayed" };
     options.seenJti.add(claims.jti);
   }
   return { ok: true, claims };
-}
-
-function gatewayTokenSecret(): string {
-  return process.env.MOX_GATEWAY_TOKEN_SECRET ?? "mox-local-gateway-token-secret-for-tests";
 }
 
 function signGatewayPayload(payload: string, secret: string): string {

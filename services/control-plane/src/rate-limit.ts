@@ -23,12 +23,22 @@ export function bucketHash(value: string): string {
   return createHash("sha256").update(value.trim().toLowerCase()).digest("hex");
 }
 
+/** Normalize IPv4-mapped IPv6 (e.g. `::ffff:127.0.0.1`) to plain IPv4 so
+ *  the same client always lands in the same bucket regardless of socket
+ *  family (Security Repair 05B §H). */
+export function normalizeClientIp(raw: string): string {
+  const trimmed = raw.trim();
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(trimmed.toLowerCase());
+  if (mapped?.[1]) return mapped[1];
+  return trimmed;
+}
+
 export function clientIp(req: IncomingMessage, trustedProxyIps: string[] = []): string {
-  const remote = req.socket.remoteAddress ?? "";
+  const remote = normalizeClientIp(req.socket.remoteAddress ?? "");
   if (!trustedProxyIps.includes(remote)) return remote;
   const forwarded = req.headers["x-forwarded-for"];
   const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim();
-  return first || remote;
+  return first ? normalizeClientIp(first) : remote;
 }
 
 export class DurableRateLimiter {

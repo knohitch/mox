@@ -1,4 +1,4 @@
-﻿# Prompt 00B Â§H â€” real PostgreSQL verification against a fresh, disposable
+# Prompt 00B Â§H â€” real PostgreSQL verification against a fresh, disposable
 # cluster. Provisions a private initdb instance on port 5433 (trust auth,
 # loopback only), applies ALL migrations to an empty database, runs the
 # PG-gated suites, then shuts everything down and removes the data dir.
@@ -142,12 +142,13 @@ try {
     node packages/database/scripts/migrate.mjs
     if ($LASTEXITCODE -ne 0) { throw "migrations failed" }
 
-    # 3. PG-gated suites: restart/idempotency + auth/security integration.
+    # 3. PG-gated suites: restart/idempotency + auth/security integration +
+    #    Security Repair 05B distributed-hardening races.
     Write-Host "`n== running PostgreSQL-gated suites =="
     $env:MOX_TEST_DATABASE_URL = "$baseUrl/mox_verify"
     Push-Location services/control-plane
     try {
-        npx vitest run tests/restart.test.ts tests/auth-integration.test.ts
+        npx vitest run tests/restart.test.ts tests/auth-integration.test.ts tests/security-repair-05b.test.ts
         if ($LASTEXITCODE -ne 0) { throw "PG-gated suites failed" }
     } finally {
         Pop-Location

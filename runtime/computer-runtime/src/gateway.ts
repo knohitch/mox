@@ -15,7 +15,13 @@ import {
   type PolicyContext,
   PolicyEngine,
 } from "@mox/policy";
-import { EgressPolicy, verifyGatewayToken, type GatewayTokenClaims } from "@mox/security";
+import {
+  EgressPolicy,
+  gatewayTokenSecretFromEnv,
+  redactMetadata,
+  verifyGatewayToken,
+  type GatewayTokenClaims,
+} from "@mox/security";
 import { effectClassOf, type ComputerProvider, type ResolvedAction } from "./provider.js";
 
 /**
@@ -76,6 +82,13 @@ export interface ComputerGatewayOptions {
   defaultGrantTtlSeconds?: number;
   /** Hard cap on concurrent sessions per org (resource-limit behavior). */
   maxSessionsPerOrg?: number;
+  /**
+   * Security Repair 05B §C: the gateway signing secret. REQUIRED in
+   * production — absent a configured secret the gateway constructor throws
+   * (computer capability not_configured). Tests inject a deterministic
+   * strong key explicitly.
+   */
+  gatewaySecret?: string;
 }
 
 export class GatewayRejectedError extends Error {
@@ -97,8 +110,17 @@ export class GatewayRejectedError extends Error {
 export class ComputerGateway {
   /** sessionId → owning org/agent, for cross-tenant checks. */
   private readonly owners = new Map<string, { orgId: string; agentId: string }>();
+  private readonly gatewaySecret: string;
 
-  constructor(private readonly opts: ComputerGatewayOptions) {}
+  constructor(private readonly opts: ComputerGatewayOptions) {
+    // Fail closed at construction: a gateway without a strong configured
+    // secret is not_configured, not silently signed with a public key.
+    this.gatewaySecret = opts.gatewaySecret ?? gatewayTokenSecretFromEnv();
+  }
+
+  private verify(token: string, now: Date = new Date()) {
+    return verifyGatewayToken(token, now, { secret: this.gatewaySecret });
+  }
 
   /**
    * Open a computer session. Requires a gateway token minted by the Control
@@ -109,7 +131,7 @@ export class ComputerGateway {
     input: { requestedSessionId?: string },
     now: Date = new Date(),
   ): Promise<{ sessionId: string; claims: GatewayTokenClaims }> {
-    const verified = verifyGatewayToken(token, now);
+    const verified = this.verify(token, now);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     const claims = verified.claims;
     if (!claims.agentId) throw new GatewayRejectedError("unauthorized", "gateway token missing agent scope");
@@ -152,7 +174,7 @@ export class ComputerGateway {
     pageFacts?: { url: string; host: string; element?: { ref: string; role: string; name: string } },
     now: Date = new Date(),
   ): Promise<{ outcome: Awaited<ReturnType<ComputerProvider["execute"]>>; decision: PolicyDecision }> {
-    const verified = verifyGatewayToken(token, now);
+    const verified = this.verify(token, now);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     const claims = verified.claims;
     if (!claims.agentId) throw new GatewayRejectedError("unauthorized", "gateway token missing agent scope");
@@ -262,7 +284,7 @@ export class ComputerGateway {
 
   /** Human takeover: pauses agent actions; recorded in audit. */
   async startTakeover(token: string, sessionId: string, takenBy: string): Promise<void> {
-    const verified = verifyGatewayToken(token);
+    const verified = this.verify(token);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     this.assertSessionBound(verified.claims, sessionId);
     const owner = this.owners.get(sessionId);
@@ -274,7 +296,7 @@ export class ComputerGateway {
   }
 
   async endTakeover(token: string, sessionId: string): Promise<void> {
-    const verified = verifyGatewayToken(token);
+    const verified = this.verify(token);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     this.assertSessionBound(verified.claims, sessionId);
     const owner = this.owners.get(sessionId);
@@ -290,7 +312,7 @@ export class ComputerGateway {
    * scrubbed by the provider — frames stream inside the isolated runtime).
    */
   async getScreencastInfo(token: string, sessionId: string): Promise<Record<string, unknown>> {
-    const verified = verifyGatewayToken(token);
+    const verified = this.verify(token);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     this.assertSessionBound(verified.claims, sessionId);
     const owner = this.owners.get(sessionId);
@@ -301,7 +323,7 @@ export class ComputerGateway {
   }
 
   async closeSession(token: string, sessionId: string): Promise<void> {
-    const verified = verifyGatewayToken(token);
+    const verified = this.verify(token);
     if (!verified.ok) throw new GatewayRejectedError("unauthorized", verified.reason);
     this.assertSessionBound(verified.claims, sessionId);
     const owner = this.owners.get(sessionId);
@@ -350,6 +372,8 @@ export class ComputerGateway {
     outcome: AuditEvent["outcome"],
     metadata: Record<string, unknown>,
   ): Promise<void> {
+    // Security Repair 05B §E: freeform audit metadata (reason, takenBy,
+    // crash text) is scrubbed BEFORE it is persisted — no secrets in audit.
     await this.opts.audit.record({
       auditId: AuditId.parse(randomUUID()),
       orgId: OrgId.parse(claims.orgId),
@@ -357,7 +381,7 @@ export class ComputerGateway {
       action,
       resource: { kind: "computer-session", id: ResourceId.parse(sessionId) },
       outcome,
-      metadata: JSON.parse(JSON.stringify(metadata)) as Extensions,
+      metadata: JSON.parse(JSON.stringify(redactMetadata(metadata))) as Extensions,
       at: new Date().toISOString(),
     });
   }

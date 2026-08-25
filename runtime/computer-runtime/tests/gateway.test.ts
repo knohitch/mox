@@ -18,9 +18,11 @@ const SESSION = "sess-1";
 // Real wall-clock base: gateway methods verify tokens with their default
 // (real-time) clock unless explicitly overridden, so tests anchor to it.
 const NOW = new Date();
+// Security Repair 05B §C: tests inject an explicit strong signing key.
+const GATEWAY_SECRET = "test-gateway-secret-Ab3#x9KpQw7Tz2Lm5Vr8Ys1Nc";
 
 function tokenFor(orgId = ORG, agentId = AGENT, sessionId = SESSION, ttlSeconds = 3600): string {
-  return mintGatewayToken({ orgId, agentId, sessionId, ttlSeconds }, NOW).token;
+  return mintGatewayToken({ orgId, agentId, sessionId, ttlSeconds }, NOW, GATEWAY_SECRET).token;
 }
 
 function allowAllPolicy(): PolicyEngine {
@@ -87,6 +89,7 @@ function buildGateway(args: {
   entitlements?: EntitlementChecker;
   egress?: EgressPolicy;
   maxSessionsPerOrg?: number;
+  gatewaySecret?: string;
 }): ComputerGateway {
   return new ComputerGateway({
     provider: args.provider,
@@ -96,8 +99,53 @@ function buildGateway(args: {
     audit: args.audit,
     egress: args.egress,
     maxSessionsPerOrg: args.maxSessionsPerOrg,
+    gatewaySecret: args.gatewaySecret ?? GATEWAY_SECRET,
   });
 }
+
+describe("computer gateway readiness (Security Repair 05B §C/L)", () => {
+  it("refuses to construct without a strong gateway secret (fail closed)", () => {
+    const previous = process.env.MOX_GATEWAY_TOKEN_SECRET;
+    delete process.env.MOX_GATEWAY_TOKEN_SECRET;
+    try {
+      expect(
+        () =>
+          new ComputerGateway({
+            provider: new CountingProvider(),
+            policy: allowAllPolicy(),
+            audit: { record: async () => undefined },
+            approvals: {
+              requestApproval: async (input) => ({
+                approvalId: ApprovalId.parse("apr-r"),
+                orgId: OrgId.parse(input.orgId),
+                agentId: input.agentId,
+                kind: "computer-action",
+                summary: input.summary,
+                payload: input.payload as JsonValue,
+                state: "denied",
+                requestedAt: NOW.toISOString(),
+                resolvedAt: NOW.toISOString(),
+              }),
+              grantScopeFor: () => ({ scope: {}, ttlSeconds: 0 }),
+            },
+          }),
+      ).toThrow(/not configured|at least 32/);
+    } finally {
+      if (previous) process.env.MOX_GATEWAY_TOKEN_SECRET = previous;
+      else delete process.env.MOX_GATEWAY_TOKEN_SECRET;
+    }
+  });
+
+  it("rejects tokens minted with a different secret", async () => {
+    const h = harness();
+    const foreign = mintGatewayToken(
+      { orgId: ORG, agentId: AGENT, sessionId: SESSION, ttlSeconds: 60 },
+      NOW,
+      "another-strong-secret-9Zz#7Qw2Xp5Vt8Ys1Nc",
+    ).token;
+    await expect(h.gateway.openSession(foreign, {}, NOW)).rejects.toMatchObject({ code: "unauthorized" });
+  });
+});
 
 async function open(h: Harness): Promise<string> {
   // Deterministic session id so every tokenFor() (claims.sessionId=SESSION)
@@ -149,7 +197,7 @@ describe("ComputerGateway — browser action happy path", () => {
 describe("ComputerGateway — unauthorized direct browser access", () => {
   it("rejects missing/garbage/expired tokens BEFORE provider or policy runs", async () => {
     const h = harness();
-    for (const bad of ["", "garbage", mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: SESSION, ttlSeconds: -1 }, NOW).token]) {
+    for (const bad of ["", "garbage", mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: SESSION, ttlSeconds: -1 }, NOW, GATEWAY_SECRET).token]) {
       await expect(h.gateway.openSession(bad, {})).rejects.toMatchObject({ code: "unauthorized" });
     }
     await expect(
@@ -166,7 +214,7 @@ describe("ComputerGateway — unauthorized direct browser access", () => {
     // when org/agent match — no session hopping, no provider reach.
     await expect(
       h.gateway.executeAction(
-        mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: "other-session", ttlSeconds: 60 }, NOW).token,
+        mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: "other-session", ttlSeconds: 60 }, NOW, GATEWAY_SECRET).token,
         SESSION,
         { kind: "click", x: 1, y: 2 },
         undefined,
@@ -216,7 +264,7 @@ describe("ComputerGateway — isolation", () => {
     const h = harness();
     await expect(
       h.gateway.executeAction(
-        mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: "nope", ttlSeconds: 60 }, NOW).token,
+        mintGatewayToken({ orgId: ORG, agentId: AGENT, sessionId: "nope", ttlSeconds: 60 }, NOW, GATEWAY_SECRET).token,
         "nope",
         { kind: "screenshot" },
         undefined,

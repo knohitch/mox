@@ -7,6 +7,8 @@ import {
   ResponseTooLargeError,
   safeOutboundFetch,
   UnsafeOutboundUrlError,
+  pinnedLookup,
+  resolveValidatedAddresses,
 } from "../src/index.js";
 
 describe("ssrf guard", () => {
@@ -128,5 +130,79 @@ describe("ssrf guard", () => {
     const small = new Response(new TextEncoder().encode("hello"));
     const body = await readBoundedBody(small, { maxResponseBytes: 100, timeoutMs: 1000 });
     expect(new TextDecoder().decode(body)).toBe("hello");
+  });
+});
+
+describe("ssrf connection pinning (Security Repair 05B §D)", () => {
+  it("resolves once, validates every IP, and the connection lookup serves ONLY the pinned addresses", async () => {
+    let calls = 0;
+    const resolver = async () => {
+      calls += 1;
+      // First resolution: public. A LATER resolution (rebinding) would
+      // return private — but the pinned connection must never consult it.
+      return calls === 1 ? [{ address: "93.184.216.34" }] : [{ address: "10.0.0.7" }];
+    };
+    const pinned = await resolveValidatedAddresses("api.example.com", resolver);
+    expect(pinned.map((p) => p.address)).toEqual(["93.184.216.34"]);
+
+    const lookupFn = pinnedLookup(pinned);
+    const served: string[] = [];
+    await new Promise<void>((resolve) => {
+      (lookupFn as unknown as (host: string, opts: unknown, cb: (e: Error | null, a: string) => void) => void)(
+        "api.example.com",
+        {},
+        (_err, address) => {
+          served.push(address);
+          resolve();
+        },
+      );
+    });
+    expect(calls).toBe(1); // the connection never re-resolved
+    expect(served).toEqual(["93.184.216.34"]);
+  });
+
+  it("refuses private resolved addresses before any connection", async () => {
+    await expect(
+      resolveValidatedAddresses("metadata.example", async () => [{ address: "169.254.169.254" }]),
+    ).rejects.toMatchObject({ reason: "dns_private_address" });
+    await expect(
+      resolveValidatedAddresses("lan.example", async () => [{ address: "192.168.1.10" }]),
+    ).rejects.toMatchObject({ reason: "dns_private_address" });
+  });
+
+  it("lookup(all:true) serves exactly the validated address set", async () => {
+    const pinned = [
+      { address: "8.8.8.8", family: 4 },
+      { address: "9.9.9.9", family: 4 },
+    ];
+    const lookupFn = pinnedLookup(pinned);
+    const got: string[] = [];
+    await new Promise<void>((resolve) => {
+      (lookupFn as unknown as (host: string, opts: unknown, cb: (e: Error | null, r: Array<{ address: string }>) => void) => void)(
+        "host.example",
+        { all: true },
+        (_err, results) => {
+          got.push(...results.map((r) => r.address));
+          resolve();
+        },
+      );
+    });
+    expect(got.sort()).toEqual(["8.8.8.8", "9.9.9.9"]);
+  });
+
+  it("every redirect hop re-resolves and re-pins (fresh validation per hop)", async () => {
+    let hops = 0;
+    const resolver = async () => {
+      hops += 1;
+      return hops === 1 ? [{ address: "93.184.216.34" }] : [{ address: "10.0.0.1" }];
+    };
+    await expect(
+      safeOutboundFetch("https://public.example/", {}, {
+        redirect: "follow",
+        resolve: resolver,
+        fetchImpl: async () => new Response("", { status: 302, headers: { location: "https://second.example/admin" } }),
+      }),
+    ).rejects.toMatchObject({ reason: "dns_private_address" });
+    expect(hops).toBe(2); // hop 1 validated, hop 2 re-resolved + rejected
   });
 });

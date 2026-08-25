@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Money } from "@mox/money";
 import type { BillingStore } from "@mox/billing";
 import type {
@@ -815,6 +815,7 @@ export class PgBillingStore implements BillingStore {
       .set({
         renewalClaimOwner: owner,
         renewalClaimExpiresAt: new Date(leaseUntilIso),
+        renewalClaimVersion: sql`coalesce(${subscriptions.renewalClaimVersion}, 0) + 1`,
         updatedAt: new Date(nowIso),
       })
       .where(
@@ -827,6 +828,32 @@ export class PgBillingStore implements BillingStore {
       )
       .returning();
     return rows[0] ? toSubscription(rows[0]) : undefined;
+  }
+
+  /**
+   * Security Repair 05B §A: fenced renewal writeback — the update applies
+   * only while the renewal claim (owner + version) is still held. A stale
+   * worker whose lease was stolen updates zero rows and must stop.
+   */
+  async completeSubscriptionRenewal(sub: Subscription, expectedClaimVersion: number): Promise<boolean> {
+    const ownerMatch = sub.renewalClaimOwner
+      ? eq(subscriptions.renewalClaimOwner, sub.renewalClaimOwner)
+      : isNull(subscriptions.renewalClaimOwner);
+    const updated = await this.db
+      .update(subscriptions)
+      .set({
+        ...toSubscriptionRow({ ...sub, renewalClaimOwner: undefined, renewalClaimExpiresAt: undefined }),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(subscriptions.id, asUuid(sub.id)),
+          ownerMatch,
+          eq(subscriptions.renewalClaimVersion, BigInt(expectedClaimVersion)),
+        ),
+      )
+      .returning({ id: subscriptions.id });
+    return updated.length > 0;
   }
 
   // ---- Security Repair 05A: provider-object mappings (finding A) ---------------
@@ -1298,6 +1325,7 @@ function toSubscriptionRow(sub: Subscription) {
     providerPlanRef: sub.providerPlanRef ?? null,
     renewalClaimOwner: sub.renewalClaimOwner ?? null,
     renewalClaimExpiresAt: date(sub.renewalClaimExpiresAt),
+    renewalClaimVersion: BigInt(sub.renewalClaimVersion ?? 0),
     canceledAt: date(sub.canceledAt),
     suspendedAt: date(sub.suspendedAt),
     deletedAt: date(sub.deletedAt),
@@ -1328,6 +1356,7 @@ function toSubscription(row: SubscriptionRow): Subscription {
     providerPlanRef: row.providerPlanRef ?? undefined,
     renewalClaimOwner: row.renewalClaimOwner ?? undefined,
     renewalClaimExpiresAt: iso(row.renewalClaimExpiresAt),
+    renewalClaimVersion: Number(row.renewalClaimVersion ?? 0),
     canceledAt: iso(row.canceledAt),
     suspendedAt: iso(row.suspendedAt),
     deletedAt: iso(row.deletedAt),

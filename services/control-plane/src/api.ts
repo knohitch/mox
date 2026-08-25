@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
-import { IdempotencyConflictError } from "@mox/compute-orchestrator";
+import { IdempotencyConflictError, QuotaExceededError } from "@mox/compute-orchestrator";
 import {
   agentDeployments,
   agentRooms,
@@ -86,6 +86,7 @@ import {
   type PlatformAdminRole,
 } from "./config.js";
 import { bucketHash, clientIp, DurableRateLimiter } from "./rate-limit.js";
+import { ClusterSseAdmission, DEFAULT_SSE_LIMITS, SseAdmissionDeniedError } from "./sse-admission.js";
 
 export interface ApiDeps {
   services: ControlPlaneServices;
@@ -100,10 +101,8 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const db = () => services.db;
   const authLimiter = new DurableRateLimiter(db());
   const webhookLimiter = new DurableRateLimiter(db());
+  const sseAdmission = new ClusterSseAdmission(db(), services.config.sseLimits ?? DEFAULT_SSE_LIMITS);
   const ORG_ROLE_RANK = { viewer: 0, member: 1, admin: 2, owner: 3 } as const;
-  const sseByUser = new Map<string, number>();
-  const sseByIp = new Map<string, number>();
-  let sseGlobal = 0;
 
   /**
    * Central auth gate (Prompt 00D §A). Browser sessions carry full
@@ -272,28 +271,22 @@ export function buildApiRouter(deps: ApiDeps): Router {
     }
   };
 
-  const admitSse = (ctx: RequestContext, userId: string): (() => void) => {
+  /**
+   * Security Repair 05B §I: cluster-wide SSE admission. Per-user, per-IP
+   * and global caps are enforced over PostgreSQL leases/counters so every
+   * replica observes the same capacity; the returned handle releases
+   * capacity on close and heartbeats during the stream's ping loop.
+   */
+  const admitSse = async (ctx: RequestContext, userId: string) => {
     const ip = clientIp(ctx.req, services.config.trustedProxyIps);
-    const userCount = sseByUser.get(userId) ?? 0;
-    const ipCount = sseByIp.get(ip) ?? 0;
-    if (userCount >= 5 || ipCount >= 25 || sseGlobal >= 1000) {
-      throw httpError("too many open streams", 429, { code: "sse_connection_limit" });
+    try {
+      return await sseAdmission.admit(userId, ip);
+    } catch (error) {
+      if (error instanceof SseAdmissionDeniedError) {
+        throw httpError("too many open streams", 429, { code: "sse_connection_limit" });
+      }
+      throw error;
     }
-    sseByUser.set(userId, userCount + 1);
-    sseByIp.set(ip, ipCount + 1);
-    sseGlobal += 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const nextUser = Math.max((sseByUser.get(userId) ?? 1) - 1, 0);
-      const nextIp = Math.max((sseByIp.get(ip) ?? 1) - 1, 0);
-      if (nextUser === 0) sseByUser.delete(userId);
-      else sseByUser.set(userId, nextUser);
-      if (nextIp === 0) sseByIp.delete(ip);
-      else sseByIp.set(ip, nextIp);
-      sseGlobal = Math.max(sseGlobal - 1, 0);
-    };
   };
 
   // ---- Health ----------------------------------------------------------------
@@ -631,7 +624,13 @@ export function buildApiRouter(deps: ApiDeps): Router {
       throw httpError("token lacks required scope: threads", 403, { code: "scope_denied" });
     }
     const { identity } = auth;
-    const releaseSse = admitSse(ctx, auth.userId);
+    const sseHandle = await admitSse(ctx, auth.userId);
+    let released = false;
+    const releaseSse = () => {
+      if (released) return;
+      released = true;
+      void sseHandle.release().catch(() => undefined);
+    };
     let lastSeq = Number(ctx.query.get("sinceSeq") ?? "0");
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -652,6 +651,8 @@ export function buildApiRouter(deps: ApiDeps): Router {
           ctx.res.write(`data: ${JSON.stringify({ seq: row.seq, event: row.payload })}\n\n`);
         }
         ctx.res.write(`: ping\n\n`);
+        // Keep the cluster-wide admission lease alive (finding I).
+        void sseHandle.heartbeat().catch(() => undefined);
       } catch {
         clearInterval(timer);
         releaseSse();
@@ -810,8 +811,10 @@ export function buildApiRouter(deps: ApiDeps): Router {
       });
     }
     const activeOrders = (await services.orchestrator.listOrders(identity.orgId)).filter((order) =>
-      ["requested", "provisioning", "running", "resizing", "stopping", "stopped"].includes(order.state),
+      ["requested", "provisioning", "running", "resizing", "stopping", "stopped", "cancelling"].includes(order.state),
     );
+    // Fast friendly rejection; the ATOMIC quota reservation inside
+    // orderServer (Security Repair 05B §B) is the authority across replicas.
     if (typeof authz.value === "number" && authz.value >= 0 && activeOrders.length >= authz.value) {
       throw httpError("server quota exceeded for current plan", 402, { code: "server_quota_exceeded" });
     }
@@ -831,10 +834,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
         idempotencyKey,
         requestFingerprint,
         sshKeyId: body.sshKeyId,
+        maxServers: typeof authz.value === "number" && authz.value >= 0 ? authz.value : 0,
       });
     } catch (error) {
       if (error instanceof IdempotencyConflictError) {
         throw httpError(error.message, 409, { code: "idempotency_conflict" });
+      }
+      if (error instanceof QuotaExceededError) {
+        throw httpError("server quota exceeded for current plan", 402, { code: "server_quota_exceeded" });
       }
       throw error;
     }
@@ -1016,8 +1023,11 @@ export function buildApiRouter(deps: ApiDeps): Router {
     actor: Awaited<ReturnType<typeof requireAdminCapability>>,
     input: { action: string; resourceType: string; resourceId?: string; targetOrgId?: string; result?: string; correlationId?: string; before?: unknown; after?: unknown },
   ) => {
+    // Security Repair 05B §F: tenant-targeted actions MUST pass the
+    // resolved target org; platform-level actions record NULL — the
+    // admin's own org is never a default stand-in.
     await db().insert(auditEvents).values({
-      orgId: input.targetOrgId ?? actor.orgId,
+      orgId: input.targetOrgId ?? null,
       actorType: `platform_admin:${actor.platformRole ?? "capability"}`,
       actorId: actor.userId,
       action: input.action,
@@ -1029,7 +1039,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
       after: redactAdminPayload({
         actorPlatformRole: actor.platformRole ?? null,
         actorCapability: actor.adminCapability,
-        targetOrgId: input.targetOrgId ?? actor.orgId,
+        targetOrgId: input.targetOrgId ?? null,
         data: input.after,
       }),
     });
@@ -1486,7 +1496,9 @@ export function buildApiRouter(deps: ApiDeps): Router {
       idempotencyKey: `admin:${admin.userId}:${action}:${Date.now()}`,
       nextAttemptAt: new Date(),
     });
-    await appendAdminAudit(admin, { action: `compute.order.${action}`, resourceType: "server_order", resourceId: order.id });
+    // Security Repair 05B §F: the audit records the AFFECTED org — never
+    // the admin's active/home org.
+    await appendAdminAudit(admin, { action: `compute.order.${action}`, resourceType: "server_order", resourceId: order.id, targetOrgId: order.orgId });
     return { ok: true };
   });
 
@@ -1738,7 +1750,9 @@ export function buildApiRouter(deps: ApiDeps): Router {
       idempotencyKey: `admin:${admin.userId}:agent:${ctx.params.agentId}:${action}:${Date.now()}`,
       nextAttemptAt: new Date(),
     });
-    await appendAdminAudit(admin, { action: `runtime.agent.${action}`, resourceType: "agent", resourceId: ctx.params.agentId! });
+    // Security Repair 05B §F: the affected org is the ORDER's org — the
+    // admin's home org must never stand in for it.
+    await appendAdminAudit(admin, { action: `runtime.agent.${action}`, resourceType: "agent", resourceId: ctx.params.agentId!, targetOrgId: order.orgId });
     return { ok: true };
   });
 
@@ -1880,14 +1894,24 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (auth.authKind === "api_token" && !scopeSatisfied(auth.scopes, "notifications")) {
       throw httpError("token lacks required scope: notifications", 403, { code: "scope_denied" });
     }
-    const releaseSse = admitSse(ctx, auth.userId);
+    const sseHandle = await admitSse(ctx, auth.userId);
+    let released = false;
+    const releaseSse = () => {
+      if (released) return;
+      released = true;
+      void sseHandle.release().catch(() => undefined);
+    };
     ctx.res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-store",
       connection: "keep-alive",
     });
     ctx.res.write(`retry: 3000\n\n`);
-    const heartbeat = setInterval(() => ctx.res.write(`: ping\n\n`), 15_000);
+    const heartbeat = setInterval(() => {
+      ctx.res.write(`: ping\n\n`);
+      // Keep the cluster-wide admission lease alive (finding I).
+      void sseHandle.heartbeat().catch(() => undefined);
+    }, 15_000);
     const unsubscribe = services.notifications.onPublished((published) => {
       // Isolation: only the intended recipient receives the frame.
       if (published.audienceType === "user" && published.userId !== auth.userId) return;
@@ -1922,6 +1946,16 @@ export function buildApiRouter(deps: ApiDeps): Router {
       createdBy: admin.userId,
       scheduledAt: undefined,
     });
+    // Security Repair 05B §F: tenant-targeted sends are audited against the
+    // AFFECTED org (when the audience names one) — never the admin's org.
+    await appendAdminAudit(admin, {
+      action: "notifications.send",
+      resourceType: "notification_job",
+      resourceId: job.id,
+      targetOrgId: input.audience.type === "org" ? input.audience.orgId : undefined,
+      correlationId: input.idempotencyKey,
+      after: { audienceType: input.audience.type, title: input.payload.title },
+    });
     // Send-now jobs run through the same durable fan-out runner.
     const result = await services.notifications.runDueJobs(new Date().toISOString());
     void result;
@@ -1935,6 +1969,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
     const { job } = await services.notifications.createJob({
       ...input,
       createdBy: admin.userId,
+    });
+    await appendAdminAudit(admin, {
+      action: "notifications.schedule",
+      resourceType: "notification_job",
+      resourceId: job.id,
+      targetOrgId: input.audience.type === "org" ? input.audience.orgId : undefined,
+      correlationId: input.idempotencyKey,
+      after: { audienceType: input.audience.type, scheduledAt: input.scheduledAt, title: input.payload.title },
     });
     return { jobId: job.id, status: job.status, scheduledAt: job.scheduledAt };
   });

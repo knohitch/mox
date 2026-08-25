@@ -93,9 +93,13 @@ export class NotificationService {
   unreadCount(orgId: string, userId: string) {
     return this.store.unreadCount(orgId, userId);
   }
-  listUnread(orgId: string, userId?: string) {
-    void userId;
-    return this.unreadCount(orgId, "u1");
+  /**
+   * Security Repair 05B §G: the caller's user id is REQUIRED and passed
+   * through to the authoritative ownership-scoped store. The previous
+   * hardcoded test user ("u1") has been eliminated.
+   */
+  listUnread(orgId: string, userId: string) {
+    return this.unreadCount(orgId, userId);
   }
   private async notifyUnread(orgId: string, userId: string): Promise<void> {
     const unread = await this.store.unreadCount(orgId, userId);
@@ -211,20 +215,77 @@ export class NotificationService {
         dedupeKey: `${event.eventId}:${route}:${event.userId ?? event.orgId}`,
         at: new Date().toISOString(),
       };
-      try {
-        const outcome = await transport.send(message);
-        await this.store.recordDispatch({ ...message });
-        if (!outcome.delivered) {
-          // Delivery failure NEVER deletes the durable in-app row.
-          continue;
-        }
-      } catch {
-        await this.store.recordDispatch({ ...message });
-        continue;
-      }
+      await this.dispatchOnce(transport, message);
     }
 
     return { inAppId, duplicate: false };
+  }
+
+  /**
+   * Security Repair 05B §K: outbox dispatch. The durable `sending` record
+   * is written BEFORE the transport call; terminal state (sent/failed)
+   * follows. A crash between them leaves `sending`, which the sweep
+   * surfaces as `uncertain` — Mox never falsely claims exactly-once where
+   * the downstream provider cannot guarantee it.
+   */
+  private async dispatchOnce(transport: RouteTransport, message: DispatchedMessage): Promise<void> {
+    await this.store.recordDispatchPrepared(message);
+    try {
+      const outcome = await transport.send(message);
+      if (outcome.delivered) {
+        await this.store.markDispatchSent(message);
+      } else if (transport.idempotent === true) {
+        await this.store.markDispatchPending(message);
+      } else {
+        await this.store.markDispatchFailed(message, outcome.error ?? "transport reported undelivered");
+      }
+    } catch (error) {
+      if (transport.idempotent === true) {
+        await this.store.markDispatchPending(message);
+      } else {
+        await this.store.markDispatchFailed(message, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
+  /**
+   * Security Repair 05B §K: retry driver. Only transports that GUARANTEE
+   * provider-side idempotency (dedupe key honored downstream) are
+   * auto-retried; others stay visible as `failed` (at-least-once semantics
+   * with explicit uncertainty, never silent duplicates).
+   */
+  async runDispatchRetries(now?: string, limits = { maxRetries: 20 }): Promise<{ retried: number; uncertain: number; delivered: number }> {
+    const at = now ?? new Date().toISOString();
+    const { uncertain } = await this.store.sweepDispatchOutbox(at, 60_000);
+    let retried = 0;
+    let delivered = 0;
+    const pending = await this.store.listRetriableDispatches(at, limits.maxRetries);
+    for (const message of pending) {
+      const transport = this.transports.get(message.route);
+      if (!transport || transport.idempotent !== true) {
+        await this.store.markDispatchFailed(message, "no idempotent transport registered for route");
+        continue;
+      }
+      if ((message.attempts ?? 0) >= 3) {
+        await this.store.markDispatchFailed(message, "dispatch retries exhausted");
+        continue;
+      }
+      retried += 1;
+      await this.store.recordDispatchPrepared(message);
+      try {
+        const outcome = await transport.send(message);
+        if (outcome.delivered) {
+          await this.store.markDispatchSent(message);
+          delivered += 1;
+        } else {
+          await this.store.markDispatchPending(message);
+        }
+      } catch (error) {
+        await this.store.markDispatchPending(message);
+        void error;
+      }
+    }
+    return { retried, uncertain, delivered };
   }
 
   private async publishAfterPersist(n?: InAppNotification): Promise<void> {
@@ -312,15 +373,21 @@ export class NotificationService {
 
     for (const due of await this.store.claimDueJobs(at, this.workerId, this.jobLeaseMs, limits.maxJobs)) {
       if (processed >= limits.maxJobs) break;
+      const claimedVersion = due.claimVersion ?? 0;
       try {
         delivered += await this.fanOut(due);
         processed += 1;
+        // Security Repair 05B §A: the TERMINAL writeback is fenced — a
+        // stale finalizer whose lease was stolen updates zero rows and
+        // cannot regress a reclaimer's job state. Claim fields stay on the
+        // object until the fence matched; the store releases them.
+        due.status = "completed";
+        due.completedAt = new Date().toISOString();
+        await this.store.updateJobFenced(due, claimedVersion);
       } catch (error) {
         due.status = "failed";
         due.error = error instanceof Error ? error.message : String(error);
-        due.claimOwner = undefined;
-        due.claimExpiresAt = undefined;
-        await this.store.updateJob(due);
+        await this.store.updateJobFenced(due, claimedVersion);
       }
     }
     return { processed, delivered };
@@ -328,10 +395,6 @@ export class NotificationService {
 
   private async fanOut(job: NotificationJobRecord): Promise<number> {
     if (!this.resolveAudience) throw new Error("audience resolver not configured");
-    const startedAt = job.startedAt ?? new Date().toISOString();
-    job.status = "running";
-    job.startedAt = startedAt;
-    await this.store.updateJob(job);
 
     let recipients = await this.resolveAudience(job.audiencePayload as unknown as AdminAudience);
     // Org-audience jobs are scoped to that workspace's members only.
@@ -373,11 +436,6 @@ export class NotificationService {
       await this.store.updateJob(job); // durable cursor after EVERY recipient
     }
 
-    job.status = "completed";
-    job.completedAt = new Date().toISOString();
-    job.claimOwner = undefined;
-    job.claimExpiresAt = undefined;
-    await this.store.updateJob(job);
     return delivered;
   }
 }

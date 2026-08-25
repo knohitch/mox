@@ -42,8 +42,27 @@ export interface OrchestratorStore {
   upsertOperation(op: ServerOperation): Promise<void>;
   getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined>;
   updateOperation(op: ServerOperation): Promise<void>;
+  /**
+   * Security Repair 05B §A: fenced post-claim writeback. Updates only when
+   * id + state='running' + lease_owner + lease_version all match the claim.
+   * Returns false when the worker lost authority — it must stop without
+   * touching order state or emitting business events.
+   */
+  updateOperationFenced(op: ServerOperation, expectedLeaseVersion: number): Promise<boolean>;
   dueOperations(nowIso: string): Promise<ServerOperation[]>;
   claimDueOperations(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<ServerOperation[]>;
+
+  /**
+   * Security Repair 05B §B: quota check + order reservation as ONE
+   * serialized PostgreSQL decision (org allocation row lock). Different
+   * idempotency keys can never both observe spare capacity; same-key
+   * replays return the original order.
+   */
+  createOrderReserved(input: {
+    order: ServerOrder;
+    operation: ServerOperation;
+    maxServers: number;
+  }): Promise<{ status: "created" | "idempotent" | "quota_exceeded"; order?: ServerOrder }>;
 
   // Nodes
   upsertNode(node: MoxNodeRecord): Promise<MoxNodeRecord>;
@@ -176,6 +195,52 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
     this.operations.set(op.id, op);
   }
 
+  /** Fencing mirror: synchronous check-and-set is atomic in single-threaded JS. */
+  async updateOperationFenced(op: ServerOperation, expectedLeaseVersion: number): Promise<boolean> {
+    const current = this.operations.get(op.id);
+    if (!current) return false;
+    if (current.state !== "running") return false;
+    if (current.leaseOwner !== op.leaseOwner) return false;
+    if ((current.leaseVersion ?? 0) !== expectedLeaseVersion) return false;
+    await this.updateOperation({ ...op, leaseOwner: undefined, leaseExpiresAt: undefined });
+    return true;
+  }
+
+  async createOrderReserved(input: {
+    order: ServerOrder;
+    operation: ServerOperation;
+    maxServers: number;
+  }): Promise<{ status: "created" | "idempotent" | "quota_exceeded"; order?: ServerOrder }> {
+    const { order, operation } = input;
+    // In-memory tier is single-threaded: check-then-insert is atomic here
+    // and mirrors the row-locked PostgreSQL transaction.
+    const key = `${order.orgId}:${order.idempotencyKey}`;
+    if (this.idemIndex.has(key)) {
+      const existingId = this.idemIndex.get(key)!;
+      const existing = this.orders.get(existingId);
+      if (
+        existing &&
+        order.requestFingerprint &&
+        existing.requestFingerprint &&
+        existing.requestFingerprint !== order.requestFingerprint
+      ) {
+        throw new Error("idempotency key was already used for a different server order request");
+      }
+      return { status: "idempotent", order: existing ? { ...existing } : undefined };
+    }
+    const active = [...this.orders.values()].filter((o) =>
+      ["requested", "provisioning", "running", "resizing", "stopping", "stopped", "cancelling"].includes(o.state) &&
+      o.orgId === order.orgId,
+    );
+    if (active.length >= input.maxServers) return { status: "quota_exceeded" };
+    order.state = "provisioning";
+    this.orders.set(order.id, order);
+    this.idemIndex.set(key, order.id);
+    this.operations.set(operation.id, operation);
+    this.opIndex.add(`${operation.orderId}:${operation.kind}:${operation.idempotencyKey}`);
+    return { status: "created", order: { ...order } };
+  }
+
   async dueOperations(nowIso: string): Promise<ServerOperation[]> {
     const now = Date.parse(nowIso);
     return [...this.operations.values()]
@@ -209,6 +274,7 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
       op.state = "running";
       op.leaseOwner = workerId;
       op.leaseExpiresAt = leaseExpiresAt;
+      op.leaseVersion = (op.leaseVersion ?? 0) + 1;
       op.updatedAt = nowIso;
       this.operations.set(op.id, { ...op });
       claimed.push({ ...op });

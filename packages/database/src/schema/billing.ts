@@ -248,6 +248,8 @@ export const subscriptions = pgTable(
     providerPlanRef: text("provider_plan_ref"),
     renewalClaimOwner: text("renewal_claim_owner"),
     renewalClaimExpiresAt: timestamp("renewal_claim_expires_at", { withTimezone: true }),
+    /** Security Repair 05B §A: fencing token set by every renewal claim. */
+    renewalClaimVersion: bigint("renewal_claim_version", { mode: "bigint" }).notNull().default(0n),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
     suspendedAt: timestamp("suspended_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),

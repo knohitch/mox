@@ -212,3 +212,127 @@ describe("notification service", () => {
     expect(log.map((m) => m.route)).toEqual(["webhook"]);
   });
 });
+
+describe("Security Repair 05B §G — unread ownership", () => {
+  it("listUnread(org, userA) never reads user B's unread state", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store);
+    // Two members of the SAME org.
+    await store.insert({
+      id: "n-a",
+      orgId: "org-g",
+      userId: "user-a",
+      eventType: "server.provisioned",
+      severity: "info",
+      title: "A only",
+      body: "A only",
+      audienceType: "user",
+      category: "servers",
+      deliveryState: "ready",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    await store.insert({
+      id: "n-b",
+      orgId: "org-g",
+      userId: "user-b",
+      eventType: "server.provisioned",
+      severity: "info",
+      title: "B only",
+      body: "B only",
+      audienceType: "user",
+      category: "servers",
+      deliveryState: "ready",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await svc.listUnread("org-g", "user-a")).toBe(1); // A's own row
+    expect(await svc.unreadCount("org-g", "user-b")).toBe(1); // B's own row
+    // The old hardcoded "u1" helper would have returned the wrong count.
+    expect(await svc.listUnread("org-g", "user-b")).toBe(1);
+  });
+});
+
+describe("Security Repair 05B §K — dispatch outbox semantics", () => {
+  it("durable 'sending' record precedes the transport call; success marks sent", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store);
+    const order: string[] = [];
+    svc.registerTransport({
+      kind: "email",
+      idempotent: true,
+      async send() {
+        order.push("send");
+        const prepared = await store.listDispatches("org-k1");
+        order.push(prepared[0]?.deliveryState ?? "missing");
+        return { delivered: true };
+      },
+    });
+    await svc.consume(event({ orgId: "org-k1", severity: "critical", type: "provider.incident" }));
+    expect(order).toEqual(["send", "sending"]);
+    const rows = await store.listDispatches("org-k1");
+    expect(rows[0]?.deliveryState).toBe("sent");
+  });
+
+  it("crash window: a stale 'sending' row becomes 'uncertain' — never silently resent", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store);
+    // Simulate a crash between prepared and terminal record.
+    await store.recordDispatchPrepared({
+      id: "msg-uncertain",
+      orgId: "org-k2",
+      eventType: "provider.incident",
+      route: "email",
+      recipient: "someone",
+      title: "t",
+      body: "b",
+      at: new Date(Date.now() - 120_000).toISOString(),
+    });
+    const { uncertain } = await store.sweepDispatchOutbox(new Date().toISOString(), 60_000);
+    expect(uncertain).toBe(1);
+    const rows = await store.listDispatches("org-k2");
+    expect(rows[0]?.deliveryState).toBe("uncertain");
+    expect(rows[0]?.lastError).toMatch(/unknown/);
+    // Not listed for retry → no silent duplicate send.
+    expect(await store.listRetriableDispatches(new Date().toISOString(), 10)).toHaveLength(0);
+  });
+
+  it("idempotent transports retry failures; non-idempotent failures stay visible at-least-once", async () => {
+    const store = new InMemoryNotificationStore();
+    const svc = new NotificationService(store);
+    let attempts = 0;
+    const email: RouteTransport = {
+      kind: "email",
+      idempotent: true,
+      async send() {
+        attempts += 1;
+        if (attempts === 1) return { delivered: false, error: "boom" };
+        return { delivered: true };
+      },
+    };
+    const push: RouteTransport = {
+      kind: "web_push",
+      async send() {
+        return { delivered: false, error: "no provider" };
+      },
+    };
+    svc.registerTransport(email);
+    svc.registerTransport(push);
+    await svc.setPreferences({ orgId: "org-k3", routes: { "provider.incident": ["in_app", "email", "web_push"] }, mutedEventTypes: [] });
+
+    await svc.consume(event({ orgId: "org-k3", severity: "critical", type: "provider.incident" }));
+    // Email failed once → pending (retry eligible). Push (non-idempotent)
+    // failed → final failed state, never auto-resent.
+    const first = await store.listDispatches("org-k3");
+    expect(first.find((m) => m.route === "email")?.deliveryState).toBe("pending");
+    expect(first.find((m) => m.route === "web_push")?.deliveryState).toBe("failed");
+
+    const retried = await svc.runDispatchRetries();
+    expect(retried.retried).toBe(1);
+    expect(retried.delivered).toBe(1);
+    const after = await store.listDispatches("org-k3");
+    expect(after.find((m) => m.route === "email")?.deliveryState).toBe("sent");
+    expect(after.find((m) => m.route === "web_push")?.deliveryState).toBe("failed");
+  });
+});

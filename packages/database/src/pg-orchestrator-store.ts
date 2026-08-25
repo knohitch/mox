@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type {
   ComputeClass,
   MoxNodeRecord,
@@ -10,11 +10,13 @@ import type {
   ServerOrder,
   SshKeyRecord,
 } from "@mox/compute-orchestrator";
+import { IdempotencyConflictError } from "@mox/compute-orchestrator";
 import type { MoxDb } from "./client.js";
 import {
   computeClasses,
   moxNodes,
   nodeEnrollmentTokens,
+  orgComputeAllocations,
   providerAccounts,
   serverOperations,
   serverOrders,
@@ -229,6 +231,82 @@ export class PgOrchestratorStore implements OrchestratorStore {
       .where(eq(serverOperations.id, op.id));
   }
 
+  /** Security Repair 05B §A: compare-and-set fencing on post-claim writebacks.
+   *  The claim identity (owner + version) is matched from the ARGUMENT; the
+   *  SET payload always releases the lease fields. */
+  async updateOperationFenced(op: ServerOperation, expectedLeaseVersion: number): Promise<boolean> {
+    const ownerMatch = op.leaseOwner
+      ? eq(serverOperations.leaseOwner, op.leaseOwner)
+      : isNull(serverOperations.leaseOwner);
+    const updated = await this.db
+      .update(serverOperations)
+      .set({ ...toOperationRow({ ...op, leaseOwner: undefined, leaseExpiresAt: undefined }), updatedAt: new Date() })
+      .where(
+        and(
+          eq(serverOperations.id, op.id),
+          eq(serverOperations.state, "running"),
+          ownerMatch,
+          eq(serverOperations.leaseVersion, BigInt(expectedLeaseVersion)),
+        ),
+      )
+      .returning({ id: serverOperations.id });
+    return updated.length > 0;
+  }
+
+  /**
+   * Security Repair 05B §B: quota check + order reservation as ONE
+   * serialized transaction. The per-org allocation row is the PostgreSQL
+   * lock that serializes concurrent order creation across replicas; the
+   * capacity count derives from actual non-terminal orders, so cancellation
+   * /error transitions release capacity automatically (documented policy).
+   */
+  async createOrderReserved(input: {
+    order: ServerOrder;
+    operation: ServerOperation;
+    maxServers: number;
+  }): Promise<{ status: "created" | "idempotent" | "quota_exceeded"; order?: ServerOrder }> {
+    const { order, operation } = input;
+    return this.db.transaction(async (tx) => {
+      // Serialization point: every order creation for this org queues on
+      // this row lock, so the check+insert below is race-free.
+      await tx.insert(orgComputeAllocations).values({ orgId: order.orgId }).onConflictDoNothing();
+      await tx.execute(sql`SELECT 1 FROM org_compute_allocations WHERE org_id = ${order.orgId} FOR UPDATE`);
+
+      const existing = await tx
+        .select()
+        .from(serverOrders)
+        .where(and(eq(serverOrders.orgId, order.orgId), eq(serverOrders.idempotencyKey, order.idempotencyKey)))
+        .limit(1);
+      if (existing[0]) {
+        if (
+          order.requestFingerprint &&
+          existing[0].requestFingerprint &&
+          existing[0].requestFingerprint !== order.requestFingerprint
+        ) {
+          throw new IdempotencyConflictError("idempotency key was already used for a different server order request");
+        }
+        return { status: "idempotent", order: toOrder(existing[0]) };
+      }
+
+      const counted = await tx.execute(sql`
+        SELECT count(*)::int AS n
+        FROM server_orders
+        WHERE org_id = ${order.orgId}
+          AND state IN ('requested','provisioning','running','resizing','stopping','stopped','cancelling')
+      `);
+      const active = Number((counted as { rows?: Array<{ n?: number | string }> }).rows?.[0]?.n ?? 0);
+      if (active >= input.maxServers) return { status: "quota_exceeded" };
+
+      // Order + its provision operation commit together: never an
+      // over-quota order that needs cleanup, and never an order without
+      // its first durable operation.
+      const placed: ServerOrder = { ...order, state: "provisioning" };
+      await tx.insert(serverOrders).values({ ...toOrderRow(placed), state: "provisioning" });
+      await tx.insert(serverOperations).values(toOperationRow(operation));
+      return { status: "created", order: placed };
+    });
+  }
+
   async dueOperations(nowIso: string): Promise<ServerOperation[]> {
     const now = new Date(nowIso);
     const rows = await this.db
@@ -266,6 +344,7 @@ export class PgOrchestratorStore implements OrchestratorStore {
       SET state = 'running',
           lease_owner = ${workerId},
           lease_expires_at = ${leaseUntil},
+          lease_version = coalesce(op.lease_version, 0) + 1,
           updated_at = ${now}
       FROM claimable
       WHERE op.id = claimable.id
@@ -487,6 +566,7 @@ function toOperationRow(op: ServerOperation) {
     nextAttemptAt: new Date(op.nextAttemptAt),
     leaseOwner: op.leaseOwner ?? null,
     leaseExpiresAt: op.leaseExpiresAt ? new Date(op.leaseExpiresAt) : null,
+    leaseVersion: BigInt(op.leaseVersion ?? 0),
     lastError: op.lastError ?? null,
   };
 }
@@ -504,6 +584,7 @@ function toOperation(row: OperationRow): ServerOperation {
     nextAttemptAt: row.nextAttemptAt.toISOString(),
     leaseOwner: row.leaseOwner ?? undefined,
     leaseExpiresAt: iso(row.leaseExpiresAt),
+    leaseVersion: Number(row.leaseVersion ?? 0),
     lastError: row.lastError ?? undefined,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -526,6 +607,7 @@ function toOperationFromSqlRow(row: Record<string, unknown>): ServerOperation {
     nextAttemptAt: dateIso(row.next_attempt_at),
     leaseOwner: row.lease_owner ? String(row.lease_owner) : undefined,
     leaseExpiresAt: maybeDateIso(row.lease_expires_at),
+    leaseVersion: Number(row.lease_version ?? 0),
     lastError: row.last_error ? String(row.last_error) : undefined,
     createdAt: dateIso(row.created_at),
     updatedAt: dateIso(row.updated_at),

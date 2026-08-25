@@ -48,11 +48,32 @@ export interface NotificationStore {
   recordDispatch(message: DispatchedMessage): Promise<void>;
   listDispatches(orgId: string): Promise<DispatchedMessage[]>;
 
+  // ---- Security Repair 05B §K: dispatch outbox ----
+  /** Durable 'sending' record BEFORE the transport call (dedupe-guarded). */
+  recordDispatchPrepared(message: DispatchedMessage): Promise<void>;
+  markDispatchSent(message: DispatchedMessage): Promise<void>;
+  markDispatchFailed(message: DispatchedMessage, error: string): Promise<void>;
+  /** Retry-eligible failure for idempotent transports. */
+  markDispatchPending(message: DispatchedMessage): Promise<void>;
+  markDispatchUncertain(message: DispatchedMessage): Promise<void>;
+  /**
+   * Sweep: stale `sending` rows → `uncertain` (crash window); `pending`
+   * rows whose retry time arrived are listed for the retry driver.
+   */
+  sweepDispatchOutbox(nowIso: string, uncertainAfterMs: number): Promise<{ uncertain: number }>;
+  listRetriableDispatches(nowIso: string, limit: number): Promise<DispatchedMessage[]>;
+
   // ---- Admin jobs (durable, idempotent) ----
   insertJob(job: NotificationJobRecord): Promise<{ created: boolean; existing?: NotificationJobRecord }>;
   getJob(id: string): Promise<NotificationJobRecord | undefined>;
   getJobByIdempotencyKey(createdBy: string, key: string): Promise<NotificationJobRecord | undefined>;
   updateJob(job: NotificationJobRecord): Promise<void>;
+  /**
+   * Security Repair 05B §A: fenced job writeback — applies only while the
+   * claim (owner + version) is still held. Stale finalizers update zero
+   * rows and must stop.
+   */
+  updateJobFenced(job: NotificationJobRecord, expectedClaimVersion: number): Promise<boolean>;
   /** Due scheduled jobs for the runner; running jobs excluded (claim upstream). */
   dueJobs(nowIso: string): Promise<NotificationJobRecord[]>;
   claimDueJobs(nowIso: string, workerId: string, leaseMs: number, limit: number): Promise<NotificationJobRecord[]>;
@@ -187,6 +208,62 @@ export class InMemoryNotificationStore implements NotificationStore {
     return [...(this.dispatches.get(orgId) ?? [])];
   }
 
+  // ---- Security Repair 05B §K: dispatch outbox ---------------------------------
+
+  private putDispatch(message: DispatchedMessage): void {
+    const list = this.dispatches.get(message.orgId) ?? [];
+    const idx = list.findIndex((existing) => message.dedupeKey && existing.dedupeKey === message.dedupeKey);
+    if (idx >= 0) list[idx] = { ...list[idx]!, ...message };
+    else list.push(message);
+    this.dispatches.set(message.orgId, list);
+  }
+
+  async recordDispatchPrepared(message: DispatchedMessage): Promise<void> {
+    this.putDispatch({ ...message, deliveryState: "sending", attempts: (message.attempts ?? 0) + 1, lastError: undefined });
+  }
+
+  async markDispatchSent(message: DispatchedMessage): Promise<void> {
+    this.putDispatch({ ...message, deliveryState: "sent" });
+  }
+
+  async markDispatchFailed(message: DispatchedMessage, error: string): Promise<void> {
+    this.putDispatch({ ...message, deliveryState: "failed", lastError: error });
+  }
+
+  async markDispatchPending(message: DispatchedMessage): Promise<void> {
+    this.putDispatch({ ...message, deliveryState: "pending" });
+  }
+
+  async markDispatchUncertain(message: DispatchedMessage): Promise<void> {
+    this.putDispatch({ ...message, deliveryState: "uncertain", lastError: "transport outcome unknown (crash before durable terminal record)" });
+  }
+
+  async sweepDispatchOutbox(nowIso: string, uncertainAfterMs: number): Promise<{ uncertain: number }> {
+    let uncertain = 0;
+    const cutoff = new Date(Date.parse(nowIso) - uncertainAfterMs).toISOString();
+    for (const list of this.dispatches.values()) {
+      for (const message of list) {
+        if (message.deliveryState === "sending" && message.at <= cutoff) {
+          message.deliveryState = "uncertain";
+          message.lastError = "transport outcome unknown (crash before durable terminal record)";
+          uncertain += 1;
+        }
+      }
+    }
+    return { uncertain };
+  }
+
+  async listRetriableDispatches(nowIso: string, limit: number): Promise<DispatchedMessage[]> {
+    void nowIso;
+    const out: DispatchedMessage[] = [];
+    for (const list of this.dispatches.values()) {
+      for (const message of list) {
+        if (message.deliveryState === "pending" && out.length < limit) out.push(message);
+      }
+    }
+    return out;
+  }
+
   async insertJob(job: NotificationJobRecord): Promise<{ created: boolean; existing?: NotificationJobRecord }> {
     const existing = this.jobs.get(`${job.createdBy}:${job.idempotencyKey}`);
     if (existing) return { created: false, existing: { ...existing } };
@@ -206,6 +283,16 @@ export class InMemoryNotificationStore implements NotificationStore {
 
   async updateJob(job: NotificationJobRecord): Promise<void> {
     this.jobs.set(`${job.createdBy}:${job.idempotencyKey}`, { ...job, updatedAt: new Date().toISOString() });
+  }
+
+  /** Fencing mirror: check-and-set is atomic in single-threaded JS. */
+  async updateJobFenced(job: NotificationJobRecord, expectedClaimVersion: number): Promise<boolean> {
+    const current = this.jobs.get(`${job.createdBy}:${job.idempotencyKey}`);
+    if (!current) return false;
+    if (current.claimOwner !== job.claimOwner) return false;
+    if ((current.claimVersion ?? 0) !== expectedClaimVersion) return false;
+    await this.updateJob({ ...job, claimOwner: undefined, claimExpiresAt: undefined });
+    return true;
   }
 
   async dueJobs(nowIso: string): Promise<NotificationJobRecord[]> {
@@ -239,6 +326,7 @@ export class InMemoryNotificationStore implements NotificationStore {
       job.startedAt = job.startedAt ?? nowIso;
       job.claimOwner = workerId;
       job.claimExpiresAt = leaseUntil;
+      job.claimVersion = (job.claimVersion ?? 0) + 1;
       job.attempts += 1;
       job.updatedAt = nowIso;
       this.jobs.set(`${job.createdBy}:${job.idempotencyKey}`, { ...job });
@@ -251,6 +339,12 @@ export class InMemoryNotificationStore implements NotificationStore {
 /** Outbound transport seam for every non-in-app route. */
 export interface RouteTransport {
   readonly kind: "email" | "web_push" | "sms" | "whatsapp" | "webhook";
+  /**
+   * Security Repair 05B §K: true ONLY when the downstream provider honors
+   * a caller-supplied idempotency/dedupe key, making retries safe. The
+   * dispatch message carries `dedupeKey` for that purpose.
+   */
+  readonly idempotent?: boolean;
   send(message: DispatchedMessage): Promise<{ delivered: boolean; error?: string }>;
 }
 

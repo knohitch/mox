@@ -10,6 +10,8 @@ export class ConfigError extends Error {}
 
 export type PlatformAdminRole = "superadmin" | "billing_admin" | "ops_admin" | "support";
 
+import type { SseLimits } from "./sse-admission.js";
+
 export type PlatformAdminCapability =
   | "admin.read"
   | "admin.support.write"
@@ -78,6 +80,11 @@ export interface ControlPlaneConfig {
   publicUrl: string;
   /** Redis is optional at the foundation stage; queues/cache only. */
   redisUrl?: string;
+  /**
+   * Security Repair 05B §I: cluster-wide SSE admission caps (per-user,
+   * per-IP, global, lease TTL). Optional; defaults in sse-admission.ts.
+   */
+  sseLimits?: SseLimits;
   /**
    * Server-side ONLY one-time platform-setup credential (Prompt 00B §A).
    * It may provision the designated owner exactly once and is never sent

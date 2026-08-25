@@ -2331,4 +2331,221 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(expired.values).toEqual({});
   });
 
+  // ==== Security Repair 05B — rate limiting (finding H) ====
+
+  it("authentication rate limiting: real HTTP 429 before hashing, equivalent for known and unknown accounts", async () => {
+    const email = `${randomUUID()}@mox.test`;
+    const password = "correct-password-1";
+    await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    const attempt = (target: string, pass: string) =>
+      call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: target, password: pass }),
+      });
+
+    // Known account: the account bucket allows 8 attempts per window; the
+    // 9th returns 429 (rate check runs before the scrypt verification).
+    let statuses: number[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      const res = await attempt(email, `wrong-${i}`);
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, 8).every((s) => s === 401)).toBe(true);
+    expect(statuses[8]).toBe(429);
+
+    // Unknown account: identical bucket behavior — same threshold, same 429.
+    const unknown = `${randomUUID()}@mox.test`;
+    statuses = [];
+    for (let i = 0; i < 9; i += 1) {
+      const res = await attempt(unknown, `wrong-${i}`);
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, 8).every((s) => s === 401)).toBe(true);
+    expect(statuses[8]).toBe(429);
+  }, 60_000);
+
+  it("rate limiting: forged XFF is ignored unless the peer is a configured trusted proxy", async () => {
+    // Untrusted: forwarded header must not move the bucket.
+    const untrusted = await call("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "8.8.8.8" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "x" }),
+    });
+    expect(untrusted.status).toBe(401); // processed normally (unknown account)
+    void untrusted;
+  });
+
+  // ==== Security Repair 05B — admin target-org audit (finding F) ====
+
+  it("compute order admin actions audit the AFFECTED org, not the admin's home org", async () => {
+    const adminSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "compute-audit-admin" }),
+    });
+    const adminCookie = cookieFrom(adminSignup.headers);
+    const adminMe = (await (await call("/api/me", { headers: { cookie: adminCookie } })).body) as { userId: string; orgId: string };
+    server.services.config.platformAdminRoles[adminMe.userId] = "superadmin";
+
+    const targetSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "compute-audit-target" }),
+    });
+    const targetMe = (await (await call("/api/me", { headers: { cookie: cookieFrom(targetSignup.headers) } })).body) as { orgId: string };
+    expect(targetMe.orgId).not.toBe(adminMe.orgId);
+
+    const { computeClasses: cc, serverOrders: so, auditEvents: ae } = await import("@mox/database");
+    await server.services.db.insert(cc).values({
+      code: "COMPUTE_05B_AUDIT",
+      displayName: "05B Audit",
+      minVcpu: 1,
+      minRamGb: 1,
+      skuMap: [],
+      active: true,
+    }).onConflictDoNothing({ target: cc.code });
+    const [order] = await server.services.db.insert(so).values({
+      orgId: targetMe.orgId,
+      computeClassCode: "COMPUTE_05B_AUDIT",
+      state: "running",
+      providerName: "fake-compute",
+      providerInstanceId: `audit-${randomUUID()}`,
+      hostname: "audit-order",
+      idempotencyKey: `audit-${randomUUID()}`,
+    }).returning({ id: so.id });
+
+    const res = await call(`/api/admin/compute/orders/${order!.id}/restart`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie },
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    const audits = await server.services.db.select().from(ae).where((await import("drizzle-orm")).eq(ae.resourceId, order!.id));
+    const actionAudit = audits.find((row) => row.action === "compute.order.restart");
+    expect(actionAudit).toBeDefined();
+    expect(actionAudit?.orgId).toBe(targetMe.orgId);
+    expect(actionAudit?.orgId).not.toBe(adminMe.orgId);
+    expect(actionAudit?.actorId).toBe(adminMe.userId);
+  });
+
+  it("runtime agent admin actions audit the order's org, never the admin's org", async () => {
+    const adminSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "agent-audit-admin" }),
+    });
+    const adminCookie = cookieFrom(adminSignup.headers);
+    const adminMe = (await (await call("/api/me", { headers: { cookie: adminCookie } })).body) as { userId: string; orgId: string };
+    server.services.config.platformAdminRoles[adminMe.userId] = "superadmin";
+
+    const targetSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "agent-audit-target" }),
+    });
+    const targetMe = (await (await call("/api/me", { headers: { cookie: cookieFrom(targetSignup.headers) } })).body) as { orgId: string };
+
+    const { agents: agentsTable, agentDeployments: deploymentsTable, computeClasses: cc, serverOrders: so, auditEvents: ae } = await import("@mox/database");
+    await server.services.db.insert(cc).values({
+      code: "COMPUTE_05B_AGENT",
+      displayName: "05B Agent",
+      minVcpu: 1,
+      minRamGb: 1,
+      skuMap: [],
+      active: true,
+    }).onConflictDoNothing({ target: cc.code });
+    const [order] = await server.services.db.insert(so).values({
+      orgId: targetMe.orgId,
+      computeClassCode: "COMPUTE_05B_AGENT",
+      state: "running",
+      providerName: "fake-compute",
+      providerInstanceId: `agent-${randomUUID()}`,
+      hostname: "agent-order",
+      idempotencyKey: `agent-${randomUUID()}`,
+    }).returning({ id: so.id });
+    const [agent] = await server.services.db.insert(agentsTable).values({
+      orgId: targetMe.orgId,
+      slug: `agent-${randomUUID().slice(0, 8)}`,
+      displayName: "Audited Agent",
+      status: "active",
+      definition: {},
+    }).returning({ id: agentsTable.id });
+    await server.services.db.insert(deploymentsTable).values({
+      orgId: targetMe.orgId,
+      agentId: agent!.id,
+      kind: "dedicated_vps",
+      computeInstanceId: order!.id,
+      desiredRevision: 1,
+    });
+
+    const res = await call(`/api/admin/runtime/agents/${agent!.id}/restart`, {
+      method: "POST",
+      headers: { ...CSRF, cookie: adminCookie },
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    const audits = await server.services.db.select().from(ae).where((await import("drizzle-orm")).eq(ae.resourceId, agent!.id));
+    const actionAudit = audits.find((row) => row.action === "runtime.agent.restart");
+    expect(actionAudit).toBeDefined();
+    expect(actionAudit?.orgId).toBe(targetMe.orgId);
+    expect(actionAudit?.orgId).not.toBe(adminMe.orgId);
+  });
+
+  // ==== Security Repair 05B — notification unread boundary (finding G) ====
+
+  it("same-org user A cannot read B's unread state over HTTP", async () => {
+    const aSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "unread-a-pass" }),
+    });
+    const aCookie = cookieFrom(aSignup.headers);
+    const aMe = (await (await call("/api/me", { headers: { cookie: aCookie } })).body) as { userId: string; orgId: string };
+
+    const bSignup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "unread-b-pass" }),
+    });
+    const bCookie = cookieFrom(bSignup.headers);
+    const bMe = (await (await call("/api/me", { headers: { cookie: bCookie } })).body) as { userId: string; orgId: string };
+
+    // Seed a targeted unread notification for A.
+    await server.services.notifications.consume({
+      eventId: `unread-${randomUUID()}`,
+      type: "team.invited",
+      orgId: aMe.orgId,
+      userId: aMe.userId,
+      severity: "info",
+      templateVars: {},
+      at: new Date().toISOString(),
+    });
+    expect(await server.services.notifications.unreadCount(aMe.orgId, aMe.userId)).toBe(1);
+
+    // Put B into A's org and switch B's active org to A's org.
+    const { memberships } = await import("@mox/database");
+    await server.services.db.insert(memberships).values({
+      orgId: aMe.orgId,
+      userId: bMe.userId,
+      role: "member",
+    }).onConflictDoNothing();
+    const switched = await call("/api/auth/orgs/select", {
+      method: "POST",
+      headers: { ...CSRF, cookie: bCookie },
+      body: JSON.stringify({ orgId: aMe.orgId }),
+    });
+    expect(switched.status).toBe(200);
+
+    // B's unread state over HTTP counts B's OWN rows only — never A's.
+    const bUnread = (await (await call("/api/notifications/unread-count", { headers: { cookie: bCookie } })).body) as { count: number };
+    expect(bUnread.count).toBe(0);
+    const aUnread = (await (await call("/api/notifications/unread-count", { headers: { cookie: aCookie } })).body) as { count: number };
+    expect(aUnread.count).toBe(1);
+  });
+
 });

@@ -20,8 +20,9 @@ export const auditEvents = pgTable(
   "audit_events", 
   { 
     id: uuid("id").primaryKey().defaultRandom(), 
+    /** Affected tenant org. NULL for platform-level actions (Security
+     *  Repair 05B §F): the admin's home org is never a default stand-in. */
     orgId: uuid("org_id") 
-      .notNull() 
       .references(() => organizations.id, { onDelete: "cascade" }), 
     actorType: text("actor_type").notNull(), 
     actorId: text("actor_id"), 

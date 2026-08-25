@@ -169,18 +169,7 @@ export class PgNotificationStore implements NotificationStore {
   }
 
   async recordDispatch(message: DispatchedMessage): Promise<void> {
-    const values = {
-      id: message.id,
-      orgId: message.orgId,
-      userId: message.userId ?? null,
-      eventType: message.eventType,
-      route: message.route,
-      recipient: message.recipient,
-      title: message.title,
-      body: message.body,
-      dedupeKey: message.dedupeKey ?? null,
-      at: new Date(message.at),
-    };
+    const values = toDispatchRow(message);
     const insert = this.db.insert(dispatchedMessages).values(values);
     if (message.dedupeKey) {
       await insert.onConflictDoNothing({ target: [dispatchedMessages.orgId, dispatchedMessages.dedupeKey] });
@@ -189,24 +178,76 @@ export class PgNotificationStore implements NotificationStore {
     await insert;
   }
 
+  // ---- Security Repair 05B §K: dispatch outbox -----------------------------------
+
+  /** Durable 'sending' record BEFORE the transport call (dedupe-guarded). */
+  async recordDispatchPrepared(message: DispatchedMessage): Promise<void> {
+    const values = {
+      ...toDispatchRow({ ...message, deliveryState: "sending", attempts: (message.attempts ?? 0) + 1 }),
+      updatedAt: new Date(),
+    };
+    await this.db
+      .insert(dispatchedMessages)
+      .values(values)
+      .onConflictDoNothing({ target: [dispatchedMessages.orgId, dispatchedMessages.dedupeKey] });
+  }
+
+  async markDispatchSent(message: DispatchedMessage): Promise<void> {
+    await this.updateDispatchState(message, "sent", undefined);
+  }
+
+  async markDispatchFailed(message: DispatchedMessage, error: string): Promise<void> {
+    await this.updateDispatchState(message, "failed", error);
+  }
+
+  async markDispatchPending(message: DispatchedMessage): Promise<void> {
+    await this.updateDispatchState(message, "pending", message.lastError);
+  }
+
+  async markDispatchUncertain(message: DispatchedMessage): Promise<void> {
+    await this.updateDispatchState(message, "uncertain", "transport outcome unknown (crash before durable terminal record)");
+  }
+
+  private async updateDispatchState(message: DispatchedMessage, state: string, lastError: string | undefined): Promise<void> {
+    const conditions = [eq(dispatchedMessages.id, message.id)];
+    await this.db
+      .update(dispatchedMessages)
+      .set({ deliveryState: state, lastError: lastError ?? null, updatedAt: new Date() })
+      .where(and(...conditions));
+  }
+
+  async sweepDispatchOutbox(nowIso: string, uncertainAfterMs: number): Promise<{ uncertain: number }> {
+    const cutoff = new Date(Date.parse(nowIso) - uncertainAfterMs);
+    const swept = await this.db
+      .update(dispatchedMessages)
+      .set({
+        deliveryState: "uncertain",
+        lastError: "transport outcome unknown (crash before durable terminal record)",
+        updatedAt: new Date(),
+      })
+      .where(and(eq(dispatchedMessages.deliveryState, "sending"), lte(dispatchedMessages.updatedAt, cutoff)))
+      .returning({ id: dispatchedMessages.id });
+    return { uncertain: swept.length };
+  }
+
+  async listRetriableDispatches(nowIso: string, limit: number): Promise<DispatchedMessage[]> {
+    void nowIso;
+    const rows = await this.db
+      .select()
+      .from(dispatchedMessages)
+      .where(eq(dispatchedMessages.deliveryState, "pending"))
+      .orderBy(asc(dispatchedMessages.updatedAt))
+      .limit(limit);
+    return rows.map(rowToDispatch);
+  }
+
   async listDispatches(orgId: string): Promise<DispatchedMessage[]> {
     const rows = await this.db
       .select()
       .from(dispatchedMessages)
       .where(eq(dispatchedMessages.orgId, orgId))
       .orderBy(asc(dispatchedMessages.at));
-    return rows.map((row) => ({
-      id: row.id,
-      orgId: row.orgId,
-      userId: row.userId ?? undefined,
-      eventType: row.eventType as DispatchedMessage["eventType"],
-      route: row.route as DispatchedMessage["route"],
-      recipient: row.recipient,
-      title: row.title,
-      body: row.body,
-      dedupeKey: row.dedupeKey ?? undefined,
-      at: row.at.toISOString(),
-    }));
+    return rows.map(rowToDispatch);
   }
 
   // ---- Prompt 02: ownership-scoped inbox -------------------------------------
@@ -355,6 +396,26 @@ export class PgNotificationStore implements NotificationStore {
       .where(and(eq(notificationJobs.createdBy, job.createdBy), eq(notificationJobs.idempotencyKey, job.idempotencyKey)));
   }
 
+  /** Security Repair 05B §A: compare-and-set fencing on job writebacks. The
+   *  claim identity is matched from the ARGUMENT; the SET releases it. */
+  async updateJobFenced(job: NotificationJobRecord, expectedClaimVersion: number): Promise<boolean> {
+    const ownerMatch = job.claimOwner
+      ? eq(notificationJobs.claimOwner, job.claimOwner)
+      : isNull(notificationJobs.claimOwner);
+    const updated = await this.db
+      .update(notificationJobs)
+      .set({ ...toJobRow({ ...job, claimOwner: undefined, claimExpiresAt: undefined }), updatedAt: new Date() })
+      .where(
+        and(
+          eq(notificationJobs.id, job.id),
+          ownerMatch,
+          eq(notificationJobs.claimVersion, BigInt(expectedClaimVersion)),
+        ),
+      )
+      .returning({ id: notificationJobs.id });
+    return updated.length > 0;
+  }
+
   async dueJobs(nowIso: string): Promise<NotificationJobRecord[]> {
     const rows = await this.db
       .select()
@@ -395,6 +456,7 @@ export class PgNotificationStore implements NotificationStore {
           started_at = coalesce(job.started_at, ${now}),
           claim_owner = ${workerId},
           claim_expires_at = ${leaseUntil},
+          claim_version = coalesce(job.claim_version, 0) + 1,
           attempts = job.attempts + 1,
           updated_at = ${now}
       FROM claimable
@@ -479,6 +541,7 @@ function toJobRow(job: NotificationJobRecord) {
     attempts: job.attempts,
     claimOwner: job.claimOwner ?? null,
     claimExpiresAt: job.claimExpiresAt ? new Date(job.claimExpiresAt) : null,
+    claimVersion: BigInt(job.claimVersion ?? 0),
     error: job.error ?? null,
     createdBy: job.createdBy,
     idempotencyKey: job.idempotencyKey,
@@ -506,6 +569,7 @@ function rowToJob(row: typeof notificationJobs.$inferSelect): NotificationJobRec
     attempts: row.attempts,
     claimOwner: row.claimOwner ?? undefined,
     claimExpiresAt: row.claimExpiresAt?.toISOString(),
+    claimVersion: Number(row.claimVersion ?? 0),
     error: row.error ?? undefined,
     createdBy: row.createdBy,
     idempotencyKey: row.idempotencyKey,
@@ -538,10 +602,47 @@ function rowToJobFromSqlRow(row: Record<string, unknown>): NotificationJobRecord
     attempts: Number(row.attempts ?? 0),
     claimOwner: row.claim_owner ? String(row.claim_owner) : undefined,
     claimExpiresAt: maybeDateIso(row.claim_expires_at),
+    claimVersion: Number(row.claim_version ?? 0),
     error: row.error ? String(row.error) : undefined,
     createdBy: String(row.created_by),
     idempotencyKey: String(row.idempotency_key),
     createdAt: dateIso(row.created_at),
     updatedAt: dateIso(row.updated_at),
+  };
+}
+
+function toDispatchRow(message: DispatchedMessage) {
+  return {
+    id: message.id,
+    orgId: message.orgId,
+    userId: message.userId ?? null,
+    eventType: message.eventType,
+    route: message.route,
+    recipient: message.recipient,
+    title: message.title,
+    body: message.body,
+    dedupeKey: message.dedupeKey ?? null,
+    at: new Date(message.at),
+    deliveryState: message.deliveryState ?? "sent",
+    attempts: message.attempts ?? 1,
+    lastError: message.lastError ?? null,
+  };
+}
+
+function rowToDispatch(row: typeof dispatchedMessages.$inferSelect): DispatchedMessage {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    userId: row.userId ?? undefined,
+    eventType: row.eventType as DispatchedMessage["eventType"],
+    route: row.route as DispatchedMessage["route"],
+    recipient: row.recipient,
+    title: row.title,
+    body: row.body,
+    dedupeKey: row.dedupeKey ?? undefined,
+    at: row.at.toISOString(),
+    deliveryState: (row.deliveryState ?? "sent") as DispatchedMessage["deliveryState"],
+    attempts: row.attempts ?? 1,
+    lastError: row.lastError ?? undefined,
   };
 }

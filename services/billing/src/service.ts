@@ -1810,9 +1810,12 @@ export class BillingService {
       sub.currentPeriodEnd = invoice.periodEnd;
       sub.failedRenewals = 0;
       sub.graceEndsAt = undefined;
-      sub.renewalClaimOwner = undefined;
-      sub.renewalClaimExpiresAt = undefined;
-      await this.store.updateSubscription(sub);
+      // Security Repair 05B §A: the period writeback is FENCED by the
+      // renewal claim. A stale worker whose lease was stolen updates zero
+      // rows, stops, and never transitions state or touches the invoice
+      // again.
+      const owned = await this.store.completeSubscriptionRenewal(sub, sub.renewalClaimVersion ?? 0);
+      if (!owned) return { renewed: 0, failed: 0 };
       if (sub.state !== "active") {
         await this.transition(sub.id, "active", "renewal_succeeded", {
           idempotencyKey: `renew-ok:${periodStart}`,
@@ -1825,19 +1828,19 @@ export class BillingService {
     invoice.status = "failed";
     await this.store.updateInvoice(invoice);
     sub.failedRenewals = attempt;
-    sub.renewalClaimOwner = undefined;
-    sub.renewalClaimExpiresAt = undefined;
-    await this.store.updateSubscription(sub);
+    if (sub.state === "past_due" && attempt >= 2) {
+      sub.graceEndsAt = new Date(new Date(at).getTime() + this.graceDays * 24 * 3600 * 1000).toISOString();
+    }
+    // Failure writebacks are fenced too: a stale worker whose lease was
+    // stolen must not regress a reclaimer's successful renewal (finding A).
+    const owned = await this.store.completeSubscriptionRenewal(sub, sub.renewalClaimVersion ?? 0);
+    if (!owned) return { renewed: 0, failed: 0 };
     if (sub.state === "active") {
       await this.transition(sub.id, "past_due", `renewal_failed:${charge.failureReason}`, {
         idempotencyKey: `renew-fail:${periodStart}:${attempt}`,
         now: at,
       });
     } else if (sub.state === "past_due" && attempt >= 2) {
-      sub.graceEndsAt = new Date(new Date(at).getTime() + this.graceDays * 24 * 3600 * 1000).toISOString();
-      sub.renewalClaimOwner = undefined;
-      sub.renewalClaimExpiresAt = undefined;
-      await this.store.updateSubscription(sub);
       await this.transition(sub.id, "grace_period", "grace_window_opened", {
         idempotencyKey: `grace:${periodStart}:${attempt}`,
         now: at,

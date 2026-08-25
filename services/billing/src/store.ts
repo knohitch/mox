@@ -111,6 +111,14 @@ export interface BillingStore {
 
   claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined>;
 
+  /**
+   * Security Repair 05B §A: fenced renewal writeback. Applies the
+   * subscription update ONLY while the renewal claim (owner + version) is
+   * still held; a stale worker whose lease was stolen updates zero rows and
+   * must stop without transitioning state.
+   */
+  completeSubscriptionRenewal(sub: Subscription, expectedClaimVersion: number): Promise<boolean>;
+
   // ---- Security Repair 05A: provider-object mappings (finding A) -------------
 
   /**
@@ -745,8 +753,21 @@ export class InMemoryBillingStore implements BillingStore {
     if (sub.renewalClaimExpiresAt && sub.renewalClaimExpiresAt > nowIso) return undefined;
     sub.renewalClaimOwner = owner;
     sub.renewalClaimExpiresAt = leaseUntilIso;
+    sub.renewalClaimVersion = (sub.renewalClaimVersion ?? 0) + 1;
     this.subscriptions.set(id, sub);
     return { ...sub };
+  }
+
+  /** Fencing mirror: check-and-set is atomic in single-threaded JS. */
+  async completeSubscriptionRenewal(sub: Subscription, expectedClaimVersion: number): Promise<boolean> {
+    const current = this.subscriptions.get(sub.id);
+    if (!current) return false;
+    if (current.renewalClaimOwner !== sub.renewalClaimOwner) return false;
+    if ((current.renewalClaimVersion ?? 0) !== expectedClaimVersion) return false;
+    current.renewalClaimOwner = undefined;
+    current.renewalClaimExpiresAt = undefined;
+    this.subscriptions.set(sub.id, { ...sub, renewalClaimOwner: undefined, renewalClaimExpiresAt: undefined });
+    return true;
   }
 }
 

@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -152,6 +153,12 @@ export const serverOperations = pgTable(
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
     leaseOwner: text("lease_owner"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    /**
+     * Security Repair 05B §A: fencing token incremented on every successful
+     * claim. Post-claim writebacks must match id + state='running' +
+     * lease_owner + lease_version; a stale worker updates zero rows.
+     */
+    leaseVersion: bigint("lease_version", { mode: "bigint" }).notNull().default(0n),
     lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -160,6 +167,22 @@ export const serverOperations = pgTable(
     uniqueIndex("server_operations_order_kind_key").on(t.orderId, t.kind, t.idempotencyKey),
     index("server_operations_due_idx").on(t.state, t.nextAttemptAt),
   ],
+);
+
+/**
+ * Security Repair 05B §B: one row per org used ONLY as the PostgreSQL
+ * serialization point for quota-check + order-reservation transactions.
+ * The row lock serializes concurrent order creation across replicas;
+ * capacity itself derives from actual non-terminal orders.
+ */
+export const orgComputeAllocations = pgTable(
+  "org_compute_allocations",
+  {
+    orgId: uuid("org_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
 );
 
 /** Mox Node enrollment + heartbeat reporting (untrusted, advisory). */

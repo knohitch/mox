@@ -121,6 +121,8 @@ export interface Subscription {
   providerPlanRef?: string;
   renewalClaimOwner?: string;
   renewalClaimExpiresAt?: string;
+  /** Security Repair 05B §A: fencing token set by every renewal claim. */
+  renewalClaimVersion?: number;
   canceledAt?: string;
   suspendedAt?: string;
   deletedAt?: string;
