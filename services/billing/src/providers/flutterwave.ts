@@ -15,7 +15,7 @@
 
 import type { BillingProvider, ProviderCheckoutInput, ProviderCheckoutResult, ProviderEvent } from "../provider.js";
 import { WebhookVerificationError } from "../provider.js";
-import { httpJson, majorToMinor, requireConfigured, safeEquals } from "./shared.js";
+import { httpJson, majorToMinor, normalizeCurrency, requireConfigured, safeEquals } from "./shared.js";
 
 export interface FlutterwaveConfig {
   environment: "test" | "live";
@@ -124,6 +124,7 @@ export class FlutterwaveProvider implements BillingProvider {
       throw new WebhookVerificationError("payload is not JSON");
     }
     const data = parsed.data ?? {};
+    const currency = normalizeCurrency(data.currency);
     switch (parsed.event) {
       case "charge.completed": {
         const successful = data.status === "successful" || data.status === "success";
@@ -133,9 +134,10 @@ export class FlutterwaveProvider implements BillingProvider {
           subjectRef: data.tx_ref ?? "",
           subscriptionRef:
             data.subscription_id !== undefined ? String(data.subscription_id) : undefined,
+          transactionRef: data.flw_ref ?? data.tx_ref,
           occurredAt: data.created_at,
           amountMinor: data.amount !== undefined ? majorToMinor(data.amount, data.currency ?? "USD") : undefined,
-          currency: data.currency,
+          currency,
           payload: parsed,
         };
       }
@@ -145,6 +147,7 @@ export class FlutterwaveProvider implements BillingProvider {
           externalEventId: `subscription.cancelled:${data.id ?? data.subscription_id}`,
           type: "subscription.canceled",
           subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : "",
+          subscriptionRef: data.subscription_id !== undefined ? String(data.subscription_id) : undefined,
           occurredAt: data.created_at,
           payload: parsed,
         };
@@ -154,10 +157,11 @@ export class FlutterwaveProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.id ?? data.tx_id ?? data.tx_ref}`,
           type: "payment.refunded",
           subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : data.tx_ref ?? "",
+          subscriptionRef: data.subscription_id !== undefined ? String(data.subscription_id) : undefined,
           transactionRef: data.tx_ref ?? data.flw_ref,
           occurredAt: data.created_at,
           amountMinor: data.amount !== undefined ? majorToMinor(data.amount, data.currency ?? "USD") : undefined,
-          currency: data.currency,
+          currency,
           payload: parsed,
         };
       case "chargeback.created":
@@ -166,10 +170,12 @@ export class FlutterwaveProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.chargeback_id ?? data.id ?? data.tx_ref}`,
           type: "dispute.opened",
           subjectRef: data.subscription_id !== undefined ? String(data.subscription_id) : data.tx_ref ?? "",
+          subscriptionRef: data.subscription_id !== undefined ? String(data.subscription_id) : undefined,
           transactionRef: data.tx_ref ?? data.flw_ref,
+          disputeRef: data.chargeback_id !== undefined ? `flw-chargeback:${data.chargeback_id}` : undefined,
           occurredAt: data.created_at,
           amountMinor: data.amount !== undefined ? majorToMinor(data.amount, data.currency ?? "USD") : undefined,
-          currency: data.currency,
+          currency,
           payload: parsed,
         };
       default:
@@ -206,7 +212,7 @@ export class FlutterwaveProvider implements BillingProvider {
     return {
       paid,
       amountMinor: tx?.amount !== undefined ? majorToMinor(tx.amount, tx?.currency ?? "USD") : undefined,
-      currency: tx?.currency,
+      currency: normalizeCurrency(tx?.currency),
       occurredAt: tx?.created_at,
       transactionRef: tx?.id !== undefined ? String(tx.id) : undefined,
     };

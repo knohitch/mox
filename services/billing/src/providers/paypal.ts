@@ -14,7 +14,7 @@
 
 import type { BillingProvider, ProviderCheckoutInput, ProviderCheckoutResult, ProviderEvent } from "../provider.js";
 import { WebhookVerificationError } from "../provider.js";
-import { httpJson, majorToMinor, requireConfigured } from "./shared.js";
+import { httpJson, majorToMinor, normalizeCurrency, requireConfigured } from "./shared.js";
 
 export interface PayPalConfig {
   environment: "test" | "live";
@@ -160,78 +160,104 @@ export class PayPalProvider implements BillingProvider {
 
     const resource = parsed.resource ?? {};
     const occurredAt = typeof resource.update_time === "string" ? resource.update_time : parsed.create_time;
+    const resourceId = typeof resource.id === "string" ? resource.id : undefined;
+    const agreementId = typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined;
+    const amount = resource.amount as { total?: string; currency?: string } | undefined;
+    const currency = normalizeCurrency(amount?.currency);
     switch (parsed.event_type) {
       case "BILLING.SUBSCRIPTION.ACTIVATED":
-      case "BILLING.SUBSCRIPTION.RE-ACTIVATED":
+      case "BILLING.SUBSCRIPTION.CREATED":
+        // Activation/creation alone never proves payment (Prompt 01 + 05A).
         throw new WebhookVerificationError(`${parsed.event_type} is not proof of payment`);
       case "CHECKOUT.ORDER.APPROVED":
         throw new WebhookVerificationError("paypal approval is not proof of payment");
-      case "BILLING.SUBSCRIPTION.CREATED":
-        throw new WebhookVerificationError("paypal subscription creation is not proof of payment");
+      case "BILLING.SUBSCRIPTION.RE-ACTIVATED":
+        // Recovery requires authoritative payment/state reconciliation in the
+        // service — the event itself never grants entitlement.
+        return {
+          externalEventId: parsed.id ?? `RE-ACTIVATED:${resourceId ?? ""}`,
+          type: "subscription.reactivated",
+          subjectRef: resourceId ?? "",
+          subscriptionRef: resourceId,
+          occurredAt,
+          payload: parsed,
+        };
       case "PAYMENT.SALE.COMPLETED": {
-        const amount = resource.amount as { total?: string; currency?: string } | undefined;
         return {
           externalEventId: parsed.id ?? `PAYMENT.SALE.COMPLETED:${String(resource.id)}`,
           type: "payment.succeeded",
-          subjectRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
-          subscriptionRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
-          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          subjectRef: agreementId ?? resourceId ?? "",
+          subscriptionRef: agreementId ?? resourceId,
+          transactionRef: resourceId,
           occurredAt,
           amountMinor: amount?.total !== undefined ? majorToMinor(amount.total, amount?.currency ?? "USD") : undefined,
-          currency: amount?.currency,
+          currency,
           payload: parsed,
         };
       }
-      case "PAYMENT.SALE.DENIED":
       case "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
-      case "BILLING.SUBSCRIPTION.SUSPENDED": {
-        const suspended = parsed.event_type === "BILLING.SUBSCRIPTION.SUSPENDED";
+        // Resource IS the subscription/billing agreement object.
         return {
-          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
-          type: suspended ? "subscription.canceled" : "payment.failed",
-          subjectRef: String(resource.id ?? ""),
-          subscriptionRef: String(resource.id ?? ""),
+          externalEventId: parsed.id ?? `${parsed.event_type}:${resourceId ?? ""}`,
+          type: "payment.failed",
+          subjectRef: resourceId ?? "",
+          subscriptionRef: resourceId,
           occurredAt,
           payload: parsed,
         };
-      }
+      case "PAYMENT.SALE.DENIED":
+        // Bind to the billing agreement/subscription — never to an unrelated
+        // sale id as the local authority.
+        return {
+          externalEventId: parsed.id ?? `PAYMENT.SALE.DENIED:${resourceId ?? ""}`,
+          type: "payment.failed",
+          subjectRef: agreementId ?? "",
+          subscriptionRef: agreementId,
+          transactionRef: resourceId,
+          occurredAt,
+          payload: parsed,
+        };
+      case "BILLING.SUBSCRIPTION.SUSPENDED":
+        // Temporary suspension (failed payment) — recoverable, and MUST NOT
+        // behave like a permanent cancellation or trigger remote cancel.
+        return {
+          externalEventId: parsed.id ?? `${parsed.event_type}:${resourceId ?? ""}`,
+          type: "subscription.suspended",
+          subjectRef: resourceId ?? "",
+          subscriptionRef: resourceId,
+          occurredAt,
+          payload: parsed,
+        };
       case "BILLING.SUBSCRIPTION.CANCELLED":
       case "BILLING.SUBSCRIPTION.EXPIRED":
         return {
-          externalEventId: parsed.id ?? `${parsed.event_type}:${String(resource.id)}`,
+          externalEventId: parsed.id ?? `${parsed.event_type}:${resourceId ?? ""}`,
           type: "subscription.canceled",
-          subjectRef: String(resource.id ?? ""),
-          subscriptionRef: String(resource.id ?? ""),
+          subjectRef: resourceId ?? "",
+          subscriptionRef: resourceId,
           occurredAt,
           payload: parsed,
         };
       case "PAYMENT.SALE.REFUNDED": {
-        const amount = resource.amount as { total?: string; currency?: string } | undefined;
         return {
-          externalEventId: parsed.id ?? `PAYMENT.SALE.REFUNDED:${String(resource.id)}`,
+          externalEventId: parsed.id ?? `PAYMENT.SALE.REFUNDED:${resourceId ?? ""}`,
           type: "payment.refunded",
-          subjectRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
-          subscriptionRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
-          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          subjectRef: agreementId ?? resourceId ?? "",
+          subscriptionRef: agreementId ?? resourceId,
+          transactionRef: resourceId,
           occurredAt,
           amountMinor: amount?.total !== undefined ? majorToMinor(amount.total, amount?.currency ?? "USD") : undefined,
-          currency: amount?.currency,
+          currency,
           payload: parsed,
         };
       }
       case "PAYMENT.SALE.REVERSED":
         return {
-          externalEventId: parsed.id ?? `PAYMENT.SALE.REVERSED:${String(resource.id)}`,
+          externalEventId: parsed.id ?? `PAYMENT.SALE.REVERSED:${resourceId ?? ""}`,
           type: "dispute.opened",
-          subjectRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : "",
-          subscriptionRef:
-            typeof resource.billing_agreement_id === "string" ? resource.billing_agreement_id : undefined,
-          transactionRef: typeof resource.id === "string" ? resource.id : undefined,
+          subjectRef: agreementId ?? resourceId ?? "",
+          subscriptionRef: agreementId ?? resourceId,
+          transactionRef: resourceId,
           occurredAt,
           payload: parsed,
         };
@@ -260,7 +286,7 @@ export class PayPalProvider implements BillingProvider {
       fetchImpl: this.fetchImpl,
     });
     const amount = res.data.billing_info?.last_payment?.amount;
-    const currency = amount?.currency_code ?? amount?.currency;
+    const currency = normalizeCurrency(amount?.currency_code ?? amount?.currency);
     return {
       paid: res.data.status === "ACTIVE" && !!amount?.value && !!currency,
       amountMinor: amount?.value && currency ? majorToMinor(amount.value, currency) : undefined,

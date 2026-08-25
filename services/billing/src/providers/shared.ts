@@ -90,3 +90,14 @@ export function majorToMinor(major: number | string, currency: string): bigint {
   if (!Number.isFinite(value)) throw new ProviderError("invalid provider amount", { retryable: false });
   return BigInt(Math.round(value * 10 ** exponent));
 }
+
+/**
+ * Canonical currency representation (Security Repair 05A §C): providers
+ * send lowercase (e.g. Stripe `usd`); Mox stores ISO-4217 uppercase.
+ * Semantic equality is exact AFTER normalization.
+ */
+export function normalizeCurrency(currency: string | null | undefined): string | undefined {
+  if (currency === undefined || currency === null) return undefined;
+  const trimmed = currency.trim().toUpperCase();
+  return trimmed.length > 0 ? trimmed : undefined;
+}

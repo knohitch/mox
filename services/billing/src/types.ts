@@ -107,6 +107,18 @@ export interface Subscription {
   retentionUntil?: string;
   failedRenewals: number;
   cancelAtPeriodEnd: boolean;
+  /**
+   * Security Repair 05A: why/who suspended this subscription. Sources:
+   * payment_failure | admin | refund | dispute | fraud | provider |
+   * compliance. Admin reactivation of refund/dispute/fraud/compliance
+   * suspensions requires explicit financial reconciliation.
+   */
+  suspensionReason?: string;
+  suspensionSource?: string;
+  /** Fail-closed: ambiguous mapping / unmapped plan / partial refund etc. */
+  reconciliationRequired?: boolean;
+  /** Provider plan/price id last seen on the provider object. */
+  providerPlanRef?: string;
   renewalClaimOwner?: string;
   renewalClaimExpiresAt?: string;
   canceledAt?: string;
@@ -115,7 +127,7 @@ export interface Subscription {
   createdAt: string;
 }
 
-export type CheckoutSessionState = "created" | "redirected" | "completed" | "expired";
+export type CheckoutSessionState = "created" | "redirected" | "applying" | "completed" | "expired";
 
 export interface CheckoutSession {
   id: string;
@@ -159,7 +171,15 @@ export interface Invoice {
   paidAt?: string;
 }
 
-export type WebhookStatus = "received" | "verified" | "processing" | "applied" | "rejected";
+export type WebhookStatus =
+  | "received"
+  | "verified"
+  | "processing"
+  | "applied"
+  | "duplicate"
+  | "stale_ignored"
+  | "reconciliation_required"
+  | "rejected";
 
 export interface WebhookRecord {
   id: string;
@@ -200,6 +220,11 @@ export interface ProviderPaymentRecord {
   checkoutSessionRef?: string;
   providerTransactionRef?: string;
   invoiceRef?: string;
+  providerPaymentIntentRef?: string;
+  providerChargeRef?: string;
+  providerCustomerRef?: string;
+  /** Provider invoice/sale identity used for business-effect idempotency. */
+  billingIdentity?: string;
   state: string;
   currency?: string;
   amountMinor?: bigint | number;
@@ -207,4 +232,78 @@ export interface ProviderPaymentRecord {
   occurredAt?: string;
   receivedAt: string;
   reconciledAt?: string;
+}
+
+/**
+ * Durable typed provider-object mapping (Security Repair 05A §A): each
+ * provider object type has its own column — never one ambiguous ref.
+ */
+export interface ProviderObjectMapping {
+  id: string;
+  providerName: string;
+  environment: string;
+  orgId?: string;
+  subscriptionId?: string;
+  providerCustomerRef?: string;
+  checkoutSessionRef?: string;
+  providerSubscriptionRef?: string;
+  providerInvoiceRef?: string;
+  providerPaymentRef?: string;
+  providerPaymentIntentRef?: string;
+  providerChargeRef?: string;
+  resolutionState: "resolved" | "reconciliation_required";
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type BusinessEffectType =
+  | "checkout_grant"
+  | "period_extension"
+  | "payment_failure"
+  | "refund"
+  | "dispute_open"
+  | "dispute_resolved"
+  | "subscription_updated";
+
+export type BusinessEffectOutcome =
+  | "applied"
+  | "duplicate"
+  | "stale_ignored"
+  | "reconciliation_required"
+  | "rejected";
+
+export interface ProviderBillingEffect {
+  id: string;
+  providerName: string;
+  environment: string;
+  billingIdentity: string;
+  effectType: BusinessEffectType;
+  subscriptionId?: string;
+  outcome: BusinessEffectOutcome;
+  externalEventId: string;
+  createdAt?: string;
+}
+
+export type CancellationState =
+  | "cancel_requested"
+  | "provider_cancel_pending"
+  | "canceled"
+  | "reconciliation_required";
+
+export interface SubscriptionCancellation {
+  subscriptionId: string;
+  state: CancellationState;
+  requestedBy: string;
+  requestedById?: string;
+  attempts: number;
+  lastError?: string;
+  nextAttemptAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface CommercialReconciliationItem {
+  subscriptionId: string;
+  reason: string;
+  enqueuedAt: string;
 }

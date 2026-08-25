@@ -7,8 +7,10 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import type { ControlPlaneConfig } from "../src/config.js";
-import { signPayload } from "@mox/billing";
+import { DEFAULT_WEBHOOK_ABUSE } from "../src/config.js";
+import { FakeBillingProvider, signPayload } from "@mox/billing";
 import { composeControlPlane, type ControlPlaneServices } from "../src/composition.js";
 import { startControlPlane, type RunningControlPlane } from "../src/server.js";
 
@@ -567,12 +569,13 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       rawBody: raw,
     });
     // HMAC over the untouched bytes VERIFIES — the handler then honestly
-    // rejects the business event (unknown session ref), proving the exact
-    // raw payload reached signature verification intact.
+    // surfaces the unknown checkout session as reconciliation_required
+    // (05A §A/F: unknown bindings fail closed instead of being rejected),
+    // proving the exact raw payload reached signature verification intact.
     expect(res.status).toBe(200);
     const firstBody = JSON.stringify(res.body);
-    expect(firstBody).toContain('"rejected":true');
-    expect(firstBody).toContain("unknown session");
+    expect(firstBody).toContain('"reconciliationRequired":true');
+    expect(firstBody).toContain('"applied":false');
 
     // Prove reserialization would NOT verify: sign the stringify'd form,
     // deliver the original raw bytes → signature mismatch.
@@ -1528,19 +1531,20 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(JSON.stringify(replay.body)).toContain('"duplicate":true');
 
     // Out-of-order: an OLDER cancellation cannot regress newer active state.
+    const staleOccurredAt = new Date(Date.now() - 120_000).toISOString();
     provider.enqueue({
       eventId: "evt_old_cancel",
       type: "subscription.canceled",
       subjectRef: "scripted_sub_9",
       subscriptionRef: "scripted_sub_9",
-      occurredAt: new Date(Date.now() - 120_000).toISOString(),
+      occurredAt: staleOccurredAt,
     });
     const stale = await signedWebhookCall(provider.name, {
       eventId: "evt_old_cancel",
       type: "subscription.canceled",
       subjectRef: "scripted_sub_9",
       subscriptionRef: "scripted_sub_9",
-      occurredAt: new Date(Date.now() - 120_000).toISOString(),
+      occurredAt: staleOccurredAt,
     });
     expect(stale.status).toBe(200);
     const stillActive = (await (await call("/api/billing/subscription", { headers: { cookie } })).body) as {
@@ -1573,13 +1577,14 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       }),
     });
     const sessionId = (created.body as { sessionId: string }).sessionId;
+    const occurredAt = new Date().toISOString();
 
     provider.enqueue({
       eventId: "evt_wrong_amount",
       type: "checkout.completed",
       subjectRef: `scripted_${sessionId}`,
       subscriptionRef: "scripted_sub_bad",
-      occurredAt: new Date().toISOString(),
+      occurredAt,
       amountMinor: 999,
       currency: "USD",
     });
@@ -1588,7 +1593,7 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       type: "checkout.completed",
       subjectRef: `scripted_${sessionId}`,
       subscriptionRef: "scripted_sub_bad",
-      occurredAt: new Date().toISOString(),
+      occurredAt,
       amountMinor: 999,
       currency: "USD",
     });
@@ -2149,6 +2154,181 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     // The pipeline itself is proven by the activation webhook test asserting
     // '"applied":true'; here we assert the emission contract exists.
     expect(typeof server.services.notifications.consume).toBe("function");
+  });
+
+  // ==== Security Repair 05A — webhook abuse + entitlement reads (HTTP) ====
+
+  it("per-IP webhook rate limit bounds invalid-body floods while the endpoint stays public (05A §G)", async () => {
+    const path = `abuse-${randomUUID().slice(0, 8)}`;
+    // Isolate the abuse traffic onto a synthetic client IP (trusted proxy)
+    // so the locked bucket cannot pollute the shared 127.0.0.1 bucket used
+    // by every other test in this suite.
+    const originalAbuse = server.services.config.webhookAbuse;
+    const originalTrusted = server.services.config.trustedProxyIps;
+    server.services.config.trustedProxyIps = ["127.0.0.1", "::ffff:127.0.0.1", "::1"];
+    server.services.config.webhookAbuse = {
+      ...DEFAULT_WEBHOOK_ABUSE,
+      perIpLimit: 3,
+      perPathLimit: 100_000,
+      globalLimit: 100_000,
+    };
+    try {
+      const junk = JSON.stringify({ unique: randomUUID() });
+      for (let i = 0; i <= 3; i++) {
+        const res = await call(`/webhooks/billing/${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "203.0.113.77",
+            "x-mox-timestamp": new Date().toISOString(),
+            "x-mox-signature": "deadbeef",
+          },
+          rawBody: junk,
+        });
+        if (i < 3) {
+          expect(res.status).toBe(200);
+        } else {
+          expect(res.status).toBe(429);
+          expect(JSON.stringify(res.body)).toContain("webhook_rate_limited");
+        }
+      }
+    } finally {
+      server.services.config.webhookAbuse = originalAbuse;
+      server.services.config.trustedProxyIps = originalTrusted;
+    }
+  });
+
+  it("oversized webhook bodies are rejected before any processing (05A §G)", async () => {
+    const huge = "x".repeat(300 * 1024);
+    const res = await call(`/webhooks/billing/size-${randomUUID().slice(0, 8)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      rawBody: huge,
+    });
+    expect(res.status).toBe(413);
+    expect(JSON.stringify(res.body)).toContain("body_too_large");
+  });
+
+  it("legitimate provider bursts remain accepted (05A §G)", async () => {
+    const providerName = `burst-${randomUUID().slice(0, 8)}`;
+    const provider = new FakeBillingProvider(providerName, "burst-secret");
+    server.services.billing.registerProvider(provider);
+    const body = JSON.stringify({ eventId: `burst-1`, type: "payment.failed", subjectRef: `unknown-${randomUUID()}` });
+    const stamp = new Date().toISOString();
+    const signature = signPayload("burst-secret", body, stamp);
+    for (let i = 0; i < 20; i++) {
+      const res = await call(`/webhooks/billing/${providerName}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-mox-timestamp": stamp, "x-mox-signature": signature },
+        rawBody: body,
+      });
+      expect(res.status).toBe(200);
+      const parsed = res.body as { applied?: boolean; reconciliationRequired?: boolean };
+      expect(parsed.applied).toBe(false);
+      expect(parsed.reconciliationRequired).toBe(true);
+    }
+  });
+
+  it("GET /api/billing/entitlements uses the same commercial-access authority as mutations (05A §J)", async () => {
+    const provider = new ScriptedProvider();
+    server.services.billing.registerProvider(provider as never);
+
+    const email = `${randomUUID()}@mox.test`;
+    const signup = await call("/api/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password: "entitlements-pass" }),
+    });
+    const cookie = cookieFrom(signup.headers);
+    const catalog = await seedPlan();
+
+    // Effective plan values for the seeded plan version.
+    await server.services.db.execute(sql`
+      INSERT INTO entitlement_definitions (key, value_type, description, default_value)
+      VALUES ('max_agents', 'integer', 'Max agents', '3'::jsonb)
+      ON CONFLICT (key) DO NOTHING
+    `);
+    await server.services.db.execute(sql`
+      INSERT INTO plan_entitlement_values (plan_version_id, key, value)
+      VALUES (${catalog.planVersionId}, 'max_agents', '7'::jsonb)
+      ON CONFLICT (plan_version_id, key) DO UPDATE SET value = '7'::jsonb
+    `);
+
+    // No subscription → no entitlement, no values.
+    const none = (await (await call("/api/billing/entitlements", { headers: { cookie } })).body) as {
+      commerciallyEntitled: boolean;
+      values: Record<string, unknown>;
+      denialReason?: string;
+    };
+    expect(none.commerciallyEntitled).toBe(false);
+    expect(none.values).toEqual({});
+
+    // Activate through the verified webhook pipeline.
+    const created = await call("/api/billing/checkout", {
+      method: "POST",
+      headers: { ...CSRF, cookie },
+      body: JSON.stringify({
+        planVersionId: catalog.planVersionId,
+        providerName: "scripted",
+        successUrl: "https://x/s",
+        cancelUrl: "https://x/c",
+      }),
+    });
+    const sessionId = (created.body as { sessionId: string }).sessionId;
+    const activationEvent = {
+      eventId: `evt_ent_${randomUUID()}`,
+      type: "checkout.completed",
+      subjectRef: `scripted_${sessionId}`,
+      subscriptionRef: `scripted_sub_${sessionId}`,
+      occurredAt: new Date().toISOString(),
+      amountMinor: 1999,
+      currency: "USD",
+    };
+    provider.enqueue(activationEvent);
+    const activation = await signedWebhookCall(provider.name, activationEvent);
+    expect(JSON.stringify(activation.body)).toContain('"applied":true');
+
+    // Valid active → entitled with the real effective values.
+    const entitled = (await (await call("/api/billing/entitlements", { headers: { cookie } })).body) as {
+      state: string;
+      commerciallyEntitled: boolean;
+      values: Record<string, unknown>;
+      denialReason?: string;
+    };
+    expect(entitled.state).toBe("active");
+    expect(entitled.commerciallyEntitled).toBe(true);
+    expect(entitled.values).toMatchObject({ max_agents: 7 });
+
+    // Suspended → commerciallyEntitled false with an explicit reason.
+    const me = (await (await call("/api/me", { headers: { cookie } })).body) as { orgs: Array<{ orgId: string }> };
+    const sub = await server.services.billing.getActiveSubscription(me.orgs[0]!.orgId);
+    await server.services.billing.adminSuspend(sub!.id, "ent-test-admin", "abuse_review");
+    const suspended = (await (await call("/api/billing/entitlements", { headers: { cookie } })).body) as {
+      state: string;
+      commerciallyEntitled: boolean;
+      values: Record<string, unknown>;
+      denialReason?: string;
+    };
+    expect(suspended.state).toBe("suspended");
+    expect(suspended.commerciallyEntitled).toBe(false);
+    expect(suspended.denialReason).toBe("state_suspended");
+    expect(suspended.values).toEqual({});
+
+    // Expired active → commerciallyEntitled false.
+    await server.services.billing.adminReactivate(sub!.id, "ent-test-admin");
+    const live = await server.services.billing.getSubscription(sub!.id);
+    live.currentPeriodEnd = new Date(Date.now() - 60_000).toISOString();
+    await server.services.billing.store.updateSubscription(live);
+    const expired = (await (await call("/api/billing/entitlements", { headers: { cookie } })).body) as {
+      state: string;
+      commerciallyEntitled: boolean;
+      values: Record<string, unknown>;
+      denialReason?: string;
+    };
+    expect(expired.state).toBe("active");
+    expect(expired.commerciallyEntitled).toBe(false);
+    expect(expired.denialReason).toBe("expired_period");
+    expect(expired.values).toEqual({});
   });
 
 });

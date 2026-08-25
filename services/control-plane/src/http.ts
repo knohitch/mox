@@ -97,15 +97,18 @@ export function readRawBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Pr
     let size = 0;
     const declared = Number(req.headers["content-length"] ?? 0);
     if (Number.isFinite(declared) && declared > maxBytes) {
+      // Reject BEFORE buffering anything, but keep draining the socket so
+      // the server can still deliver the 413 response (Security Repair 05A
+      // §G: oversized bodies never reach parsing/verification).
+      req.resume();
       reject(Object.assign(new Error("request body too large"), { status: 413, code: "body_too_large" }));
-      req.destroy();
       return;
     }
     req.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > maxBytes) {
+        req.resume();
         reject(Object.assign(new Error("request body too large"), { status: 413, code: "body_too_large" }));
-        req.destroy();
         return;
       }
       chunks.push(chunk);

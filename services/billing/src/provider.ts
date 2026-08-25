@@ -31,8 +31,12 @@ export interface ProviderEvent {
   externalEventId: string;
   type:
     | "checkout.completed"
+    | "checkout.failed"
     | "payment.succeeded"
     | "payment.failed"
+    | "subscription.updated"
+    | "subscription.suspended"
+    | "subscription.reactivated"
     | "subscription.canceled"
     | "payment.refunded"
     | "dispute.opened"
@@ -57,6 +61,25 @@ export interface ProviderEvent {
   invoiceRef?: string;
   /** Provider-specific terminal dispute result when present. */
   resolution?: "won" | "lost" | "accepted" | "unknown";
+  // ---- Security Repair 05A: typed provider-object refs (finding A) ----
+  /** Provider customer id (cus_… / cust-…). */
+  customerRef?: string;
+  /** Stripe PaymentIntent (pi_…). */
+  paymentIntentRef?: string;
+  /** Stripe Charge (ch_…). */
+  chargeRef?: string;
+  /** Stripe Dispute (dp_…) or Paystack/Flutterwave dispute id. */
+  disputeRef?: string;
+  // ---- Security Repair 05A: lifecycle payloads (findings C/D) ----
+  /** Raw provider subscription status (Stripe/PayPal status string). */
+  subscriptionStatus?: string;
+  /** Stripe cancel_at_period_end / reversal signal. */
+  cancelAtPeriodEnd?: boolean;
+  /** Provider price/plan ids present on the provider object. */
+  providerPlanRefs?: string[];
+  currentPeriodStart?: string;
+  currentPeriodEnd?: string;
+  trialEndsAt?: string;
   payload: unknown;
 }
 
@@ -158,6 +181,7 @@ export class FakeBillingProvider implements BillingProvider {
   private readonly secret: string;
   private eventCounter = 0;
   private failNextCharge = false;
+  private failNextCancelRequest = false;
   private readonly remoteRefs = new Set<string>();
 
   constructor(name = "fake-gateway", secret = "test-webhook-secret", environment = "test") {
@@ -169,6 +193,11 @@ export class FakeBillingProvider implements BillingProvider {
   /** Test hook: force the next charge attempt to decline. */
   declineNextCharge(): void {
     this.failNextCharge = true;
+  }
+
+  /** Test hook: force the next remote cancellation to fail transiently. */
+  failNextCancel(): void {
+    this.failNextCancelRequest = true;
   }
 
   async createCheckout(input: ProviderCheckoutInput): Promise<ProviderCheckoutResult> {
@@ -194,6 +223,10 @@ export class FakeBillingProvider implements BillingProvider {
   }
 
   async cancelRemote(providerRef: string): Promise<void> {
+    if (this.failNextCancelRequest) {
+      this.failNextCancelRequest = false;
+      throw new Error("transient provider outage");
+    }
     this.remoteRefs.delete(providerRef);
   }
 
@@ -219,6 +252,16 @@ export class FakeBillingProvider implements BillingProvider {
       invoiceRef?: string;
       transactionRef?: string;
       resolution?: "won" | "lost" | "accepted" | "unknown";
+      customerRef?: string;
+      paymentIntentRef?: string;
+      chargeRef?: string;
+      disputeRef?: string;
+      subscriptionStatus?: string;
+      cancelAtPeriodEnd?: boolean;
+      providerPlanRefs?: string[];
+      currentPeriodStart?: string;
+      currentPeriodEnd?: string;
+      trialEndsAt?: string;
     };
     try {
       parsed = JSON.parse(rawBody) as typeof parsed;
@@ -242,6 +285,16 @@ export class FakeBillingProvider implements BillingProvider {
       amountMinor: parsed.amountMinor !== undefined ? BigInt(parsed.amountMinor) : undefined,
       currency: parsed.currency,
       resolution: parsed.resolution,
+      customerRef: parsed.customerRef,
+      paymentIntentRef: parsed.paymentIntentRef,
+      chargeRef: parsed.chargeRef,
+      disputeRef: parsed.disputeRef,
+      subscriptionStatus: parsed.subscriptionStatus,
+      cancelAtPeriodEnd: parsed.cancelAtPeriodEnd,
+      providerPlanRefs: parsed.providerPlanRefs,
+      currentPeriodStart: parsed.currentPeriodStart,
+      currentPeriodEnd: parsed.currentPeriodEnd,
+      trialEndsAt: parsed.trialEndsAt,
       payload: parsed,
     };
   }

@@ -437,11 +437,17 @@ export class HttpMoxApi implements MoxApi {
   }
 
   async getEntitlements(): Promise<Entitlements> {
-    const response = await this.call<{ planVersionId: string; values: Record<string, boolean | number | string> }>(
-      "/api/billing/entitlements",
-    );
+    // Security Repair 05A §J: the endpoint now reports commercial-access
+    // truth (commerciallyEntitled + denial reason); effective values exist
+    // only while currently entitled.
+    const response = await this.call<{
+      planVersionId?: string;
+      commerciallyEntitled: boolean;
+      values: Record<string, boolean | number | string>;
+    }>("/api/billing/entitlements");
     const flag = (key: keyof Entitlements): boolean =>
-      response.values[key] === true || response.values[key] === "true";
+      response.commerciallyEntitled === true &&
+      (response.values[key] === true || response.values[key] === "true");
     return {
       computer: flag("computer"),
       terminal: flag("terminal"),

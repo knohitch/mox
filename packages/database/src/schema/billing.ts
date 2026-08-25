@@ -36,8 +36,17 @@ export const subscriptionState = pgEnum("subscription_state", [
   "deleted",
 ]);
 export const priceBookMode = pgEnum("price_book_mode", ["fixed", "fx_derived", "disabled"]);
-export const checkoutState = pgEnum("checkout_state", ["created", "redirected", "completed", "expired"]);
-export const webhookStatus = pgEnum("webhook_status", ["received", "verified", "processing", "applied", "rejected"]);
+export const checkoutState = pgEnum("checkout_state", ["created", "redirected", "applying", "completed", "expired"]);
+export const webhookStatus = pgEnum("webhook_status", [
+  "received",
+  "verified",
+  "processing",
+  "applied",
+  "duplicate",
+  "stale_ignored",
+  "reconciliation_required",
+  "rejected",
+]);
 export const itemKind = pgEnum("subscription_item_kind", ["base", "addon"]);
 export const invoiceStatus = pgEnum("invoice_status", ["open", "paid", "failed", "void"]);
 
@@ -221,6 +230,22 @@ export const subscriptions = pgTable(
     retentionUntil: timestamp("retention_until", { withTimezone: true }),
     failedRenewals: integer("failed_renewals").notNull().default(0),
     cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    /**
+     * Security Repair 05A: why the subscription is suspended and who/what
+     * decided it (payment_failure | admin | refund | dispute | fraud |
+     * provider | compliance). Admin reactivation of refund/dispute/fraud/
+     * compliance suspensions requires explicit financial reconciliation.
+     */
+    suspensionReason: text("suspension_reason"),
+    suspensionSource: text("suspension_source"),
+    /**
+     * Fail-closed flag: ambiguous provider mapping, unmapped provider plan,
+     * partial refund policy or a failed remote cancellation set this until
+     * an authoritative reconciliation concludes.
+     */
+    reconciliationRequired: boolean("reconciliation_required").notNull().default(false),
+    /** Provider plan/price id last seen on the provider object. */
+    providerPlanRef: text("provider_plan_ref"),
     renewalClaimOwner: text("renewal_claim_owner"),
     renewalClaimExpiresAt: timestamp("renewal_claim_expires_at", { withTimezone: true }),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
@@ -257,7 +282,13 @@ export const subscriptionItems = pgTable(
     priceVersionId: uuid("price_version_id").references(() => priceVersions.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("subscription_items_sub_idx").on(t.subscriptionId)],
+  (t) => [
+    index("subscription_items_sub_idx").on(t.subscriptionId),
+    /** Crash-replay idempotency: at most one base item per subscription. */
+    uniqueIndex("subscription_items_base_key")
+      .on(t.subscriptionId)
+      .where(sql`kind = 'base'`),
+  ],
 );
 
 /** One-time checkout sessions; redirect alone never grants entitlements. */
@@ -315,7 +346,13 @@ export const invoices = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     paidAt: timestamp("paid_at", { withTimezone: true }),
   },
-  (t) => [uniqueIndex("invoices_sub_period_attempt_key").on(t.subscriptionId, t.periodStart, t.attempt)],
+  (t) => [
+    uniqueIndex("invoices_sub_period_attempt_key").on(t.subscriptionId, t.periodStart, t.attempt),
+    /** Business-effect dedupe anchor: one provider invoice = one row. */
+    uniqueIndex("invoices_provider_ref_key")
+      .on(t.providerInvoiceRef)
+      .where(sql`${t.providerInvoiceRef} IS NOT NULL`),
+  ],
 );
 
 /** Verified provider events with dedupe by (provider, external event id). */
@@ -335,7 +372,58 @@ export const verifiedWebhookEvents = pgTable(
     processingExpiresAt: timestamp("processing_expires_at", { withTimezone: true }),
     rejectionReason: text("rejection_reason"),
   },
-  (t) => [uniqueIndex("verified_webhook_events_provider_external_key").on(t.providerName, t.externalEventId)],
+  (t) => [
+    uniqueIndex("verified_webhook_events_provider_external_key").on(t.providerName, t.externalEventId),
+    /** Short-TTL rejected-junk cleanup: applied financial history is exempt. */
+    index("verified_webhook_events_status_received_idx").on(t.status, t.receivedAt),
+  ],
+);
+
+/**
+ * Durable cancellation progress (Security Repair 05A §H). Local entitlement
+ * shutdown is a subscription transition; the UPSTREAM provider cancellation
+ * is tracked here separately and retried idempotently. Remote failures land
+ * in reconciliation_required and stay visible — the provider may not bill
+ * indefinitely without a visible reconciliation condition.
+ */
+export const subscriptionCancellations = pgTable(
+  "subscription_cancellations",
+  {
+    subscriptionId: uuid("subscription_id")
+      .primaryKey()
+      .references(() => subscriptions.id, { onDelete: "cascade" }),
+    state: text("state").notNull().default("cancel_requested"),
+    requestedBy: text("requested_by").notNull().default("user"),
+    requestedById: text("requested_by_id"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("subscription_cancellations_due_idx").on(t.state, t.nextAttemptAt),
+  ],
+);
+
+/**
+ * Commercial-ineligibility reconciliation queue (Security Repair 05A §A):
+ * refunds/disputes enqueue a row; the compute reconciler consumes it later.
+ * Webhook handlers never destroy compute synchronously.
+ */
+export const commercialReconciliationQueue = pgTable(
+  "commercial_reconciliation_queue",
+  {
+    subscriptionId: uuid("subscription_id")
+      .primaryKey()
+      .references(() => subscriptions.id, { onDelete: "cascade" }),
+    reason: text("reason").notNull(),
+    enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("commercial_reconciliation_queue_due_idx").on(t.enqueuedAt),
+  ],
 );
 
 /** Auditable, idempotent subscription transitions. */

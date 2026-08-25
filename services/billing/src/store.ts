@@ -9,17 +9,22 @@ import type {
   AddonDefinition,
   BillingCustomer,
   CheckoutSession,
+  CommercialReconciliationItem,
   Invoice,
   PriceBook,
   PriceVersion,
   PricingRegion,
   Product,
   PlanVersion,
+  ProviderBillingEffect,
+  ProviderObjectMapping,
   ProviderPaymentRecord,
   Subscription,
+  SubscriptionCancellation,
   SubscriptionItem,
   SubscriptionTransition,
   WebhookRecord,
+  BusinessEffectType,
 } from "./types.js";
 
 export interface BillingStore {
@@ -105,6 +110,69 @@ export interface BillingStore {
   listProviderPayments(orgId: string): Promise<ProviderPaymentRecord[]>;
 
   claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined>;
+
+  // ---- Security Repair 05A: provider-object mappings (finding A) -------------
+
+  /**
+   * Merge typed provider-object refs into the durable mapping. Rows that
+   * match any provided ref (or the subscription/org) are merged; refs that
+   * would join two DIFFERENT subscriptions/orgs mark every involved row
+   * reconciliation_required — never guessed.
+   */
+  upsertProviderObjectMapping(mapping: ProviderObjectMapping): Promise<void>;
+  findProviderObjectMappings(
+    providerName: string,
+    environment: string,
+    refs: {
+      checkoutSessionRef?: string;
+      providerSubscriptionRef?: string;
+      providerInvoiceRef?: string;
+      providerPaymentRef?: string;
+      providerPaymentIntentRef?: string;
+      providerChargeRef?: string;
+    },
+  ): Promise<ProviderObjectMapping[]>;
+
+  // ---- Security Repair 05A: business-effect idempotency (finding B) -----------
+
+  /** Returns true when this identity+effect was claimed by this call. */
+  claimProviderBillingEffect(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    effectType: BusinessEffectType;
+    subscriptionId?: string;
+    externalEventId: string;
+  }): Promise<boolean>;
+  hasAppliedFinancialEffect(subscriptionId: string): Promise<boolean>;
+
+  // ---- Security Repair 05A: cancellations (finding H) ---------------------------
+
+  upsertSubscriptionCancellation(record: SubscriptionCancellation): Promise<SubscriptionCancellation>;
+  getSubscriptionCancellation(subscriptionId: string): Promise<SubscriptionCancellation | undefined>;
+  listDueCancellationRetries(nowIso: string, limit: number): Promise<SubscriptionCancellation[]>;
+
+  // ---- Security Repair 05A: commercial reconciliation queue (finding A) ---------
+
+  enqueueCommercialReconciliation(subscriptionId: string, reason: string): Promise<void>;
+  dequeueCommercialReconciliations(limit: number): Promise<CommercialReconciliationItem[]>;
+  ackCommercialReconciliation(subscriptionId: string): Promise<void>;
+
+  // ---- Security Repair 05A: rejected-webhook retention (finding G) --------------
+
+  purgeRejectedWebhooks(beforeIso: string): Promise<number>;
+
+  // ---- Security Repair 05A: invoice identity (finding B) -------------------------
+
+  findInvoiceByProviderRef(providerInvoiceRef: string): Promise<Invoice | undefined>;
+
+  // ---- Security Repair 05A: provider plan mapping (finding C) ---------------------
+
+  findProviderPlanMapping(
+    providerName: string,
+    environment: string,
+    providerPlanRef: string,
+  ): Promise<{ moxPriceVersionId: string; productId: string } | undefined>;
 }
 
 export class InMemoryBillingStore implements BillingStore {
@@ -124,6 +192,11 @@ export class InMemoryBillingStore implements BillingStore {
   private readonly checkoutByProviderRef = new Map<string, string>();
   private readonly invoices = new Map<string, Invoice>();
   private readonly webhooks = new Map<string, WebhookRecord>();
+  private readonly providerMappings = new Map<string, ProviderObjectMapping>();
+  private readonly providerEffects = new Map<string, ProviderBillingEffect>();
+  private readonly cancellations = new Map<string, SubscriptionCancellation>();
+  private readonly reconciliationQueue = new Map<string, CommercialReconciliationItem>();
+  private readonly planMappings = new Map<string, { moxPriceVersionId: string; productId: string }>();
 
   async createProduct(product: Product): Promise<Product> {
     this.products.set(product.id, product);
@@ -276,8 +349,13 @@ export class InMemoryBillingStore implements BillingStore {
     return [...this.subscriptions.values()].filter((s) => states.includes(s.state));
   }
 
+  /** Base items are idempotent (crash-replay); add-ons keep append semantics. */
   async addItem(item: SubscriptionItem): Promise<SubscriptionItem> {
     const list = this.items.get(item.subscriptionId) ?? [];
+    if (item.kind === "base") {
+      const existing = list.find((i) => i.kind === "base");
+      if (existing) return existing;
+    }
     list.push(item);
     this.items.set(item.subscriptionId, list);
     return item;
@@ -330,10 +408,12 @@ export class InMemoryBillingStore implements BillingStore {
 
   async claimCheckoutSession(id: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<CheckoutSession | undefined> {
     const session = this.checkoutSessions.get(id);
-    if (!session || session.state === "completed") return undefined;
+    if (!session || session.state === "completed" || session.state === "expired") return undefined;
     if (session.claimExpiresAt && session.claimExpiresAt > nowIso) return undefined;
     session.claimOwner = owner;
     session.claimExpiresAt = leaseUntilIso;
+    // State machine: created/redirected → applying; crash-replay re-claims.
+    session.state = "applying";
     this.checkoutSessions.set(id, session);
     return { ...session };
   }
@@ -410,9 +490,16 @@ export class InMemoryBillingStore implements BillingStore {
 
   private readonly providerPayments = new Map<string, ProviderPaymentRecord>();
 
+  /** Exactly-once per (provider, externalEventId); outcome updates on replay. */
   async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
     const key = `${record.providerName}:${record.externalEventId}`;
-    if (this.providerPayments.has(key)) return false;
+    const existing = this.providerPayments.get(key);
+    if (existing) {
+      if (existing.state !== record.state) {
+        this.providerPayments.set(key, { ...existing, ...record, id: existing.id });
+      }
+      return false;
+    }
     this.providerPayments.set(key, { ...record });
     return true;
   }
@@ -421,6 +508,235 @@ export class InMemoryBillingStore implements BillingStore {
     return [...this.providerPayments.values()]
       .filter((p) => p.orgId === orgId)
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+  }
+
+  // ---- Security Repair 05A: provider-object mappings ---------------------------
+
+  async upsertProviderObjectMapping(mapping: ProviderObjectMapping): Promise<void> {
+    const provided = [
+      ["checkoutSessionRef", mapping.checkoutSessionRef],
+      ["providerSubscriptionRef", mapping.providerSubscriptionRef],
+      ["providerInvoiceRef", mapping.providerInvoiceRef],
+      ["providerPaymentRef", mapping.providerPaymentRef],
+      ["providerPaymentIntentRef", mapping.providerPaymentIntentRef],
+      ["providerChargeRef", mapping.providerChargeRef],
+    ] as const;
+    const refs = provided.filter(([, v]) => v !== undefined) as Array<[string, string]>;
+    if (refs.length === 0) return;
+
+    const matching = new Map<string, ProviderObjectMapping>();
+    for (const row of this.providerMappings.values()) {
+      if (row.providerName !== mapping.providerName || row.environment !== mapping.environment) continue;
+      const sharesRef = refs.some(([field, value]) => (row as unknown as Record<string, unknown>)[field] === value);
+      const sharesSub = mapping.subscriptionId && row.subscriptionId === mapping.subscriptionId;
+      const sharesOrg = !mapping.subscriptionId && mapping.orgId && row.orgId === mapping.orgId;
+      if (sharesRef || sharesSub || sharesOrg) matching.set(row.id, row);
+    }
+
+    const subIds = new Set([...matching.values()].map((r) => r.subscriptionId).filter(Boolean));
+    const orgIds = new Set([...matching.values()].map((r) => r.orgId).filter(Boolean));
+    const conflict = subIds.size > 1 || (subIds.size === 0 && orgIds.size > 1);
+    if (conflict) {
+      for (const row of matching.values()) {
+        this.providerMappings.set(row.id, {
+          ...row,
+          resolutionState: "reconciliation_required",
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return;
+    }
+
+    let target = [...matching.values()].find((r) => mapping.subscriptionId && r.subscriptionId === mapping.subscriptionId)
+      ?? [...matching.values()].find((r) => mapping.orgId && r.orgId === mapping.orgId)
+      ?? [...matching.values()][0];
+
+    if (!target) {
+      target = {
+        id: randomUUID(),
+        providerName: mapping.providerName,
+        environment: mapping.environment,
+        resolutionState: "resolved",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    const merged: ProviderObjectMapping = { ...target, updatedAt: new Date().toISOString() };
+    for (const [field, value] of refs) {
+      if (!(merged as unknown as Record<string, unknown>)[field]) {
+        (merged as unknown as Record<string, unknown>)[field] = value;
+      }
+    }
+    if (!merged.orgId && mapping.orgId) merged.orgId = mapping.orgId;
+    if (!merged.subscriptionId && mapping.subscriptionId) merged.subscriptionId = mapping.subscriptionId;
+    if (!merged.providerCustomerRef && mapping.providerCustomerRef) merged.providerCustomerRef = mapping.providerCustomerRef;
+    this.providerMappings.set(merged.id, merged);
+
+    for (const row of matching.values()) {
+      if (row.id === merged.id) continue;
+      for (const [field, value] of refs) {
+        if (!(merged as unknown as Record<string, unknown>)[field] && (row as unknown as Record<string, unknown>)[field]) {
+          (merged as unknown as Record<string, unknown>)[field] = (row as unknown as Record<string, unknown>)[field];
+        }
+      }
+      if (!merged.orgId && row.orgId) merged.orgId = row.orgId;
+      if (!merged.subscriptionId && row.subscriptionId) merged.subscriptionId = row.subscriptionId;
+      this.providerMappings.set(merged.id, merged);
+      this.providerMappings.delete(row.id);
+    }
+  }
+
+  async findProviderObjectMappings(
+    providerName: string,
+    environment: string,
+    refs: {
+      checkoutSessionRef?: string;
+      providerSubscriptionRef?: string;
+      providerInvoiceRef?: string;
+      providerPaymentRef?: string;
+      providerPaymentIntentRef?: string;
+      providerChargeRef?: string;
+    },
+  ): Promise<ProviderObjectMapping[]> {
+    const entries = Object.entries(refs).filter(([, v]) => v !== undefined) as Array<[string, string]>;
+    const out: ProviderObjectMapping[] = [];
+    for (const row of this.providerMappings.values()) {
+      if (row.providerName !== providerName || row.environment !== environment) continue;
+      if (entries.some(([field, value]) => (row as unknown as Record<string, unknown>)[field] === value)) {
+        out.push({ ...row });
+      }
+    }
+    return out;
+  }
+
+  // ---- Security Repair 05A: business-effect idempotency -------------------------
+
+  async claimProviderBillingEffect(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    effectType: BusinessEffectType;
+    subscriptionId?: string;
+    externalEventId: string;
+  }): Promise<boolean> {
+    const key = `${input.providerName}:${input.environment}:${input.billingIdentity}:${input.effectType}`;
+    if (this.providerEffects.has(key)) return false;
+    this.providerEffects.set(key, {
+      id: randomUUID(),
+      providerName: input.providerName,
+      environment: input.environment,
+      billingIdentity: input.billingIdentity,
+      effectType: input.effectType,
+      subscriptionId: input.subscriptionId,
+      outcome: "applied",
+      externalEventId: input.externalEventId,
+      createdAt: new Date().toISOString(),
+    });
+    return true;
+  }
+
+  async hasAppliedFinancialEffect(subscriptionId: string): Promise<boolean> {
+    for (const effect of this.providerEffects.values()) {
+      if (
+        effect.subscriptionId === subscriptionId &&
+        effect.outcome === "applied" &&
+        (effect.effectType === "checkout_grant" || effect.effectType === "period_extension")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ---- Security Repair 05A: cancellations ----------------------------------------
+
+  async upsertSubscriptionCancellation(record: SubscriptionCancellation): Promise<SubscriptionCancellation> {
+    const existing = this.cancellations.get(record.subscriptionId);
+    const merged: SubscriptionCancellation = {
+      ...(existing ?? {
+        subscriptionId: record.subscriptionId,
+        state: "cancel_requested",
+        requestedBy: record.requestedBy,
+        attempts: 0,
+        createdAt: new Date().toISOString(),
+      }),
+      ...record,
+      updatedAt: new Date().toISOString(),
+    };
+    this.cancellations.set(record.subscriptionId, merged);
+    return { ...merged };
+  }
+
+  async getSubscriptionCancellation(subscriptionId: string): Promise<SubscriptionCancellation | undefined> {
+    const row = this.cancellations.get(subscriptionId);
+    return row ? { ...row } : undefined;
+  }
+
+  async listDueCancellationRetries(nowIso: string, limit: number): Promise<SubscriptionCancellation[]> {
+    return [...this.cancellations.values()]
+      .filter(
+        (c) =>
+          ["provider_cancel_pending", "reconciliation_required"].includes(c.state) &&
+          (!c.nextAttemptAt || c.nextAttemptAt <= nowIso),
+      )
+      .slice(0, limit)
+      .map((c) => ({ ...c }));
+  }
+
+  // ---- Security Repair 05A: commercial reconciliation queue ----------------------
+
+  async enqueueCommercialReconciliation(subscriptionId: string, reason: string): Promise<void> {
+    this.reconciliationQueue.set(subscriptionId, {
+      subscriptionId,
+      reason,
+      enqueuedAt: new Date().toISOString(),
+    });
+  }
+
+  async dequeueCommercialReconciliations(limit: number): Promise<CommercialReconciliationItem[]> {
+    return [...this.reconciliationQueue.values()].slice(0, limit).map((i) => ({ ...i }));
+  }
+
+  async ackCommercialReconciliation(subscriptionId: string): Promise<void> {
+    this.reconciliationQueue.delete(subscriptionId);
+  }
+
+  // ---- Security Repair 05A: rejected-webhook retention ----------------------------
+
+  async purgeRejectedWebhooks(beforeIso: string): Promise<number> {
+    let purged = 0;
+    for (const [key, record] of this.webhooks) {
+      if (record.status === "rejected" && record.receivedAt < beforeIso) {
+        this.webhooks.delete(key);
+        purged += 1;
+      }
+    }
+    return purged;
+  }
+
+  async findInvoiceByProviderRef(providerInvoiceRef: string): Promise<Invoice | undefined> {
+    for (const invoice of this.invoices.values()) {
+      if (invoice.providerInvoiceRef === providerInvoiceRef) return invoice;
+    }
+    return undefined;
+  }
+
+  async findProviderPlanMapping(
+    providerName: string,
+    environment: string,
+    providerPlanRef: string,
+  ): Promise<{ moxPriceVersionId: string; productId: string } | undefined> {
+    return this.planMappings.get(`${providerName}:${environment}:${providerPlanRef}`);
+  }
+
+  /** Test/admin seam for data-driven provider plan mappings. */
+  setProviderPlanMapping(
+    providerName: string,
+    environment: string,
+    providerPlanRef: string,
+    mapping: { moxPriceVersionId: string; productId: string },
+  ): void {
+    this.planMappings.set(`${providerName}:${environment}:${providerPlanRef}`, mapping);
   }
 
   async claimSubscriptionRenewal(id: string, periodEndIso: string, owner: string, leaseUntilIso: string, nowIso: string): Promise<Subscription | undefined> {

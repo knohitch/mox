@@ -1,5 +1,5 @@
 /**
- * Stripe adapter — Stripe Billing / Checkout (Prompt 01).
+ * Stripe adapter — Stripe Billing / Checkout (Prompt 01, Security Repair 05A).
  *
  * - Webhook: `Stripe-Signature` = `t=<unix>,v1=<hmac_sha256_hex>` computed
  *   over `${t}.${rawBody}` with the webhook signing secret; ±5 min
@@ -9,12 +9,32 @@
  * - Recurring is provider-managed: invoice.paid / invoice.payment_failed
  *   drive renewal state; merchant-initiated charges are not faked.
  * - Cancellation: DELETE /v1/subscriptions/:id.
+ *
+ * Security Repair 05A lifecycle coverage (official event shapes consulted:
+ * docs.stripe.com/api events / disputes / subscriptions):
+ *
+ *   checkout.session.completed / async_payment_succeeded → checkout.completed
+ *     (customer, subscription, payment_intent refs recorded);
+ *   checkout.session.async_payment_failed            → checkout.failed;
+ *   invoice.paid / invoice.payment_succeeded         → payment.succeeded
+ *     (invoice + subscription + payment_intent refs);
+ *   invoice.payment_failed                           → payment.failed;
+ *   customer.subscription.updated                    → subscription.updated
+ *     (status, cancel_at_period_end, price ids, period bounds);
+ *   customer.subscription.deleted                    → subscription.canceled;
+ *   charge.refunded                                  → payment.refunded
+ *     (charge + payment_intent + invoice refs);
+ *   charge.dispute.created / .closed                 → dispute.opened/resolved
+ *     (dispute + charge + payment_intent refs).
+ *
+ * Currency is normalized to uppercase ISO-4217 before it ever reaches the
+ * service (usd → USD); semantic equality remains exact after normalization.
  */
 
 import { createHmac } from "node:crypto";
 import type { BillingProvider, ProviderCheckoutInput, ProviderCheckoutResult, ProviderEvent } from "../provider.js";
 import { WebhookVerificationError } from "../provider.js";
-import { httpJson, requireConfigured, safeEquals } from "./shared.js";
+import { httpJson, normalizeCurrency, requireConfigured, safeEquals } from "./shared.js";
 
 export interface StripeConfig {
   environment: "test" | "live";
@@ -46,6 +66,44 @@ interface StripeResponse {
   currency?: string;
   created?: number;
   current_period_end?: number;
+}
+
+/** Stripe object shapes per official API reference (docs.stripe.com/api). */
+interface StripeEventObject {
+  id?: string;
+  object?: string;
+  mode?: string;
+  payment_status?: string;
+  subscription?: string | null;
+  customer?: string | null;
+  payment_intent?: string | null;
+  setup_intent?: string | null;
+  invoice?: string | null;
+  charge?: string | null;
+  amount_total?: number;
+  amount_due?: number;
+  amount_paid?: number;
+  amount_refunded?: number;
+  amount?: number;
+  currency?: string | null;
+  status?: string;
+  cancel_at_period_end?: boolean;
+  current_period_start?: number;
+  current_period_end?: number;
+  trial_end?: number | null;
+  items?: { data?: Array<{ price?: { id?: string } }> };
+}
+
+interface StripeEventEnvelope {
+  id?: string;
+  type?: string;
+  created?: number;
+  livemode?: boolean;
+  data?: { object?: StripeEventObject };
+}
+
+function unixToIso(seconds: number | undefined): string | undefined {
+  return seconds !== undefined ? new Date(seconds * 1000).toISOString() : undefined;
 }
 
 export class StripeProvider implements BillingProvider {
@@ -140,38 +198,25 @@ export class StripeProvider implements BillingProvider {
     const matched = signatures.some((sig) => safeEquals(sig, expected));
     if (!matched) throw new WebhookVerificationError("v1 signature mismatch");
 
-    let parsed: {
-      id?: string;
-      type?: string;
-      created?: number;
-      livemode?: boolean;
-      data?: { object?: Record<string, unknown> };
-    };
+    let parsed: StripeEventEnvelope;
     try {
-      parsed = JSON.parse(rawBody);
+      parsed = JSON.parse(rawBody) as StripeEventEnvelope;
     } catch {
       throw new WebhookVerificationError("payload is not JSON");
     }
-    const obj = (parsed.data?.object ?? {}) as {
-      id?: string;
-      subscription?: string;
-      subscription_details?: unknown;
-      amount_total?: number;
-      payment_status?: string;
-      mode?: string;
-      amount_due?: number;
-      amount_paid?: number;
-      currency?: string;
-      created?: number;
-      billing_reason?: string;
-      status?: string;
-    };
-    const occurredAt =
-      parsed.created !== undefined ? new Date(parsed.created * 1000).toISOString() : undefined;
+    const obj = parsed.data?.object ?? {};
+    const occurredAt = unixToIso(parsed.created);
     const eventEnvironment = parsed.livemode === true ? "live" : parsed.livemode === false ? "test" : undefined;
     if (eventEnvironment && eventEnvironment !== this.environment) {
       throw new WebhookVerificationError(`stripe livemode ${eventEnvironment} does not match ${this.environment}`);
     }
+    const currency = normalizeCurrency(obj.currency);
+    const customerRef = typeof obj.customer === "string" ? obj.customer : undefined;
+    const paymentIntentRef = typeof obj.payment_intent === "string" ? obj.payment_intent : undefined;
+    const subscriptionRef = typeof obj.subscription === "string" ? obj.subscription : undefined;
+    const providerPlanRefs = (obj.items?.data ?? [])
+      .map((item) => item.price?.id)
+      .filter((id): id is string => typeof id === "string");
 
     switch (parsed.type) {
       case "checkout.session.completed":
@@ -186,10 +231,25 @@ export class StripeProvider implements BillingProvider {
           externalEventId: parsed.id ?? `checkout:${obj.id}`,
           type: "checkout.completed",
           subjectRef: obj.id ?? "",
-          subscriptionRef: typeof obj.subscription === "string" ? obj.subscription : undefined,
+          subscriptionRef,
+          customerRef,
+          paymentIntentRef,
           occurredAt,
           amountMinor: obj.amount_total !== undefined ? BigInt(obj.amount_total) : undefined,
-          currency: obj.currency,
+          currency,
+          payload: parsed,
+        };
+      case "checkout.session.async_payment_failed":
+        // Materially affects entitlement: the checkout never completed, so
+        // the session must not be claimable as paid.
+        return {
+          externalEventId: parsed.id ?? `checkout.async_failed:${obj.id}`,
+          type: "checkout.failed",
+          subjectRef: obj.id ?? "",
+          subscriptionRef,
+          customerRef,
+          paymentIntentRef,
+          occurredAt,
           payload: parsed,
         };
       case "invoice.paid":
@@ -197,21 +257,42 @@ export class StripeProvider implements BillingProvider {
         return {
           externalEventId: parsed.id ?? `invoice.paid:${obj.id}`,
           type: "payment.succeeded",
-          subjectRef: typeof obj.subscription === "string" ? obj.subscription : "",
-          subscriptionRef: typeof obj.subscription === "string" ? obj.subscription : undefined,
+          subjectRef: subscriptionRef ?? obj.id ?? "",
+          subscriptionRef,
+          customerRef,
+          paymentIntentRef,
+          invoiceRef: typeof obj.id === "string" ? obj.id : undefined,
           occurredAt,
           amountMinor: (obj.amount_paid ?? obj.amount_due) !== undefined ? BigInt((obj.amount_paid ?? obj.amount_due)!) : undefined,
-          currency: obj.currency,
-          invoiceRef: obj.id,
+          currency,
           payload: parsed,
         };
       case "invoice.payment_failed":
         return {
           externalEventId: parsed.id ?? `invoice.failed:${obj.id}`,
           type: "payment.failed",
-          subjectRef: typeof obj.subscription === "string" ? obj.subscription : "",
-          subscriptionRef: typeof obj.subscription === "string" ? obj.subscription : undefined,
+          subjectRef: subscriptionRef ?? obj.id ?? "",
+          subscriptionRef,
+          customerRef,
+          paymentIntentRef,
+          invoiceRef: typeof obj.id === "string" ? obj.id : undefined,
           occurredAt,
+          payload: parsed,
+        };
+      case "customer.subscription.updated":
+        return {
+          externalEventId: parsed.id ?? `sub.updated:${obj.id}`,
+          type: "subscription.updated",
+          subjectRef: obj.id ?? "",
+          subscriptionRef: typeof obj.id === "string" ? obj.id : undefined,
+          customerRef,
+          occurredAt,
+          subscriptionStatus: obj.status,
+          cancelAtPeriodEnd: obj.cancel_at_period_end,
+          providerPlanRefs,
+          currentPeriodStart: unixToIso(obj.current_period_start),
+          currentPeriodEnd: unixToIso(obj.current_period_end),
+          trialEndsAt: unixToIso(obj.trial_end ?? undefined),
           payload: parsed,
         };
       case "customer.subscription.deleted":
@@ -219,40 +300,53 @@ export class StripeProvider implements BillingProvider {
           externalEventId: parsed.id ?? `sub.deleted:${obj.id}`,
           type: "subscription.canceled",
           subjectRef: obj.id ?? "",
-          subscriptionRef: obj.id,
+          subscriptionRef: typeof obj.id === "string" ? obj.id : undefined,
+          customerRef,
           occurredAt,
           payload: parsed,
         };
       case "charge.refunded":
+        // The Charge object: id (ch_), payment_intent (pi_), invoice (in_).
         return {
           externalEventId: parsed.id ?? `charge.refunded:${obj.id}`,
           type: "payment.refunded",
-          subjectRef: typeof obj.subscription === "string" ? obj.subscription : obj.id ?? "",
-          subscriptionRef: typeof obj.subscription === "string" ? obj.subscription : undefined,
-          transactionRef: obj.id,
+          subjectRef: obj.id ?? "",
+          subscriptionRef,
+          chargeRef: typeof obj.id === "string" ? obj.id : undefined,
+          paymentIntentRef,
+          invoiceRef: typeof obj.invoice === "string" ? obj.invoice : undefined,
+          customerRef,
           occurredAt,
-          amountMinor: (obj as { amount_refunded?: number }).amount_refunded !== undefined ? BigInt((obj as { amount_refunded?: number }).amount_refunded!) : undefined,
-          currency: obj.currency,
+          amountMinor: obj.amount_refunded !== undefined ? BigInt(obj.amount_refunded) : undefined,
+          currency,
           payload: parsed,
         };
-      case "charge.dispute.created":
+      case "charge.dispute.created": {
+        // The Dispute object: id (dp_), charge (ch_), payment_intent (pi_).
+        const charge = typeof obj.charge === "string" ? obj.charge : undefined;
         return {
           externalEventId: parsed.id ?? `charge.dispute.created:${obj.id}`,
           type: "dispute.opened",
-          subjectRef: typeof (obj as { charge?: string }).charge === "string" ? (obj as { charge: string }).charge : obj.id ?? "",
-          transactionRef: typeof (obj as { charge?: string }).charge === "string" ? (obj as { charge: string }).charge : undefined,
+          subjectRef: charge ?? obj.id ?? "",
+          disputeRef: typeof obj.id === "string" ? obj.id : undefined,
+          chargeRef: charge,
+          paymentIntentRef,
           occurredAt,
-          amountMinor: (obj as { amount?: number }).amount !== undefined ? BigInt((obj as { amount?: number }).amount!) : undefined,
-          currency: obj.currency,
+          amountMinor: obj.amount !== undefined ? BigInt(obj.amount) : undefined,
+          currency,
           payload: parsed,
         };
+      }
       case "charge.dispute.closed": {
-        const status = (obj as { status?: string }).status;
+        const status = obj.status;
+        const charge = typeof obj.charge === "string" ? obj.charge : undefined;
         return {
           externalEventId: parsed.id ?? `charge.dispute.closed:${obj.id}`,
           type: "dispute.resolved",
-          subjectRef: typeof (obj as { charge?: string }).charge === "string" ? (obj as { charge: string }).charge : obj.id ?? "",
-          transactionRef: typeof (obj as { charge?: string }).charge === "string" ? (obj as { charge: string }).charge : undefined,
+          subjectRef: charge ?? obj.id ?? "",
+          disputeRef: typeof obj.id === "string" ? obj.id : undefined,
+          chargeRef: charge,
+          paymentIntentRef,
           occurredAt,
           resolution: status === "won" ? "won" : status === "lost" ? "lost" : "unknown",
           payload: parsed,
@@ -280,7 +374,7 @@ export class StripeProvider implements BillingProvider {
     return {
       paid: res.data.payment_status === "paid",
       amountMinor: res.data.amount_total !== undefined ? BigInt(res.data.amount_total) : undefined,
-      currency: res.data.currency,
+      currency: normalizeCurrency(res.data.currency),
       occurredAt:
         res.data.created !== undefined ? new Date(res.data.created * 1000).toISOString() : undefined,
       transactionRef: res.data.id,

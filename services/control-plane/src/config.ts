@@ -39,6 +39,33 @@ const PLATFORM_CAPABILITY_SET = new Set<string>([
   "*",
 ]);
 
+export interface WebhookAbuseControls {
+  /** Per-client-IP webhook requests allowed per window. */
+  perIpLimit: number;
+  perIpWindowMs: number;
+  /** Per-provider-path webhook requests allowed per window. */
+  perPathLimit: number;
+  perPathWindowMs: number;
+  /** Global emergency cap across all provider paths. */
+  globalLimit: number;
+  globalWindowMs: number;
+  /** Lock-out duration once a bucket exceeds its limit. */
+  lockMs: number;
+  /** Short TTL for UNVERIFIED/rejected junk; applied financial rows exempt. */
+  rejectedTtlMs: number;
+}
+
+export const DEFAULT_WEBHOOK_ABUSE: WebhookAbuseControls = {
+  perIpLimit: 120,
+  perIpWindowMs: 60_000,
+  perPathLimit: 600,
+  perPathWindowMs: 60_000,
+  globalLimit: 3000,
+  globalWindowMs: 60_000,
+  lockMs: 60_000,
+  rejectedTtlMs: 24 * 3600_000,
+};
+
 export interface ControlPlaneConfig {
   env: "production" | "development" | "test";
   port: number;
@@ -82,6 +109,12 @@ export interface ControlPlaneConfig {
   runtimeArgs: string[];
   runtimeCwd?: string;
   runtimeRequestTimeoutMs: number;
+  /**
+   * Security Repair 05A §G: abuse controls for the HTTP-public billing
+   * webhook endpoint (rate limits + rejected-junk retention). Optional so
+   * test harnesses can omit it; defaults come from DEFAULT_WEBHOOK_ABUSE.
+   */
+  webhookAbuse?: WebhookAbuseControls;
 }
 
 function requireValue(env: Record<string, string | undefined>, key: string, purpose: string): string {
@@ -240,6 +273,20 @@ export function loadControlPlaneConfig(
       .filter(Boolean),
     runtimeCwd: env["MOX_RUNTIME_CWD"] || undefined,
     runtimeRequestTimeoutMs: Number(env["MOX_RUNTIME_REQUEST_TIMEOUT_MS"] ?? 60_000),
+    // Security Repair 05A §G: generous limits keep legitimate provider
+    // bursts/retries accepted while bounding abuse. The 256 KB body cap is
+    // enforced in http.readRawBody BEFORE any processing.
+    webhookAbuse: {
+      perIpLimit: Number(env["MOX_WEBHOOK_PER_IP_LIMIT"] ?? DEFAULT_WEBHOOK_ABUSE.perIpLimit),
+      perIpWindowMs: DEFAULT_WEBHOOK_ABUSE.perIpWindowMs,
+      perPathLimit: Number(env["MOX_WEBHOOK_PER_PATH_LIMIT"] ?? DEFAULT_WEBHOOK_ABUSE.perPathLimit),
+      perPathWindowMs: DEFAULT_WEBHOOK_ABUSE.perPathWindowMs,
+      globalLimit: Number(env["MOX_WEBHOOK_GLOBAL_LIMIT"] ?? DEFAULT_WEBHOOK_ABUSE.globalLimit),
+      globalWindowMs: DEFAULT_WEBHOOK_ABUSE.globalWindowMs,
+      lockMs: Number(env["MOX_WEBHOOK_LOCK_MS"] ?? DEFAULT_WEBHOOK_ABUSE.lockMs),
+      rejectedTtlMs: Number(env["MOX_WEBHOOK_REJECTED_TTL_MS"] ?? DEFAULT_WEBHOOK_ABUSE.rejectedTtlMs),
+      ...overrides.webhookAbuse,
+    },
     ...overrides,
   };
 }

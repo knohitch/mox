@@ -311,7 +311,11 @@ describe("billing", () => {
       currency: "USD",
     });
     const wrong = await fx.billing.handleProviderWebhook(fx.providerName, wrongPayment.headers, wrongPayment.raw);
-    expect(wrong.rejected).toBe(true);
+    // Security Repair 05A: an unbound verified refund is never silently
+    // dropped or rejected — it is persisted as reconciliation_required.
+    expect(wrong.applied).toBe(false);
+    expect(wrong.rejected).not.toBe(true);
+    expect(wrong.reconciliationRequired).toBe(true);
 
     const dispute = signedBody(fx.secret, {
       eventId: "dispute-open",

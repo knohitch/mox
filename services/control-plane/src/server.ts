@@ -6,7 +6,9 @@
 
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { sql } from "drizzle-orm";
 import type { ControlPlaneServices } from "./composition.js";
+import { DEFAULT_WEBHOOK_ABUSE } from "./config.js";
 import { verifyDependencies } from "./composition.js";
 import { AuthError } from "./auth.js";
 import { buildApiRouter } from "./api.js";
@@ -40,11 +42,36 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       const ticker = setInterval(() => {
         void (async () => {
           try {
-            await services.billing.runRenewals();
-            await services.billing.runRetentionSweep();
-            await services.orchestrator.reconcile();
-            await services.orchestrator.runRetentionSweep();
-            await services.notifications.runDueJobs();
+            const nowIso = new Date().toISOString();
+            await services.billing.runRenewals(nowIso);
+            await services.billing.runRetentionSweep(nowIso);
+            await services.billing.runCancellationRetries(nowIso);
+            // Security Repair 05A §G: rejected webhook junk gets a short TTL;
+            // applied financial history is never purged by this job.
+            await services.billing.purgeRejectedWebhooks(
+              new Date(Date.now() - (services.config.webhookAbuse ?? DEFAULT_WEBHOOK_ABUSE).rejectedTtlMs).toISOString(),
+            );
+            // Security Repair 05A §A: commercial-ineligibility reconciliation
+            // is QUEUED by webhook handlers and drained here — compute is
+            // never destroyed synchronously inside a webhook.
+            for (const item of await services.billing.dequeueCommercialReconciliations(50)) {
+              try {
+                const sub = await services.billing.store.getSubscription(item.subscriptionId);
+                if (!sub) continue;
+                const orders = await services.orchestrator.listOrders(sub.orgId);
+                for (const order of orders) {
+                  if (["canceled", "destroyed"].includes(order.state)) continue;
+                  await services.orchestrator.cancelOrder(order.id);
+                }
+              } catch {
+                // Next tick retries; the queue row stays durable until acked.
+                continue;
+              }
+              await services.billing.ackCommercialReconciliation(item.subscriptionId);
+            }
+            await services.orchestrator.reconcile(nowIso);
+            await services.orchestrator.runRetentionSweep(nowIso);
+            await services.notifications.runDueJobs(nowIso);
             const lost = await services.orchestrator.sweepLostNodes();
             for (const nodeId of lost) {
               const node = await services.orchestrator.store.getNode(nodeId).catch(() => undefined);
@@ -61,7 +88,10 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
                 at: new Date().toISOString(),
               });
             }
-            await services.notifications.store.purgeExpired(new Date().toISOString());
+            await services.notifications.store.purgeExpired(nowIso);
+            // Security Repair 05A §G: security-event logging must not grow
+            // without bound either (30-day retention).
+            await services.db.execute(sql`DELETE FROM security_events WHERE at < now() - interval '30 days'`);
           } catch {
             // Ticker failures never crash the control plane; next tick retries.
           }

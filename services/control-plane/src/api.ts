@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Mox Control Plane HTTP API (Prompt 00 Â§A). Every screen-facing surface is
  * served from authoritative services/stores â€” never demo data. Endpoints
  * that have no backing capability yet return honest 501s with machine
@@ -79,7 +79,12 @@ import {
   switchActiveOrg,
 } from "./auth.js";
 import { httpError, Router, sendJson, type RequestContext } from "./http.js";
-import { PLATFORM_ROLE_CAPABILITIES, type PlatformAdminCapability, type PlatformAdminRole } from "./config.js";
+import {
+  DEFAULT_WEBHOOK_ABUSE,
+  PLATFORM_ROLE_CAPABILITIES,
+  type PlatformAdminCapability,
+  type PlatformAdminRole,
+} from "./config.js";
 import { bucketHash, clientIp, DurableRateLimiter } from "./rate-limit.js";
 
 export interface ApiDeps {
@@ -94,6 +99,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const { services } = deps;
   const db = () => services.db;
   const authLimiter = new DurableRateLimiter(db());
+  const webhookLimiter = new DurableRateLimiter(db());
   const ORG_ROLE_RANK = { viewer: 0, member: 1, admin: 2, owner: 3 } as const;
   const sseByUser = new Map<string, number>();
   const sseByIp = new Map<string, number>();
@@ -1215,7 +1221,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
     const admin = await requireAdminCapability(ctx, "admin.customers.write");
     const action = ctx.params.action!;
     if (action !== "suspend" && action !== "reactivate") throw httpError("unsupported customer action", 400);
-    const body = ctx.body as { reason?: string } | undefined;
+    const body = ctx.body as { reason?: string; financialReconciled?: boolean } | undefined;
     const orgSubs = await db().select().from(subscriptions).where(eq(subscriptions.orgId, ctx.params.orgId!));
     const subscriptionErrors: Array<{ subscriptionId: string; error: string }> = [];
     for (const sub of orgSubs) {
@@ -1223,7 +1229,12 @@ export function buildApiRouter(deps: ApiDeps): Router {
         if (action === "suspend" && !["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
           await services.billing.adminSuspend(sub.id, admin.userId, body?.reason ?? "platform_admin_suspended");
         } else if (action === "reactivate" && sub.state === "suspended") {
-          await services.billing.adminReactivate(sub.id, admin.userId);
+          // Security Repair 05A §I: refund/dispute/fraud/compliance
+          // suspensions require an EXPLICIT financial-reconciliation
+          // assertion from the admin — a generic reactivation is refused.
+          await services.billing.adminReactivate(sub.id, admin.userId, {
+            financialReconciled: body?.financialReconciled === true,
+          });
         } else if (action === "reactivate" && ["canceled", "retention", "deleted"].includes(sub.state)) {
           subscriptionErrors.push({ subscriptionId: sub.id, error: `cannot reactivate ${sub.state} subscription` });
         }
@@ -2093,7 +2104,19 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.get("/api/billing/subscription", async (ctx) => {
     const identity = await requireAuth(ctx, "billing");
     const sub = await services.billing.getActiveSubscription(identity.orgId);
-    return sub ?? null;
+    if (!sub) return null;
+    const cancellation = await services.billing.getSubscriptionCancellation(sub.id);
+    return {
+      ...sub,
+      cancellation: cancellation
+        ? {
+            state: cancellation.state,
+            attempts: cancellation.attempts,
+            lastError: cancellation.lastError,
+            nextAttemptAt: cancellation.nextAttemptAt,
+          }
+        : null,
+    };
   });
 
   router.get("/api/billing/invoices", async (ctx) => {
@@ -2116,12 +2139,32 @@ export function buildApiRouter(deps: ApiDeps): Router {
     }));
   });
 
+  /**
+   * Entitlement read (Security Repair 05A §J): uses the SAME commercial-
+   * access authority as entitlement-bearing mutations. Expired/suspended/
+   * refunded subscriptions report commerciallyEntitled:false with a denial
+   * reason, and effective entitlement VALUES are returned only while
+   * currently entitled.
+   */
   router.get("/api/billing/entitlements", async (ctx) => {
     const identity = await requireAuth(ctx, "billing");
-    const sub = await services.billing.getActiveSubscription(identity.orgId);
-    const planVersionId = sub?.planVersionId ?? "none";
-    const values = planVersionId === "none" ? {} : await services.entitlements.planValuesFor(planVersionId);
-    return { planVersionId, values };
+    const decision = await services.billing.evaluateCommercialAccess(identity.orgId);
+    const sub = decision.subscription;
+    const values =
+      decision.entitled && decision.planVersionId
+        ? await services.entitlements.planValuesFor(decision.planVersionId)
+        : {};
+    return {
+      state: sub?.state ?? null,
+      commerciallyEntitled: decision.entitled,
+      denialReason: decision.entitled ? undefined : decision.reason,
+      planVersionId: decision.entitled ? decision.planVersionId : undefined,
+      values,
+      suspensionReason: sub?.suspensionReason,
+      suspensionSource: sub?.suspensionSource,
+      reconciliationRequired: sub?.reconciliationRequired ?? false,
+      currentPeriodEnd: sub?.currentPeriodEnd,
+    };
   });
 
   // ---- Computer gateway + files/logs: honest 501s until wired --------------------
@@ -2220,9 +2263,36 @@ export function buildApiRouter(deps: ApiDeps): Router {
   };
 
   router.post("/webhooks/billing/:provider", async (ctx) => {
+    // Security Repair 05A §G: the endpoint stays HTTP-public for providers,
+    // but abuse is bounded durably: per-IP, per-provider-path and a global
+    // emergency cap. The 256 KB body cap is enforced in http.readRawBody
+    // BEFORE any parsing or verification work.
+    const controls = services.config.webhookAbuse ?? DEFAULT_WEBHOOK_ABUSE;
+    const ip = clientIp(ctx.req, services.config.trustedProxyIps);
+    const providerPath = String(ctx.params.provider ?? "").slice(0, 64);
+    const checks: Array<{ scope: string; key: string; limit: number; windowMs: number }> = [
+      { scope: "billing_webhook_ip", key: bucketHash(`ip:${ip}`), limit: controls.perIpLimit, windowMs: controls.perIpWindowMs },
+      { scope: "billing_webhook_path", key: bucketHash(`path:${providerPath}`), limit: controls.perPathLimit, windowMs: controls.perPathWindowMs },
+      { scope: "billing_webhook_global", key: bucketHash("global"), limit: controls.globalLimit, windowMs: controls.globalWindowMs },
+    ];
+    for (const check of checks) {
+      const verdict = await webhookLimiter.check({
+        scope: check.scope,
+        bucketKey: check.key,
+        limit: check.limit,
+        windowMs: check.windowMs,
+        lockMs: controls.lockMs,
+        requestIp: ip,
+        userAgent: ctx.req.headers["user-agent"],
+      });
+      if (!verdict.allowed) {
+        throw httpError("webhook rate limit exceeded", 429, { code: "webhook_rate_limited" });
+      }
+    }
+
     const raw = ctx.rawBody?.toString("utf8") ?? "";
     const result = await services.billing.handleProviderWebhook(
-      ctx.params.provider!,
+      providerPath,
       ctx.req.headers as Record<string, string>,
       raw,
     );

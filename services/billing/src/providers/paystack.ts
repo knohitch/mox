@@ -16,7 +16,7 @@
 import { createHmac } from "node:crypto";
 import type { BillingProvider, ProviderCheckoutInput, ProviderCheckoutResult, ProviderEvent } from "../provider.js";
 import { WebhookVerificationError } from "../provider.js";
-import { httpJson, requireConfigured, safeEquals } from "./shared.js";
+import { httpJson, normalizeCurrency, requireConfigured, safeEquals } from "./shared.js";
 
 export interface PaystackConfig {
   environment: "test" | "live";
@@ -151,6 +151,7 @@ export class PaystackProvider implements BillingProvider {
     }
     const data = parsed.data ?? {};
     const occurredAt = data.paid_at ?? data.createdAt;
+    const currency = normalizeCurrency(data.currency);
     switch (parsed.event) {
       case "charge.success":
         return {
@@ -158,9 +159,10 @@ export class PaystackProvider implements BillingProvider {
           type: "checkout.completed",
           subjectRef: data.reference ?? "",
           subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
+          transactionRef: data.reference,
           occurredAt,
           amountMinor: data.amount !== undefined ? BigInt(data.amount) : undefined,
-          currency: data.currency,
+          currency,
           payload: parsed,
         };
       case "invoice.payment_failed":
@@ -169,6 +171,7 @@ export class PaystackProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.id ?? data.reference}`,
           type: "payment.failed",
           subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.reference ?? "",
+          subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
           occurredAt,
           payload: parsed,
         };
@@ -179,7 +182,11 @@ export class PaystackProvider implements BillingProvider {
             externalEventId: `invoice.update:${data.id ?? data.reference}`,
             type: "payment.succeeded",
             subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? "",
+            subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
+            invoiceRef: data.id !== undefined ? `paystack-invoice:${data.id}` : undefined,
             occurredAt,
+            amountMinor: data.amount !== undefined ? BigInt(data.amount) : undefined,
+            currency: normalizeCurrency(data.currency),
             payload: parsed,
           };
         }
@@ -190,6 +197,7 @@ export class PaystackProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.id ?? data.subscription_code}`,
           type: "subscription.canceled",
           subjectRef: data.subscription_code ?? "",
+          subscriptionRef: data.subscription_code,
           occurredAt,
           payload: parsed,
         };
@@ -198,10 +206,11 @@ export class PaystackProvider implements BillingProvider {
           externalEventId: `refund.processed:${data.id ?? data.refund_reference ?? data.transaction?.id}`,
           type: "payment.refunded",
           subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
           transactionRef: data.transaction?.reference ?? data.reference,
           occurredAt: data.createdAt,
           amountMinor: data.amount !== undefined ? BigInt(data.amount) : data.transaction?.amount !== undefined ? BigInt(data.transaction.amount) : undefined,
-          currency: data.currency ?? data.transaction?.currency,
+          currency: normalizeCurrency(data.currency ?? data.transaction?.currency),
           payload: parsed,
         };
       case "charge.dispute.create":
@@ -210,10 +219,12 @@ export class PaystackProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.id ?? data.transaction?.id}`,
           type: "dispute.opened",
           subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
           transactionRef: data.transaction?.reference ?? data.reference,
+          disputeRef: data.id !== undefined ? `paystack-dispute:${data.id}` : undefined,
           occurredAt: data.createdAt,
           amountMinor: data.amount !== undefined ? BigInt(data.amount) : undefined,
-          currency: data.currency,
+          currency,
           payload: parsed,
         };
       case "charge.dispute.resolve":
@@ -221,7 +232,9 @@ export class PaystackProvider implements BillingProvider {
           externalEventId: `${parsed.event}:${data.id ?? data.transaction?.id}`,
           type: "dispute.resolved",
           subjectRef: data.subscription?.subscription_code ?? data.subscription_code ?? data.transaction?.reference ?? "",
+          subscriptionRef: data.subscription?.subscription_code ?? data.subscription_code,
           transactionRef: data.transaction?.reference ?? data.reference,
+          disputeRef: data.id !== undefined ? `paystack-dispute:${data.id}` : undefined,
           occurredAt: data.resolved_at ?? data.createdAt,
           resolution: data.resolution === "declined" ? "won" : data.resolution === "merchant-accepted" ? "accepted" : "unknown",
           payload: parsed,
@@ -252,7 +265,7 @@ export class PaystackProvider implements BillingProvider {
     return {
       paid: tx?.status === "success",
       amountMinor: tx?.amount !== undefined ? BigInt(tx.amount) : undefined,
-      currency: tx?.currency,
+      currency: normalizeCurrency(tx?.currency),
       occurredAt: tx?.paid_at,
       transactionRef: tx?.id ? String(tx.id) : undefined,
     };

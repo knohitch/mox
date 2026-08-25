@@ -1,27 +1,32 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Money } from "@mox/money";
 import type { BillingStore } from "@mox/billing";
 import type {
   AddonDefinition,
   BillingCustomer,
   CheckoutSession,
+  CommercialReconciliationItem,
   Invoice,
   PriceBook,
   PriceVersion,
   PricingRegion,
   Product,
   PlanVersion,
+  ProviderObjectMapping,
   ProviderPaymentRecord,
   Subscription,
+  SubscriptionCancellation,
   SubscriptionItem,
   SubscriptionTransition,
   WebhookRecord,
+  BusinessEffectType,
 } from "@mox/billing";
 import type { MoxDb } from "./client.js";
 import {
   addonDefinitions,
   billingCustomers,
   checkoutSessions,
+  commercialReconciliationQueue,
   currencies,
   entitlementDefinitions,
   invoices,
@@ -31,7 +36,11 @@ import {
   priceVersions,
   pricingRegions,
   products,
+  providerBillingEffects,
+  providerObjectMappings,
   providerPayments,
+  providerPlanMappings,
+  subscriptionCancellations,
   subscriptionItems,
   subscriptionTransitions,
   subscriptions,
@@ -384,15 +393,42 @@ export class PgBillingStore implements BillingStore {
     return rows.map(toSubscription);
   }
 
+  /** Base items are idempotent (crash-replay); add-ons keep append semantics. */
   async addItem(item: SubscriptionItem): Promise<SubscriptionItem> {
-    await this.db.insert(subscriptionItems).values({
-      id: asUuid(item.id),
-      subscriptionId: asUuid(item.subscriptionId),
-      kind: item.kind,
-      addonCode: item.addonCode ?? null,
-      quantity: item.quantity,
-      priceVersionId: item.priceVersionId ? asUuid(item.priceVersionId) : null,
-    });
+    const inserted = await this.db
+      .insert(subscriptionItems)
+      .values({
+        id: asUuid(item.id),
+        subscriptionId: asUuid(item.subscriptionId),
+        kind: item.kind,
+        addonCode: item.addonCode ?? null,
+        quantity: item.quantity,
+        priceVersionId: item.priceVersionId ? asUuid(item.priceVersionId) : null,
+      })
+      .onConflictDoNothing()
+      .returning({ id: subscriptionItems.id });
+    if (inserted.length > 0) return item;
+    const existing = await this.db
+      .select()
+      .from(subscriptionItems)
+      .where(
+        and(
+          eq(subscriptionItems.subscriptionId, asUuid(item.subscriptionId)),
+          eq(subscriptionItems.kind, "base"),
+        ),
+      )
+      .limit(1);
+    const row = existing[0];
+    if (row) {
+      return {
+        id: row.id,
+        subscriptionId: row.subscriptionId,
+        kind: row.kind,
+        addonCode: row.addonCode ?? undefined,
+        quantity: row.quantity,
+        priceVersionId: row.priceVersionId ?? undefined,
+      };
+    }
     return item;
   }
 
@@ -497,11 +533,13 @@ export class PgBillingStore implements BillingStore {
       .set({
         claimOwner: owner,
         claimExpiresAt: new Date(leaseUntilIso),
+        // State machine: created/redirected → applying; crash-replay re-claims.
+        state: "applying",
       })
       .where(
         and(
           eq(checkoutSessions.id, asUuid(id)),
-          sql`${checkoutSessions.state} <> 'completed'`,
+          inArray(checkoutSessions.state, ["created", "redirected", "applying"]),
           sql`(${checkoutSessions.claimExpiresAt} IS NULL OR ${checkoutSessions.claimExpiresAt} <= ${new Date(nowIso)})`,
         ),
       )
@@ -544,6 +582,16 @@ export class PgBillingStore implements BillingStore {
           eq(invoices.attempt, attempt),
         ),
       )
+      .limit(1);
+    return rows[0] ? toInvoice(rows[0]) : undefined;
+  }
+
+  /** Business-effect dedupe anchor: one provider invoice ref = one row. */
+  async findInvoiceByProviderRef(providerInvoiceRef: string): Promise<Invoice | undefined> {
+    const rows = await this.db
+      .select()
+      .from(invoices)
+      .where(eq(invoices.providerInvoiceRef, providerInvoiceRef))
       .limit(1);
     return rows[0] ? toInvoice(rows[0]) : undefined;
   }
@@ -676,33 +724,57 @@ export class PgBillingStore implements BillingStore {
     return updated.length > 0 ? "claimed" : "busy";
   }
 
-  /** Exactly-once ledger insert per (provider, externalEventId). */
+  /** Exactly-once ledger insert per (provider, externalEventId); the row's
+   *  state carries the persisted outcome (applied/duplicate/…). */
   async recordProviderPayment(record: ProviderPaymentRecord): Promise<boolean> {
+    const values = {
+      providerName: record.providerName,
+      environment: record.environment,
+      externalEventId: record.externalEventId,
+      eventType: record.eventType,
+      orgId: record.orgId ?? null,
+      providerSubscriptionRef: record.providerSubscriptionRef ?? null,
+      checkoutSessionRef: record.checkoutSessionRef ?? null,
+      providerTransactionRef: record.providerTransactionRef ?? null,
+      invoiceRef: record.invoiceRef ?? null,
+      providerPaymentIntentRef: record.providerPaymentIntentRef ?? null,
+      providerChargeRef: record.providerChargeRef ?? null,
+      providerCustomerRef: record.providerCustomerRef ?? null,
+      billingIdentity: record.billingIdentity ?? null,
+      state: record.state,
+      currency: record.currency ?? null,
+      amountMinor:
+        record.amountMinor !== undefined ? BigInt(record.amountMinor) : null,
+      payloadDigest: record.payloadDigest,
+      occurredAt: date(record.occurredAt),
+      receivedAt: new Date(record.receivedAt),
+      reconciledAt: date(record.reconciledAt),
+    };
     const inserted = await this.db
       .insert(providerPayments)
-      .values({
-        providerName: record.providerName,
-        environment: record.environment,
-        externalEventId: record.externalEventId,
-        eventType: record.eventType,
-        orgId: record.orgId ?? null,
-        providerSubscriptionRef: record.providerSubscriptionRef ?? null,
-        checkoutSessionRef: record.checkoutSessionRef ?? null,
-        providerTransactionRef: record.providerTransactionRef ?? null,
-        invoiceRef: record.invoiceRef ?? null,
-        state: record.state,
-        currency: record.currency ?? null,
-        amountMinor:
-          record.amountMinor !== undefined ? BigInt(record.amountMinor) : null,
-        payloadDigest: record.payloadDigest,
-        occurredAt: date(record.occurredAt),
-        receivedAt: new Date(record.receivedAt),
-        reconciledAt: date(record.reconciledAt),
-      })
+      .values(values)
       .onConflictDoNothing({
         target: [providerPayments.providerName, providerPayments.externalEventId],
       })
       .returning({ id: providerPayments.id });
+    if (inserted.length === 0) {
+      // Re-processed event: the persisted outcome advances to the newest
+      // conclusion (e.g. reconciliation_required → applied).
+      await this.db
+        .update(providerPayments)
+        .set({
+          state: record.state,
+          orgId: record.orgId ?? null,
+          billingIdentity: record.billingIdentity ?? null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(providerPayments.providerName, record.providerName),
+            eq(providerPayments.externalEventId, record.externalEventId),
+          ),
+        );
+    }
     return inserted.length > 0;
   }
 
@@ -723,6 +795,10 @@ export class PgBillingStore implements BillingStore {
       checkoutSessionRef: row.checkoutSessionRef ?? undefined,
       providerTransactionRef: row.providerTransactionRef ?? undefined,
       invoiceRef: row.invoiceRef ?? undefined,
+      providerPaymentIntentRef: row.providerPaymentIntentRef ?? undefined,
+      providerChargeRef: row.providerChargeRef ?? undefined,
+      providerCustomerRef: row.providerCustomerRef ?? undefined,
+      billingIdentity: row.billingIdentity ?? undefined,
       state: row.state,
       currency: row.currency ?? undefined,
       amountMinor: row.amountMinor ?? undefined,
@@ -751,6 +827,399 @@ export class PgBillingStore implements BillingStore {
       )
       .returning();
     return rows[0] ? toSubscription(rows[0]) : undefined;
+  }
+
+  // ---- Security Repair 05A: provider-object mappings (finding A) ---------------
+
+  private static readonly MAPPING_REF_FIELDS = [
+    "checkoutSessionRef",
+    "providerSubscriptionRef",
+    "providerInvoiceRef",
+    "providerPaymentRef",
+    "providerPaymentIntentRef",
+    "providerChargeRef",
+  ] as const;
+
+  async upsertProviderObjectMapping(mapping: ProviderObjectMapping): Promise<void> {
+    const refs = PgBillingStore.MAPPING_REF_FIELDS
+      .map((field) => ({ field, value: mapping[field] }))
+      .filter((entry): entry is { field: (typeof PgBillingStore.MAPPING_REF_FIELDS)[number]; value: string } => entry.value !== undefined);
+    if (refs.length === 0) return;
+
+    await this.db.transaction(async (tx) => {
+      const refConditions = refs.map(({ field, value }) =>
+        eq(PgBillingStore.columnForRef(field), value),
+      );
+      const matched = await tx
+        .select()
+        .from(providerObjectMappings)
+        .where(
+          and(
+            eq(providerObjectMappings.providerName, mapping.providerName),
+            eq(providerObjectMappings.environment, mapping.environment),
+            or(...refConditions),
+          ),
+        );
+      const bySub = mapping.subscriptionId
+        ? await tx
+            .select()
+            .from(providerObjectMappings)
+            .where(
+              and(
+                eq(providerObjectMappings.providerName, mapping.providerName),
+                eq(providerObjectMappings.environment, mapping.environment),
+                eq(providerObjectMappings.subscriptionId, asUuid(mapping.subscriptionId)),
+              ),
+            )
+        : [];
+      const byOrg = !mapping.subscriptionId && mapping.orgId
+        ? await tx
+            .select()
+            .from(providerObjectMappings)
+            .where(
+              and(
+                eq(providerObjectMappings.providerName, mapping.providerName),
+                eq(providerObjectMappings.environment, mapping.environment),
+                eq(providerObjectMappings.orgId, asUuid(mapping.orgId)),
+              ),
+            )
+        : [];
+      const seen = new Map<string, typeof matched[number]>();
+      for (const row of [...matched, ...bySub, ...byOrg]) seen.set(row.id, row);
+      const all = [...seen.values()];
+
+      const subIds = new Set(all.map((r) => r.subscriptionId).filter(Boolean));
+      const orgIds = new Set(all.map((r) => r.orgId).filter(Boolean));
+      const conflict = subIds.size > 1 || (subIds.size === 0 && orgIds.size > 1);
+      if (conflict) {
+        // Refs that would join two different local subscriptions/orgs can
+        // never be guessed: mark every involved row reconciliation-required.
+        for (const row of all) {
+          await tx
+            .update(providerObjectMappings)
+            .set({ resolutionState: "reconciliation_required", updatedAt: new Date() })
+            .where(eq(providerObjectMappings.id, row.id));
+        }
+        return;
+      }
+
+      type MappingRow = typeof providerObjectMappings.$inferSelect;
+      let target: MappingRow | undefined =
+        all.find((r) => mapping.subscriptionId && r.subscriptionId === asUuid(mapping.subscriptionId)) ??
+        all.find((r) => mapping.orgId && r.orgId === asUuid(mapping.orgId)) ??
+        all[0];
+
+      if (!target) {
+        const inserted = await tx
+          .insert(providerObjectMappings)
+          .values({
+            providerName: mapping.providerName,
+            environment: mapping.environment,
+            orgId: mapping.orgId ? asUuid(mapping.orgId) : null,
+            subscriptionId: mapping.subscriptionId ? asUuid(mapping.subscriptionId) : null,
+            providerCustomerRef: mapping.providerCustomerRef ?? null,
+            checkoutSessionRef: mapping.checkoutSessionRef ?? null,
+            providerSubscriptionRef: mapping.providerSubscriptionRef ?? null,
+            providerInvoiceRef: mapping.providerInvoiceRef ?? null,
+            providerPaymentRef: mapping.providerPaymentRef ?? null,
+            providerPaymentIntentRef: mapping.providerPaymentIntentRef ?? null,
+            providerChargeRef: mapping.providerChargeRef ?? null,
+            resolutionState: "resolved",
+          })
+          .onConflictDoNothing()
+          .returning();
+        if (inserted.length === 0) return;
+        target = inserted[0]!;
+      }
+
+      // Merge every other matched row into the target (fill empty refs),
+      // then drop the merged rows.
+      let current: MappingRow = target;
+      for (const row of all) {
+        if (row.id === current.id) continue;
+        const merged: MappingRow = {
+          ...current,
+          checkoutSessionRef: current.checkoutSessionRef ?? row.checkoutSessionRef,
+          providerSubscriptionRef: current.providerSubscriptionRef ?? row.providerSubscriptionRef,
+          providerInvoiceRef: current.providerInvoiceRef ?? row.providerInvoiceRef,
+          providerPaymentRef: current.providerPaymentRef ?? row.providerPaymentRef,
+          providerPaymentIntentRef: current.providerPaymentIntentRef ?? row.providerPaymentIntentRef,
+          providerChargeRef: current.providerChargeRef ?? row.providerChargeRef,
+          providerCustomerRef: current.providerCustomerRef ?? row.providerCustomerRef,
+          orgId: current.orgId ?? row.orgId,
+          subscriptionId: current.subscriptionId ?? row.subscriptionId,
+        };
+        await tx
+          .update(providerObjectMappings)
+          .set({
+            checkoutSessionRef: merged.checkoutSessionRef,
+            providerSubscriptionRef: merged.providerSubscriptionRef,
+            providerInvoiceRef: merged.providerInvoiceRef,
+            providerPaymentRef: merged.providerPaymentRef,
+            providerPaymentIntentRef: merged.providerPaymentIntentRef,
+            providerChargeRef: merged.providerChargeRef,
+            providerCustomerRef: merged.providerCustomerRef,
+            orgId: merged.orgId,
+            subscriptionId: merged.subscriptionId,
+            updatedAt: new Date(),
+          })
+          .where(eq(providerObjectMappings.id, current.id));
+        current = merged;
+        await tx.delete(providerObjectMappings).where(eq(providerObjectMappings.id, row.id));
+      }
+
+      // Apply the incoming refs onto the surviving target.
+      const incoming = {
+        checkoutSessionRef: current.checkoutSessionRef ?? mapping.checkoutSessionRef ?? null,
+        providerSubscriptionRef: current.providerSubscriptionRef ?? mapping.providerSubscriptionRef ?? null,
+        providerInvoiceRef: current.providerInvoiceRef ?? mapping.providerInvoiceRef ?? null,
+        providerPaymentRef: current.providerPaymentRef ?? mapping.providerPaymentRef ?? null,
+        providerPaymentIntentRef: current.providerPaymentIntentRef ?? mapping.providerPaymentIntentRef ?? null,
+        providerChargeRef: current.providerChargeRef ?? mapping.providerChargeRef ?? null,
+        providerCustomerRef: current.providerCustomerRef ?? mapping.providerCustomerRef ?? null,
+        orgId: current.orgId ?? (mapping.orgId ? asUuid(mapping.orgId) : null),
+        subscriptionId: current.subscriptionId ?? (mapping.subscriptionId ? asUuid(mapping.subscriptionId) : null),
+      };
+      await tx
+        .update(providerObjectMappings)
+        .set({ ...incoming, updatedAt: new Date() })
+        .where(eq(providerObjectMappings.id, current.id));
+    });
+  }
+
+  private static columnForRef(field: (typeof PgBillingStore.MAPPING_REF_FIELDS)[number]) {
+    switch (field) {
+      case "checkoutSessionRef":
+        return providerObjectMappings.checkoutSessionRef;
+      case "providerSubscriptionRef":
+        return providerObjectMappings.providerSubscriptionRef;
+      case "providerInvoiceRef":
+        return providerObjectMappings.providerInvoiceRef;
+      case "providerPaymentRef":
+        return providerObjectMappings.providerPaymentRef;
+      case "providerPaymentIntentRef":
+        return providerObjectMappings.providerPaymentIntentRef;
+      case "providerChargeRef":
+        return providerObjectMappings.providerChargeRef;
+    }
+  }
+
+  async findProviderObjectMappings(
+    providerName: string,
+    environment: string,
+    refs: {
+      checkoutSessionRef?: string;
+      providerSubscriptionRef?: string;
+      providerInvoiceRef?: string;
+      providerPaymentRef?: string;
+      providerPaymentIntentRef?: string;
+      providerChargeRef?: string;
+    },
+  ): Promise<ProviderObjectMapping[]> {
+    const conditions: ReturnType<typeof eq>[] = [];
+    if (refs.checkoutSessionRef) conditions.push(eq(providerObjectMappings.checkoutSessionRef, refs.checkoutSessionRef));
+    if (refs.providerSubscriptionRef) conditions.push(eq(providerObjectMappings.providerSubscriptionRef, refs.providerSubscriptionRef));
+    if (refs.providerInvoiceRef) conditions.push(eq(providerObjectMappings.providerInvoiceRef, refs.providerInvoiceRef));
+    if (refs.providerPaymentRef) conditions.push(eq(providerObjectMappings.providerPaymentRef, refs.providerPaymentRef));
+    if (refs.providerPaymentIntentRef) conditions.push(eq(providerObjectMappings.providerPaymentIntentRef, refs.providerPaymentIntentRef));
+    if (refs.providerChargeRef) conditions.push(eq(providerObjectMappings.providerChargeRef, refs.providerChargeRef));
+    if (conditions.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(providerObjectMappings)
+      .where(
+        and(
+          eq(providerObjectMappings.providerName, providerName),
+          eq(providerObjectMappings.environment, environment),
+          or(...conditions),
+        ),
+      );
+    return rows.map(toProviderObjectMapping);
+  }
+
+  // ---- Security Repair 05A: business-effect idempotency (finding B) ---------------
+
+  async claimProviderBillingEffect(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    effectType: BusinessEffectType;
+    subscriptionId?: string;
+    externalEventId: string;
+  }): Promise<boolean> {
+    const inserted = await this.db
+      .insert(providerBillingEffects)
+      .values({
+        providerName: input.providerName,
+        environment: input.environment,
+        billingIdentity: input.billingIdentity,
+        effectType: input.effectType,
+        subscriptionId: input.subscriptionId ? asUuid(input.subscriptionId) : null,
+        outcome: "applied",
+        externalEventId: input.externalEventId,
+      })
+      .onConflictDoNothing({
+        target: [
+          providerBillingEffects.providerName,
+          providerBillingEffects.environment,
+          providerBillingEffects.billingIdentity,
+          providerBillingEffects.effectType,
+        ],
+      })
+      .returning({ id: providerBillingEffects.id });
+    return inserted.length > 0;
+  }
+
+  async hasAppliedFinancialEffect(subscriptionId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ id: providerBillingEffects.id })
+      .from(providerBillingEffects)
+      .where(
+        and(
+          eq(providerBillingEffects.subscriptionId, asUuid(subscriptionId)),
+          eq(providerBillingEffects.outcome, "applied"),
+          inArray(providerBillingEffects.effectType, ["checkout_grant", "period_extension"]),
+        ),
+      )
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  // ---- Security Repair 05A: cancellations (finding H) -------------------------------
+
+  async upsertSubscriptionCancellation(record: SubscriptionCancellation): Promise<SubscriptionCancellation> {
+    const values = {
+      state: record.state,
+      requestedBy: record.requestedBy,
+      requestedById: record.requestedById ?? null,
+      attempts: record.attempts,
+      lastError: record.lastError ?? null,
+      nextAttemptAt: date(record.nextAttemptAt),
+      updatedAt: new Date(),
+    };
+    await this.db
+      .insert(subscriptionCancellations)
+      .values({
+        subscriptionId: asUuid(record.subscriptionId),
+        ...values,
+      })
+      .onConflictDoUpdate({
+        target: subscriptionCancellations.subscriptionId,
+        set: values,
+      });
+    return record;
+  }
+
+  async getSubscriptionCancellation(subscriptionId: string): Promise<SubscriptionCancellation | undefined> {
+    const rows = await this.db
+      .select()
+      .from(subscriptionCancellations)
+      .where(eq(subscriptionCancellations.subscriptionId, asUuid(subscriptionId)))
+      .limit(1);
+    const row = rows[0];
+    return row
+      ? {
+          subscriptionId: row.subscriptionId,
+          state: row.state as SubscriptionCancellation["state"],
+          requestedBy: row.requestedBy,
+          requestedById: row.requestedById ?? undefined,
+          attempts: row.attempts,
+          lastError: row.lastError ?? undefined,
+          nextAttemptAt: iso(row.nextAttemptAt),
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        }
+      : undefined;
+  }
+
+  async listDueCancellationRetries(nowIso: string, limit: number): Promise<SubscriptionCancellation[]> {
+    const rows = await this.db
+      .select()
+      .from(subscriptionCancellations)
+      .where(
+        and(
+          inArray(subscriptionCancellations.state, ["provider_cancel_pending", "reconciliation_required"]),
+          sql`(${subscriptionCancellations.nextAttemptAt} IS NULL OR ${subscriptionCancellations.nextAttemptAt} <= ${new Date(nowIso)})`,
+        ),
+      )
+      .limit(limit);
+    return rows.map((row) => ({
+      subscriptionId: row.subscriptionId,
+      state: row.state as SubscriptionCancellation["state"],
+      requestedBy: row.requestedBy,
+      requestedById: row.requestedById ?? undefined,
+      attempts: row.attempts,
+      lastError: row.lastError ?? undefined,
+      nextAttemptAt: iso(row.nextAttemptAt),
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  }
+
+  // ---- Security Repair 05A: commercial reconciliation queue (finding A) ---------------
+
+  async enqueueCommercialReconciliation(subscriptionId: string, reason: string): Promise<void> {
+    await this.db
+      .insert(commercialReconciliationQueue)
+      .values({ subscriptionId: asUuid(subscriptionId), reason })
+      .onConflictDoUpdate({
+        target: commercialReconciliationQueue.subscriptionId,
+        set: { reason, updatedAt: new Date() },
+      });
+  }
+
+  async dequeueCommercialReconciliations(limit: number): Promise<CommercialReconciliationItem[]> {
+    const rows = await this.db
+      .select()
+      .from(commercialReconciliationQueue)
+      .orderBy(asc(commercialReconciliationQueue.enqueuedAt))
+      .limit(limit);
+    return rows.map((row) => ({
+      subscriptionId: row.subscriptionId,
+      reason: row.reason,
+      enqueuedAt: row.enqueuedAt.toISOString(),
+    }));
+  }
+
+  async ackCommercialReconciliation(subscriptionId: string): Promise<void> {
+    await this.db
+      .delete(commercialReconciliationQueue)
+      .where(eq(commercialReconciliationQueue.subscriptionId, asUuid(subscriptionId)));
+  }
+
+  // ---- Security Repair 05A: rejected-webhook retention (finding G) ---------------------
+
+  async purgeRejectedWebhooks(beforeIso: string): Promise<number> {
+    const result = await this.db
+      .delete(verifiedWebhookEvents)
+      .where(
+        and(
+          eq(verifiedWebhookEvents.status, "rejected"),
+          sql`${verifiedWebhookEvents.receivedAt} < ${new Date(beforeIso)}`,
+        ),
+      )
+      .returning({ id: verifiedWebhookEvents.id });
+    return result.length;
+  }
+
+  async findProviderPlanMapping(
+    providerName: string,
+    environment: string,
+    providerPlanRef: string,
+  ): Promise<{ moxPriceVersionId: string; productId: string } | undefined> {
+    const rows = await this.db
+      .select()
+      .from(providerPlanMappings)
+      .where(
+        and(
+          eq(providerPlanMappings.providerName, providerName),
+          eq(providerPlanMappings.environment, environment),
+          eq(providerPlanMappings.providerPlanRef, providerPlanRef),
+        ),
+      )
+      .limit(1);
+    const row = rows[0];
+    return row ? { moxPriceVersionId: row.moxPriceVersionId, productId: row.productId } : undefined;
   }
 }
 
@@ -823,6 +1292,10 @@ function toSubscriptionRow(sub: Subscription) {
     retentionUntil: date(sub.retentionUntil),
     failedRenewals: sub.failedRenewals,
     cancelAtPeriodEnd: sub.cancelAtPeriodEnd,
+    suspensionReason: sub.suspensionReason ?? null,
+    suspensionSource: sub.suspensionSource ?? null,
+    reconciliationRequired: sub.reconciliationRequired ?? false,
+    providerPlanRef: sub.providerPlanRef ?? null,
     renewalClaimOwner: sub.renewalClaimOwner ?? null,
     renewalClaimExpiresAt: date(sub.renewalClaimExpiresAt),
     canceledAt: date(sub.canceledAt),
@@ -849,6 +1322,10 @@ function toSubscription(row: SubscriptionRow): Subscription {
     retentionUntil: iso(row.retentionUntil),
     failedRenewals: row.failedRenewals,
     cancelAtPeriodEnd: row.cancelAtPeriodEnd,
+    suspensionReason: row.suspensionReason ?? undefined,
+    suspensionSource: row.suspensionSource ?? undefined,
+    reconciliationRequired: row.reconciliationRequired,
+    providerPlanRef: row.providerPlanRef ?? undefined,
     renewalClaimOwner: row.renewalClaimOwner ?? undefined,
     renewalClaimExpiresAt: iso(row.renewalClaimExpiresAt),
     canceledAt: iso(row.canceledAt),
@@ -923,6 +1400,28 @@ function toWebhook(row: WebhookRow): WebhookRecord {
     processingOwner: row.processingOwner ?? undefined,
     processingExpiresAt: iso(row.processingExpiresAt),
     rejectionReason: row.rejectionReason ?? undefined,
+  };
+}
+
+type ProviderObjectMappingRow = typeof providerObjectMappings.$inferSelect;
+
+function toProviderObjectMapping(row: ProviderObjectMappingRow): ProviderObjectMapping {
+  return {
+    id: row.id,
+    providerName: row.providerName,
+    environment: row.environment,
+    orgId: row.orgId ?? undefined,
+    subscriptionId: row.subscriptionId ?? undefined,
+    providerCustomerRef: row.providerCustomerRef ?? undefined,
+    checkoutSessionRef: row.checkoutSessionRef ?? undefined,
+    providerSubscriptionRef: row.providerSubscriptionRef ?? undefined,
+    providerInvoiceRef: row.providerInvoiceRef ?? undefined,
+    providerPaymentRef: row.providerPaymentRef ?? undefined,
+    providerPaymentIntentRef: row.providerPaymentIntentRef ?? undefined,
+    providerChargeRef: row.providerChargeRef ?? undefined,
+    resolutionState: row.resolutionState as ProviderObjectMapping["resolutionState"],
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 
