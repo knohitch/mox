@@ -110,7 +110,8 @@ export interface OutboundTransport {
 
 export class HttpOutboundTransport implements OutboundTransport {
   constructor(
-    private readonly fetchImpl: typeof fetch = fetch,
+    /** Explicit test-only transport seam. Production/default construction leaves this undefined. */
+    private readonly fetchImpl?: typeof fetch,
     private readonly resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>,
   ) {}
 
@@ -125,8 +126,8 @@ export class HttpOutboundTransport implements OutboundTransport {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       }, {
-        fetchImpl: this.fetchImpl,
-        resolve: this.resolve,
+        ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        ...(this.resolve ? { resolve: this.resolve } : {}),
         allowedPorts: [443],
       });
       return response.ok ? { delivered: true } : { delivered: false, error: `HTTP ${response.status}` };

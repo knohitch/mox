@@ -210,6 +210,30 @@ export const providerBillingEffects = pgTable(
   ],
 );
 
+/**
+ * Security Repair 07 §B: monotonic cumulative refund state. Stripe Charge
+ * `amount_refunded` (and equivalent provider cumulative state) may increase
+ * across multiple webhook events for one immutable billing identity.
+ */
+export const providerRefundStates = pgTable(
+  "provider_refund_states",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerName: text("provider_name").notNull(),
+    environment: text("environment").notNull().default("test"),
+    billingIdentity: text("billing_identity").notNull(),
+    subscriptionId: uuid("subscription_id").references(() => subscriptions.id, { onDelete: "set null" }),
+    cumulativeAmountMinor: bigint("cumulative_amount_minor", { mode: "bigint" }).notNull(),
+    externalEventId: text("external_event_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_refund_states_identity_key").on(t.providerName, t.environment, t.billingIdentity),
+    index("provider_refund_states_sub_idx").on(t.subscriptionId, t.updatedAt),
+  ],
+);
+
 // Prompt 01 §Durable-mapping columns on existing billing rows.
 export const subscriptionsProviderColumns = sql`
   ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS provider_environment text;

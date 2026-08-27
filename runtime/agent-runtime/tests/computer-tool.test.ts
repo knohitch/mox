@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApprovalId, type AgentDefinition, type JsonValue, OrgId } from "@mox/contracts";
 import { PolicyEngine } from "@mox/policy";
-import { mintGatewayToken } from "@mox/security";
+import { EgressPolicy, mintGatewayToken } from "@mox/security";
 import {
   ComputerGateway,
   createComputerTool,
@@ -61,6 +61,7 @@ function world(orgId: string, agentId: string): World {
       now: () => NOW,
     }),
     entitlements: StaticEntitlementChecker.allowAll(),
+    egress: new EgressPolicy({ allow: [{ host: "example.com", action: "allow" }] }),
     gatewaySecret: GATEWAY_SECRET,
     approvals: {
       requestApproval: async (input) => ({
@@ -149,6 +150,7 @@ describe("computer tool over the reference engine (Mox Runtime to gateway to pro
         now: () => NOW,
       }),
       entitlements: StaticEntitlementChecker.allowAll(),
+      egress: new EgressPolicy({ allow: [{ host: "example.com", action: "allow" }] }),
       approvals: {
         requestApproval: async (i) => ({
           approvalId: ApprovalId.parse("apr-x"),

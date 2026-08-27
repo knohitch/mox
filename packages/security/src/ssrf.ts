@@ -5,9 +5,9 @@
  * Blocks: non-HTTP(S) schemes, credentials in URLs, localhost/loopback,
  * link-local (169.254.x including cloud metadata), private ranges
  * (RFC1918, ULA fc00::/7), *.internal/.local/.localhost hostnames, IPv6
- * loopback and IPv4-mapped IPv6. Callers should ALSO resolve DNS at fetch
- * time and re-check the resolved IP (rebinding defense); this module
- * provides `isPrivateIp` for that second check.
+ * loopback and IPv4-mapped IPv6. `safeOutboundFetch` performs the complete
+ * resolve → validate every answer → pinned connection flow so callers do not
+ * perform a second DNS lookup that can be rebound after validation.
  */
 
 import { lookup } from "node:dns/promises";
@@ -340,6 +340,31 @@ export async function safeOutboundFetch(
  * ONLY the validated addresses; `servername` keeps the ORIGINAL hostname for
  * TLS SNI + certificate validation (verification stays enabled).
  */
+export function buildPinnedRequestOptions(
+  parsed: URL,
+  pinned: Array<{ address: string; family: number }>,
+  headers: Headers,
+  init: RequestInit,
+): https.RequestOptions {
+  const hostname = parsed.hostname;
+  const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
+  return {
+    protocol: parsed.protocol,
+    hostname,
+    port,
+    method: (init.method ?? "GET").toUpperCase(),
+    // Preserve the current URL's encoded HTTP request target. WHATWG URL
+    // pathname/search are already canonicalized; fragments are intentionally
+    // excluded because they are client-side only and must never reach HTTP.
+    path: `${parsed.pathname}${parsed.search}`,
+    headers: Object.fromEntries(headers.entries()),
+    lookup: pinnedLookup(pinned),
+    // Original hostname for SNI + Node's default certificate hostname
+    // verification. `rejectUnauthorized` is intentionally never weakened.
+    servername: hostname,
+  };
+}
+
 function performPinnedRequest(
   parsed: URL,
   pinned: Array<{ address: string; family: number }>,
@@ -349,19 +374,7 @@ function performPinnedRequest(
 ): Promise<Response> {
   return new Promise((resolve, reject) => {
     const lib = parsed.protocol === "https:" ? https : http;
-    const hostname = parsed.hostname;
-    const port = parsed.port ? Number(parsed.port) : parsed.protocol === "https:" ? 443 : 80;
-    const requestOptions: https.RequestOptions = {
-      protocol: parsed.protocol,
-      hostname,
-      port,
-      method: (init.method ?? "GET").toUpperCase(),
-      headers: Object.fromEntries(headers.entries()),
-      lookup: pinnedLookup(pinned),
-      // Original hostname for SNI/cert verification; NEVER disable TLS.
-      servername: hostname,
-      family: pinned[0]?.family,
-    };
+    const requestOptions = buildPinnedRequestOptions(parsed, pinned, headers, init);
     const req = lib.request(requestOptions, (res) => {
       const status = res.statusCode ?? 0;
       const responseHeaders = new Headers();
@@ -392,7 +405,11 @@ function performPinnedRequest(
       res.on("end", () => {
         if (overflow) return;
         const body = Buffer.concat(chunks);
-        resolve(new Response(body, { status, headers: responseHeaders }));
+        // Fetch Response forbids bodies for null-body HTTP statuses even when
+        // the Node stream produced zero bytes. Preserve valid webhook 204/205
+        // and redirect 304 responses without manufacturing an invalid body.
+        const responseBody = status === 204 || status === 205 || status === 304 ? null : body;
+        resolve(new Response(responseBody, { status, headers: responseHeaders }));
       });
       res.on("error", (error) => reject(error));
     });

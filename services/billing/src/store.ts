@@ -19,6 +19,7 @@ import type {
   ProviderBillingEffect,
   ProviderObjectMapping,
   ProviderPaymentRecord,
+  ProviderRefundState,
   Subscription,
   SubscriptionCancellation,
   SubscriptionItem,
@@ -154,6 +155,24 @@ export interface BillingStore {
   }): Promise<boolean>;
   hasAppliedFinancialEffect(subscriptionId: string): Promise<boolean>;
 
+  /**
+   * Atomically advance cumulative refund authority for one provider billing
+   * identity. The returned state is the durable MAX observed amount; only a
+   * strictly larger amount returns advanced:true. Cross-subscription reuse
+   * of one provider identity is rejected.
+   */
+  advanceProviderRefundState(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    subscriptionId: string;
+    cumulativeAmountMinor: bigint;
+    externalEventId: string;
+  }): Promise<{ advanced: boolean; state: ProviderRefundState }>;
+
+  /** Update only refund-observation fields; never overwrite lifecycle state. */
+  recordRefundObservation(subscriptionId: string, occurredAt: string | undefined, reconciliationRequired: boolean): Promise<void>;
+
   // ---- Security Repair 05A: cancellations (finding H) ---------------------------
 
   upsertSubscriptionCancellation(record: SubscriptionCancellation): Promise<SubscriptionCancellation>;
@@ -202,6 +221,7 @@ export class InMemoryBillingStore implements BillingStore {
   private readonly webhooks = new Map<string, WebhookRecord>();
   private readonly providerMappings = new Map<string, ProviderObjectMapping>();
   private readonly providerEffects = new Map<string, ProviderBillingEffect>();
+  private readonly providerRefundStates = new Map<string, ProviderRefundState>();
   private readonly cancellations = new Map<string, SubscriptionCancellation>();
   private readonly reconciliationQueue = new Map<string, CommercialReconciliationItem>();
   private readonly planMappings = new Map<string, { moxPriceVersionId: string; productId: string }>();
@@ -654,6 +674,51 @@ export class InMemoryBillingStore implements BillingStore {
       }
     }
     return false;
+  }
+
+  async advanceProviderRefundState(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    subscriptionId: string;
+    cumulativeAmountMinor: bigint;
+    externalEventId: string;
+  }): Promise<{ advanced: boolean; state: ProviderRefundState }> {
+    const key = `${input.providerName}:${input.environment}:${input.billingIdentity}`;
+    const existing = this.providerRefundStates.get(key);
+    if (existing?.subscriptionId && existing.subscriptionId !== input.subscriptionId) {
+      throw new Error("provider refund identity is already bound to another subscription");
+    }
+    if (existing && existing.cumulativeAmountMinor >= input.cumulativeAmountMinor) {
+      return { advanced: false, state: { ...existing } };
+    }
+    const now = new Date().toISOString();
+    const state: ProviderRefundState = {
+      providerName: input.providerName,
+      environment: input.environment,
+      billingIdentity: input.billingIdentity,
+      subscriptionId: input.subscriptionId,
+      cumulativeAmountMinor: input.cumulativeAmountMinor,
+      externalEventId: input.externalEventId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.providerRefundStates.set(key, state);
+    return { advanced: true, state: { ...state } };
+  }
+
+  async recordRefundObservation(
+    subscriptionId: string,
+    occurredAt: string | undefined,
+    reconciliationRequired: boolean,
+  ): Promise<void> {
+    const current = this.subscriptions.get(subscriptionId);
+    if (!current) return;
+    if (reconciliationRequired) current.reconciliationRequired = true;
+    if (occurredAt && (!current.lastEventAt || Date.parse(occurredAt) > Date.parse(current.lastEventAt))) {
+      current.lastEventAt = occurredAt;
+    }
+    this.subscriptions.set(subscriptionId, current);
   }
 
   // ---- Security Repair 05A: cancellations ----------------------------------------

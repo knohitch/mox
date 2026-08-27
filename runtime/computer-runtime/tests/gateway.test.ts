@@ -77,7 +77,8 @@ function harness(overrides: Partial<Parameters<typeof buildGateway>[0]> = {}): H
     },
     grantScopeFor: () => ({ scope: {} as Record<string, string>, ttlSeconds: approvals.grantTtlSeconds }),
   };
-  const gateway = buildGateway({ provider, policy, audit, approvalFlow, ...overrides });
+  const egress = overrides.egress ?? new EgressPolicy({ allow: [{ host: ".example.com", action: "allow" }] });
+  const gateway = buildGateway({ provider, policy, audit, approvalFlow, ...overrides, egress });
   return { gateway, provider, policy, auditEvents, approvals };
 }
 
@@ -113,6 +114,7 @@ describe("computer gateway readiness (Security Repair 05B §C/L)", () => {
           new ComputerGateway({
             provider: new CountingProvider(),
             policy: allowAllPolicy(),
+            entitlements: StaticEntitlementChecker.allowAll(),
             audit: { record: async () => undefined },
             approvals: {
               requestApproval: async (input) => ({
@@ -134,6 +136,38 @@ describe("computer gateway readiness (Security Repair 05B §C/L)", () => {
       if (previous) process.env.MOX_GATEWAY_TOKEN_SECRET = previous;
       else delete process.env.MOX_GATEWAY_TOKEN_SECRET;
     }
+  });
+
+  it("Repair 07 D: direct ComputerGateway construction uses the canonical signing-secret policy", () => {
+    const provider = new CountingProvider();
+    const policy = allowAllPolicy();
+    const audit: ComputerAuditSink = { record: async () => undefined };
+    const approvalFlow: ApprovalFlow = {
+      requestApproval: async (input) => ({
+        approvalId: ApprovalId.parse("apr-secret"),
+        orgId: OrgId.parse(input.orgId),
+        agentId: input.agentId,
+        kind: "computer-action",
+        summary: input.summary,
+        payload: input.payload as JsonValue,
+        state: "denied",
+        requestedAt: NOW.toISOString(),
+        resolvedAt: NOW.toISOString(),
+      }),
+      grantScopeFor: () => ({ scope: {}, ttlSeconds: 0 }),
+    };
+    const construct = (gatewaySecret: string) => () => new ComputerGateway({
+      provider,
+      policy,
+      entitlements: StaticEntitlementChecker.allowAll(),
+      approvals: approvalFlow,
+      audit,
+      gatewaySecret,
+    });
+    expect(construct("mox-local-gateway-token-secret-for-tests")).toThrow(/public hardcoded/);
+    expect(construct("Short-1")).toThrow(/at least 32/);
+    expect(construct("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toThrow(/at least 3/);
+    expect(construct(GATEWAY_SECRET)).not.toThrow();
   });
 
   it("rejects tokens minted with a different secret", async () => {
@@ -396,6 +430,39 @@ describe("ComputerGateway — resource limits & crash recovery", () => {
 });
 
 describe("ComputerGateway — egress controls", () => {
+  it("Repair 07 E1: omitting egress policy installs deny-all by construction", async () => {
+    const provider = new CountingProvider();
+    const auditEvents: AuditEvent[] = [];
+    const gateway = new ComputerGateway({
+      provider,
+      policy: allowAllPolicy(),
+      entitlements: StaticEntitlementChecker.allowAll(),
+      approvals: {
+        requestApproval: async (input) => ({
+          approvalId: ApprovalId.parse("apr-egress-none"),
+          orgId: OrgId.parse(input.orgId),
+          agentId: input.agentId,
+          kind: "computer-action",
+          summary: input.summary,
+          payload: input.payload as JsonValue,
+          state: "denied",
+          requestedAt: NOW.toISOString(),
+          resolvedAt: NOW.toISOString(),
+        }),
+        grantScopeFor: () => ({ scope: {}, ttlSeconds: 0 }),
+      },
+      audit: { record: async (event) => void auditEvents.push(event) },
+      gatewaySecret: GATEWAY_SECRET,
+      // Intentionally NO egress property.
+    });
+    await gateway.openSession(tokenFor(), { requestedSessionId: SESSION });
+    await expect(
+      gateway.executeAction(tokenFor(), SESSION, { kind: "navigate", url: "https://example.com/" }, undefined, NOW),
+    ).rejects.toMatchObject({ code: "denied" });
+    expect(provider.executed).toBe(0);
+    expect(auditEvents.some((event) => event.action === "computer.navigate" && event.outcome === "denied")).toBe(true);
+  });
+
   const egress = new EgressPolicy({
     allow: [{ host: ".trusted.test", action: "allow" }],
     deny: [{ host: "blocked.trusted.test", action: "deny" }],

@@ -312,7 +312,7 @@ export const LEGACY_PUBLIC_GATEWAY_SECRET = "mox-local-gateway-token-secret-for-
  * length/entropy policy. Explicitly injected secrets (tests) go through
  * the same policy.
  */
-function requireStrongGatewaySecret(secret: string, source: "env" | "injected"): string {
+export function validateGatewaySigningSecret(secret: string, source: "env" | "injected" = "injected"): string {
   if (!secret || secret.trim() === "") {
     throw new GatewaySecretError(
       source === "env"
@@ -336,7 +336,7 @@ function requireStrongGatewaySecret(secret: string, source: "env" | "injected"):
 }
 
 export function gatewayTokenSecretFromEnv(env: NodeJS.ProcessEnv = process.env): string {
-  return requireStrongGatewaySecret(env.MOX_GATEWAY_TOKEN_SECRET ?? "", "env");
+  return validateGatewaySigningSecret(env.MOX_GATEWAY_TOKEN_SECRET ?? "", "env");
 }
 
 export function mintGatewayToken(
@@ -345,7 +345,7 @@ export function mintGatewayToken(
   secret?: string,
 ): { token: string; claims: GatewayTokenClaims } {
   const effective = secret !== undefined
-    ? requireStrongGatewaySecret(secret, "injected")
+    ? validateGatewaySigningSecret(secret, "injected")
     : gatewayTokenSecretFromEnv();
   const full: GatewayTokenClaims = {
     ...claims,
@@ -376,7 +376,9 @@ export function verifyGatewayToken(
 ): DirectAccessRejection {
   let effectiveSecret: string;
   try {
-    effectiveSecret = options.secret ?? gatewayTokenSecretFromEnv();
+    effectiveSecret = options.secret !== undefined
+      ? validateGatewaySigningSecret(options.secret, "injected")
+      : gatewayTokenSecretFromEnv();
   } catch {
     // Fail closed: without a configured secret no token can ever verify.
     return { ok: false, reason: "gateway secret not configured" };

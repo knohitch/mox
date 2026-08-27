@@ -146,7 +146,7 @@ export class ComposioProvider implements IntegrationProvider {
 export class WebhookAutomationProvider implements IntegrationProvider {
   readonly kind: IntegrationProviderKind;
   readonly displayName: string;
-  private readonly fetchImpl: typeof fetch;
+  private readonly fetchImpl?: typeof fetch;
   private readonly resolve?: (hostname: string) => Promise<Array<{ address: string; family?: number }>>;
   private readonly resolveSecret?: (secretRef: string) => Promise<string | undefined>;
 
@@ -161,7 +161,9 @@ export class WebhookAutomationProvider implements IntegrationProvider {
     this.kind = kind;
     this.displayName =
       kind === "make" ? "Make.com" : kind === "n8n" ? "n8n" : "Generic Webhook/API Token";
-    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
+    // Explicit fixture seam only. Default/production execution MUST leave
+    // this undefined so safeOutboundFetch uses its pinned node:http/https path.
+    this.fetchImpl = options.fetchImpl;
     this.resolve = options.resolve;
     this.resolveSecret = options.resolveSecret;
   }
@@ -206,8 +208,8 @@ export class WebhookAutomationProvider implements IntegrationProvider {
         },
         body: JSON.stringify(input.payload ?? {}),
       }, {
-        fetchImpl: this.fetchImpl,
-        resolve: this.resolve,
+        ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
+        ...(this.resolve ? { resolve: this.resolve } : {}),
         allowedPorts: [443],
       });
       return response.ok

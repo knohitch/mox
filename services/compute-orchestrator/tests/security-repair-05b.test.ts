@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { FakeComputeProvider } from "@mox/compute-providers";
+import { FakeComputeProvider, ProviderError } from "@mox/compute-providers";
 import {
   ComputeOrchestrator,
   InMemoryOrchestratorStore,
@@ -64,10 +64,16 @@ describe("Security Repair 05B — server-order lifecycle (finding J)", () => {
     await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
     expect((await orch.getOrder(order.id)).state).toBe("running");
 
-    // Provider-side cancel fails non-retryably: the instance vanishes.
-    fake.instances.clear();
+    // Genuine provider failure: 404 is intentionally treated as already absent
+    // for cancellation, so use a retryable 503 and exhaust the durable retries.
+    fake.cancel = async () => {
+      throw new ProviderError("simulated provider unavailable", { retryable: true, httpStatus: 503 });
+    };
     await orch.cancelOrder(order.id);
-    await orch.reconcile(new Date(Date.now() + 60_000).toISOString());
+    const retryBase = Date.now() + 60_000;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await orch.reconcile(new Date(retryBase + attempt * 1_000).toISOString());
+    }
     const after = await orch.getOrder(order.id);
     expect(after.state).toBe("error");
     expect(after.lastError).toMatch(/cancel abandoned/);

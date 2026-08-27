@@ -14,6 +14,7 @@ import type {
   PlanVersion,
   ProviderObjectMapping,
   ProviderPaymentRecord,
+  ProviderRefundState,
   Subscription,
   SubscriptionCancellation,
   SubscriptionItem,
@@ -40,6 +41,7 @@ import {
   providerObjectMappings,
   providerPayments,
   providerPlanMappings,
+  providerRefundStates,
   subscriptionCancellations,
   subscriptionItems,
   subscriptionTransitions,
@@ -1110,6 +1112,116 @@ export class PgBillingStore implements BillingStore {
       )
       .limit(1);
     return rows.length > 0;
+  }
+
+  async advanceProviderRefundState(input: {
+    providerName: string;
+    environment: string;
+    billingIdentity: string;
+    subscriptionId: string;
+    cumulativeAmountMinor: bigint;
+    externalEventId: string;
+  }): Promise<{ advanced: boolean; state: ProviderRefundState }> {
+    // Serialize one provider billing identity even while the row does not yet
+    // exist. A transaction-scoped advisory lock closes the first-insert race;
+    // the durable row then carries the monotonic maximum across workers and
+    // restarts. Hash collisions only add contention — they cannot weaken the
+    // authority invariant.
+    return this.db.transaction(async (tx) => {
+      const authorityKey = JSON.stringify([input.providerName, input.environment, input.billingIdentity]);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${authorityKey}))`);
+
+      const existingRows = await tx
+        .select()
+        .from(providerRefundStates)
+        .where(
+          and(
+            eq(providerRefundStates.providerName, input.providerName),
+            eq(providerRefundStates.environment, input.environment),
+            eq(providerRefundStates.billingIdentity, input.billingIdentity),
+          ),
+        )
+        .limit(1);
+      const existing = existingRows[0];
+      if (existing && !existing.subscriptionId) {
+        // ON DELETE SET NULL intentionally preserves financial history. Once
+        // that binding is gone, never attach the old provider charge to a
+        // different subscription by inference. Reconciliation must resolve it.
+        throw new Error("provider refund identity no longer has a durable subscription binding");
+      }
+      if (existing?.subscriptionId && existing.subscriptionId !== input.subscriptionId) {
+        throw new Error("provider refund identity is already bound to another subscription");
+      }
+
+      let advanced = false;
+      let row = existing;
+      if (!row) {
+        const inserted = await tx
+          .insert(providerRefundStates)
+          .values({
+            providerName: input.providerName,
+            environment: input.environment,
+            billingIdentity: input.billingIdentity,
+            subscriptionId: asUuid(input.subscriptionId),
+            cumulativeAmountMinor: input.cumulativeAmountMinor,
+            externalEventId: input.externalEventId,
+          })
+          .returning();
+        row = inserted[0];
+        advanced = true;
+      } else if (input.cumulativeAmountMinor > row.cumulativeAmountMinor) {
+        const updated = await tx
+          .update(providerRefundStates)
+          .set({
+            cumulativeAmountMinor: input.cumulativeAmountMinor,
+            subscriptionId: row.subscriptionId ?? asUuid(input.subscriptionId),
+            externalEventId: input.externalEventId,
+            updatedAt: new Date(),
+          })
+          .where(eq(providerRefundStates.id, row.id))
+          .returning();
+        row = updated[0];
+        advanced = true;
+      }
+      if (!row) throw new Error("failed to establish provider refund state");
+      return {
+        advanced,
+        state: {
+          providerName: row.providerName,
+          environment: row.environment,
+          billingIdentity: row.billingIdentity,
+          subscriptionId: row.subscriptionId ?? undefined,
+          cumulativeAmountMinor: row.cumulativeAmountMinor,
+          externalEventId: row.externalEventId,
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        },
+      };
+    });
+  }
+
+  async recordRefundObservation(
+    subscriptionId: string,
+    occurredAt: string | undefined,
+    reconciliationRequired: boolean,
+  ): Promise<void> {
+    const observed = occurredAt ? new Date(occurredAt) : undefined;
+    await this.db
+      .update(subscriptions)
+      .set({
+        updatedAt: new Date(),
+        ...(reconciliationRequired ? { reconciliationRequired: true } : {}),
+        ...(observed
+          ? {
+              lastEventAt: sql`CASE
+                WHEN ${subscriptions.lastEventAt} IS NULL OR ${subscriptions.lastEventAt} < ${observed}
+                  THEN ${observed}
+                ELSE ${subscriptions.lastEventAt}
+              END`,
+            }
+          : {}),
+      })
+      .where(eq(subscriptions.id, asUuid(subscriptionId)));
   }
 
   // ---- Security Repair 05A: cancellations (finding H) -------------------------------

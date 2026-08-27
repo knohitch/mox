@@ -359,10 +359,79 @@ export class ComputeOrchestrator {
   async cancelOrder(orderId: string): Promise<void> {
     const order = await this.getOrder(orderId);
     if (["canceled", "destroyed", "retention"].includes(order.state)) return;
-    order.canceledAt = new Date().toISOString();
+
+    const now = new Date().toISOString();
+    const idempotencyKey = `${order.id}:cancel`;
+    let operation = await this.enqueue(order.id, "cancel", idempotencyKey);
+
+    // Security Repair 07 §C: a deliberate retry from an errored order must
+    // revive the historical abandoned cancellation authority instead of
+    // moving the order to `cancelling` while the only operation stays dead.
+    if (operation.state === "abandoned") {
+      operation =
+        (await this.store.reviveAbandonedOperation(
+          order.id,
+          "cancel",
+          idempotencyKey,
+          now,
+          this.defaultMaxAttempts,
+        )) ?? operation;
+    }
+
+    // Crash-recovery convergence: if the durable cancel operation already
+    // succeeded but the order write was lost, do not schedule another
+    // provider delete. Move directly into canonical retention.
+    if (operation.state === "succeeded") {
+      order.canceledAt ??= now;
+      order.state = "retention";
+      order.retentionUntil ??= new Date(Date.parse(now) + this.retentionDays * 24 * 3600 * 1000).toISOString();
+      order.lastError = undefined;
+      await this.store.updateOrder(order);
+      return;
+    }
+
+    const runnable =
+      operation.state === "queued" ||
+      operation.state === "running" ||
+      (operation.state === "failed" && operation.attempts < operation.maxAttempts);
+    if (!runnable) {
+      throw new OrchestratorError("cancellation retry has no runnable durable operation authority");
+    }
+
+    // Establish durable runnable work BEFORE consuming quota in cancelling.
+    order.canceledAt ??= now;
     order.state = "cancelling";
+    order.lastError = undefined;
     await this.store.updateOrder(order);
-    await this.enqueue(order.id, "cancel", `${order.id}:cancel`);
+
+    // A duplicate HTTP retry can race the reconciler after reading a stale
+    // order snapshot. Re-read the cancellation authority AFTER writing
+    // `cancelling` and converge if the worker already finished/abandoned.
+    // If the operation changes after this read, the reconciler's fenced
+    // writeback occurs first and its subsequent order write wins normally.
+    const currentOperation = await this.store.getOperation(order.id, "cancel", idempotencyKey);
+    if (!currentOperation || currentOperation.state === "abandoned" ||
+        (currentOperation.state === "failed" && currentOperation.attempts >= currentOperation.maxAttempts)) {
+      const currentOrder = await this.getOrder(order.id);
+      if (currentOrder.state === "cancelling") {
+        currentOrder.state = "error";
+        currentOrder.lastError = currentOperation
+          ? `cancel abandoned: ${currentOperation.lastError ?? "retry authority exhausted"}`
+          : "cancel authority missing after retry";
+        await this.store.updateOrder(currentOrder);
+      }
+      return;
+    }
+    if (currentOperation.state === "succeeded") {
+      const currentOrder = await this.getOrder(order.id);
+      if (currentOrder.state === "cancelling") {
+        currentOrder.state = "retention";
+        currentOrder.canceledAt ??= now;
+        currentOrder.retentionUntil ??= new Date(Date.parse(now) + this.retentionDays * 24 * 3600 * 1000).toISOString();
+        currentOrder.lastError = undefined;
+        await this.store.updateOrder(currentOrder);
+      }
+    }
   }
 
   // ---- Durable operations ------------------------------------------------------
@@ -571,7 +640,21 @@ export class ComputeOrchestrator {
       case "cancel": {
         const provider = this.requireProviderForOrder(order);
         if (order.providerInstanceId) {
-          await provider.cancel(order.providerInstanceId);
+          try {
+            const operation = await provider.cancel(order.providerInstanceId);
+            op.providerOperationId = operation.providerOperationId;
+          } catch (error) {
+            // Provider deletion is idempotent at the Mox state-machine boundary.
+            // If the prior delete succeeded but the worker crashed before
+            // persisting success, a retry may observe 404/not-found. The
+            // desired terminal provider state (instance absent) is already
+            // satisfied, so converge to retention rather than abandoning the
+            // cancellation and stranding quota. Other errors retain normal
+            // retry/abandon semantics.
+            if (!(error instanceof ProviderError && error.httpStatus === 404)) {
+              throw error;
+            }
+          }
         }
         order.state = "retention";
         order.retentionUntil = new Date(Date.parse(at) + this.retentionDays * 24 * 3600 * 1000).toISOString();

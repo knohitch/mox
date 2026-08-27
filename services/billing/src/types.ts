@@ -286,6 +286,22 @@ export interface ProviderBillingEffect {
   createdAt?: string;
 }
 
+/**
+ * Durable monotonic cumulative refund authority (Security Repair 07 §B).
+ * One row exists per provider charge/sale/invoice identity. A webhook may
+ * advance the cumulative amount, but identical or lower replays never do.
+ */
+export interface ProviderRefundState {
+  providerName: string;
+  environment: string;
+  billingIdentity: string;
+  subscriptionId?: string;
+  cumulativeAmountMinor: bigint;
+  externalEventId: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export type CancellationState =
   | "cancel_requested"
   | "provider_cancel_pending"

@@ -209,6 +209,39 @@ export class PgOrchestratorStore implements OrchestratorStore {
       .where(eq(serverOperations.id, existing.id));
   }
 
+  async reviveAbandonedOperation(
+    orderId: string,
+    kind: OperationKind,
+    idempotencyKey: string,
+    nowIso: string,
+    maxAttempts: number,
+  ): Promise<ServerOperation | undefined> {
+    const rows = await this.db
+      .update(serverOperations)
+      .set({
+        state: "queued",
+        attempts: 0,
+        maxAttempts,
+        nextAttemptAt: new Date(nowIso),
+        lastError: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        updatedAt: new Date(nowIso),
+      })
+      .where(
+        and(
+          eq(serverOperations.orderId, orderId),
+          eq(serverOperations.kind, kind),
+          eq(serverOperations.idempotencyKey, idempotencyKey),
+          eq(serverOperations.state, "abandoned"),
+        ),
+      )
+      .returning();
+    if (rows[0]) return toOperation(rows[0]);
+    // A concurrent replay may already have revived/claimed the same row.
+    return this.getOperation(orderId, kind, idempotencyKey);
+  }
+
   async getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined> {
     const rows = await this.db
       .select()

@@ -19,6 +19,7 @@ import {
   EgressPolicy,
   gatewayTokenSecretFromEnv,
   redactMetadata,
+  validateGatewaySigningSecret,
   verifyGatewayToken,
   type GatewayTokenClaims,
 } from "@mox/security";
@@ -76,6 +77,11 @@ export interface ComputerGatewayOptions {
   /**
    * Egress gate for network-reaching actions (navigate). Deny beats allow;
    * fail closed. Server-side only — callers cannot influence the decision.
+   *
+   * IMPORTANT: this policy is hostname-level authorization. The reusable
+   * ComputerGateway does NOT itself pin a browser engine's DNS resolution to
+   * validated IP addresses. Production browser composition must add that
+   * network-layer control before claiming resolved-IP SSRF protection.
    */
   egress?: EgressPolicy;
   /** Default approval TTL in seconds (grant expiry). */
@@ -111,11 +117,19 @@ export class ComputerGateway {
   /** sessionId → owning org/agent, for cross-tenant checks. */
   private readonly owners = new Map<string, { orgId: string; agentId: string }>();
   private readonly gatewaySecret: string;
+  private readonly egress: EgressPolicy;
 
   constructor(private readonly opts: ComputerGatewayOptions) {
-    // Fail closed at construction: a gateway without a strong configured
-    // secret is not_configured, not silently signed with a public key.
-    this.gatewaySecret = opts.gatewaySecret ?? gatewayTokenSecretFromEnv();
+    // Fail closed at construction: every injected secret passes the SAME
+    // validator as env/mint/verify helpers; absence falls back only to the
+    // explicitly configured environment authority.
+    this.gatewaySecret = opts.gatewaySecret !== undefined
+      ? validateGatewaySigningSecret(opts.gatewaySecret, "injected")
+      : gatewayTokenSecretFromEnv();
+    // Security Repair 07 §E: omission is not an unrestricted browser. A
+    // deny-all policy is installed by construction until an explicit safe
+    // egress authority is supplied.
+    this.egress = opts.egress ?? new EgressPolicy();
   }
 
   private verify(token: string, now: Date = new Date()) {
@@ -198,8 +212,8 @@ export class ComputerGateway {
 
     // Egress/network controls: navigate targets are decided server-side
     // against the org's egress policy before any policy/provider work.
-    if (action.kind === "navigate" && this.opts.egress) {
-      const egress = this.opts.egress.decide(action.url);
+    if (action.kind === "navigate") {
+      const egress = this.egress.decide(action.url);
       if (egress.action === "deny") {
         await this.audit(claims, sessionId, "computer.navigate", "denied", {
           reason: egress.reason,

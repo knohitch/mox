@@ -40,6 +40,18 @@ export interface OrchestratorStore {
 
   // Operations
   upsertOperation(op: ServerOperation): Promise<void>;
+  /**
+   * Security Repair 07 §C: revive one historical abandoned operation in
+   * place. History/id identity is preserved; only the abandoned generation
+   * may transition back to queued, with attempts reset for a deliberate retry.
+   */
+  reviveAbandonedOperation(
+    orderId: string,
+    kind: OperationKind,
+    idempotencyKey: string,
+    nowIso: string,
+    maxAttempts: number,
+  ): Promise<ServerOperation | undefined>;
   getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined>;
   updateOperation(op: ServerOperation): Promise<void>;
   /**
@@ -181,6 +193,30 @@ export class InMemoryOrchestratorStore implements OrchestratorStore {
         maxAttempts: op.maxAttempts,
       });
     }
+  }
+
+  async reviveAbandonedOperation(
+    orderId: string,
+    kind: OperationKind,
+    idempotencyKey: string,
+    nowIso: string,
+    maxAttempts: number,
+  ): Promise<ServerOperation | undefined> {
+    const existing = await this.getOperation(orderId, kind, idempotencyKey);
+    if (!existing || existing.state !== "abandoned") return existing;
+    const revived: ServerOperation = {
+      ...existing,
+      state: "queued",
+      attempts: 0,
+      maxAttempts,
+      nextAttemptAt: nowIso,
+      lastError: undefined,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      updatedAt: nowIso,
+    };
+    this.operations.set(existing.id, revived);
+    return { ...revived };
   }
 
   async getOperation(orderId: string, kind: OperationKind, idempotencyKey: string): Promise<ServerOperation | undefined> {

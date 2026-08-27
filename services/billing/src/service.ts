@@ -1545,8 +1545,7 @@ export class BillingService {
     }
     if (event.amountMinor === undefined) {
       // Cannot classify full vs partial — fail closed, never silently ignore.
-      sub.reconciliationRequired = true;
-      await this.store.updateSubscription(sub);
+      await this.store.recordRefundObservation(sub.id, event.occurredAt, true);
       return { outcome: "reconciliation_required", orgId: sub.orgId, providerRef: sub.providerRef };
     }
     const refundAmount = BigInt(event.amountMinor);
@@ -1554,35 +1553,87 @@ export class BillingService {
       return { outcome: "duplicate", orgId: sub.orgId };
     }
 
-    const claimed = await this.claimBusinessEffect(event, "refund", sub, context.providerName, context.environment);
-    if (!claimed) return { outcome: "duplicate", orgId: sub.orgId };
+    // Stripe charge.refunded exposes cumulative Charge.amount_refunded and
+    // therefore needs monotonic state rather than a one-shot refund effect.
+    // Other provider adapters retain their existing business-effect policy;
+    // do not reinterpret an individual provider refund amount as cumulative.
+    if (context.providerName !== "stripe") {
+      const claimed = await this.claimBusinessEffect(event, "refund", sub, context.providerName, context.environment);
+      if (!claimed) return { outcome: "duplicate", orgId: sub.orgId };
 
-    this.touchSubscriptionEvent(sub, event);
-    if (refundAmount >= BigInt(price.amountMinor)) {
-      // FULL refund: revoke/suspend per policy; compute reconciliation is
-      // QUEUED, never performed synchronously in the webhook (finding A).
-      if (!["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+      this.touchSubscriptionEvent(sub, event);
+      if (refundAmount >= BigInt(price.amountMinor)) {
+        if (!["suspended", "canceled", "retention", "deleted"].includes(sub.state)) {
+          await this.store.updateSubscription(sub);
+          await this.transition(sub.id, "suspended", "full_refund_processed", {
+            idempotencyKey: `refund:${this.billingIdentityFor(event) ?? event.externalEventId}`,
+            suspensionSource: "refund",
+            suspensionReason: "full_refund_processed",
+          });
+          await this.store.enqueueCommercialReconciliation(sub.id, "full_refund_processed");
+        } else {
+          await this.store.updateSubscription(sub);
+        }
+      } else {
+        sub.reconciliationRequired = true;
         await this.store.updateSubscription(sub);
+      }
+      await this.recordObjectMapping(sub, event, context.providerName, context.environment);
+      return { outcome: "applied", orgId: sub.orgId, providerRef: sub.providerRef };
+    }
+
+    const billingIdentity = this.billingIdentityFor(event);
+    if (!billingIdentity) {
+      await this.store.recordRefundObservation(sub.id, event.occurredAt, true);
+      return { outcome: "reconciliation_required", orgId: sub.orgId, providerRef: sub.providerRef };
+    }
+
+    let refundState: Awaited<ReturnType<BillingStore["advanceProviderRefundState"]>>;
+    try {
+      refundState = await this.store.advanceProviderRefundState({
+        providerName: context.providerName,
+        environment: context.environment,
+        billingIdentity,
+        subscriptionId: sub.id,
+        cumulativeAmountMinor: refundAmount,
+        externalEventId: event.externalEventId,
+      });
+    } catch {
+      // Provider identity collision across subscriptions is never guessed.
+      await this.store.recordRefundObservation(sub.id, event.occurredAt, true);
+      return { outcome: "reconciliation_required", orgId: sub.orgId, providerRef: sub.providerRef };
+    }
+
+    const authoritativeRefund = refundState.state.cumulativeAmountMinor;
+    const fullRefund = authoritativeRefund >= BigInt(price.amountMinor);
+    // IMPORTANT: update only refund-observation columns. A racing partial
+    // refund must never write a stale `active` subscription over a full
+    // refund suspension from another worker.
+    await this.store.recordRefundObservation(sub.id, event.occurredAt, !fullRefund);
+
+    if (fullRefund) {
+      // Converge every full-refund replay through idempotent sub-steps. This
+      // also repairs a crash after the cumulative authority advanced but
+      // before suspension/reconciliation completed.
+      const current = await this.requireSubscription(sub.id);
+      if (!["canceled", "retention", "deleted"].includes(current.state)) {
         await this.transition(sub.id, "suspended", "full_refund_processed", {
-          idempotencyKey: `refund:${this.billingIdentityFor(event) ?? event.externalEventId}`,
+          idempotencyKey: `refund-full:${billingIdentity}`,
           suspensionSource: "refund",
           suspensionReason: "full_refund_processed",
         });
         await this.store.enqueueCommercialReconciliation(sub.id, "full_refund_processed");
-      } else {
-        await this.store.updateSubscription(sub);
       }
-    } else {
-      // PARTIAL refund (explicit documented policy, finding A): access is
-      // intentionally preserved for the already-paid remainder of the
-      // period, the subscription is flagged reconciliation_required, and no
-      // further period extension can come from the refunded invoice (its
-      // business effect is already consumed).
-      sub.reconciliationRequired = true;
-      await this.store.updateSubscription(sub);
     }
+    // Keep enriching the typed provider-object map on verified replays; this
+    // is an idempotent merge and may add a charge ref first seen on refund.
     await this.recordObjectMapping(sub, event, context.providerName, context.environment);
-    return { outcome: "applied", orgId: sub.orgId, providerRef: sub.providerRef };
+
+    return {
+      outcome: refundState.advanced ? "applied" : "duplicate",
+      orgId: sub.orgId,
+      providerRef: sub.providerRef,
+    };
   }
 
   private async applyDisputeOpened(
