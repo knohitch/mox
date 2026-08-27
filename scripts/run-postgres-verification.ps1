@@ -143,12 +143,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "migrations failed" }
 
     # 3. PG-gated suites: restart/idempotency + auth/security integration +
-    #    Security Repair 05B distributed-hardening races.
+    #    Security Repair 05B distributed-hardening races + retained-branch
+    #    rescue (credential authority isolation + billing seed idempotency).
     Write-Host "`n== running PostgreSQL-gated suites =="
     $env:MOX_TEST_DATABASE_URL = "$baseUrl/mox_verify"
     Push-Location services/control-plane
     try {
-        npx vitest run tests/restart.test.ts tests/auth-integration.test.ts tests/security-repair-05b.test.ts tests/security-repair-07.test.ts
+        npx vitest run tests/restart.test.ts tests/auth-integration.test.ts tests/security-repair-05b.test.ts tests/security-repair-07.test.ts tests/rescue-postgres.test.ts
         if ($LASTEXITCODE -ne 0) { throw "PG-gated suites failed" }
     } finally {
         Pop-Location

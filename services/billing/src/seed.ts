@@ -1,9 +1,15 @@
 /**
  * Default commercial catalog (Prompt 08). Plans and limits are data:
  * admin-editable, never hard-coded into feature code.
+ *
+ * Catalog seeding is idempotent: products are reused, plan version 1 is
+ * reused (never re-created against the (product_id, version) uniqueness
+ * constraint) and the GLOBAL USD anchor price is reused whenever an
+ * authoritative matching version already exists.
  */
 
 import type { BillingService } from "./service.js";
+import type { PlanTier } from "./types.js";
 
 export const DEFAULT_PLAN_CODES = ["plus", "pro", "max", "enterprise"] as const;
 
@@ -42,12 +48,15 @@ export async function seedCatalog(billing: BillingService, options: SeedOptions 
   }
 
   for (const code of DEFAULT_PLAN_CODES) {
-    const product = await billing.createProduct({ code, tier: code as "plus", displayName: `Mox ${code}` });
+    const product = await billing.createProduct({ code, tier: code satisfies PlanTier, displayName: `Mox ${code}` });
     productIds[code] = product.id;
 
-    const version = await billing.createPlanVersion(product.id, 1);
-    await billing.activatePlanVersion(version.id);
-    planVersions[code] = version.id;
+    // Reuse plan version 1 when it already exists; create only on a fresh
+    // product. Activate only when necessary (never on an already-active row).
+    const existingV1 = (await billing.store.listPlanVersions(product.id)).find((item) => item.version === 1);
+    const version = existingV1 ?? (await billing.createPlanVersion(product.id, 1));
+    const activeVersion = version.status === "active" ? version : await billing.activatePlanVersion(version.id);
+    planVersions[code] = activeVersion.id;
 
     // USD anchor book (fixed) + FX-derived books for other regions.
     const usdBook = await billing.upsertPriceBook({
@@ -55,11 +64,17 @@ export async function seedCatalog(billing: BillingService, options: SeedOptions 
       pricingRegionCode: "GLOBAL",
       mode: "fixed",
     });
-    const usdPrice = await billing.addFixedPriceVersion(usdBook.id, basePrices[code]!, "USD");
+    // Reuse the authoritative matching GLOBAL USD anchor price when present;
+    // create a brand-new version only when no exact minor-unit match exists.
+    const existingUsdPrices = await billing.store.listPriceVersions(usdBook.id);
+    const usdPrice =
+      existingUsdPrices.find(
+        (item) => item.currency === "USD" && BigInt(item.amountMinor) === BigInt(basePrices[code]!),
+      ) ?? (await billing.addFixedPriceVersion(usdBook.id, basePrices[code]!, "USD"));
     (priceVersionIdsByRegion[code] ??= {}).GLOBAL = usdPrice.id;
 
     const ukRates: Record<string, number> = { plus: 0.79, pro: 0.79, max: 0.79, enterprise: 0.82 };
-    const ukBook = await billing.upsertPriceBook({
+    await billing.upsertPriceBook({
       productId: product.id,
       pricingRegionCode: "UK",
       mode: "fx_derived",
@@ -67,9 +82,8 @@ export async function seedCatalog(billing: BillingService, options: SeedOptions 
       baseAmountMinor: basePrices[code]!,
       fxRate: ukRates[code],
     });
-    void ukBook;
 
-    const ngnBook = await billing.upsertPriceBook({
+    await billing.upsertPriceBook({
       productId: product.id,
       pricingRegionCode: "NG",
       mode: "fx_derived",
@@ -77,9 +91,8 @@ export async function seedCatalog(billing: BillingService, options: SeedOptions 
       baseAmountMinor: basePrices[code]!,
       fxRate: 1550,
     });
-    void ngnBook;
 
-    const ghsBook = await billing.upsertPriceBook({
+    await billing.upsertPriceBook({
       productId: product.id,
       pricingRegionCode: "GH",
       mode: "fx_derived",
@@ -87,7 +100,6 @@ export async function seedCatalog(billing: BillingService, options: SeedOptions 
       baseAmountMinor: basePrices[code]!,
       fxRate: 15.2,
     });
-    void ghsBook;
   }
 
   for (const addon of [

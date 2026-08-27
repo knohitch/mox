@@ -27,14 +27,50 @@ describe("secretbox (AES-256-GCM)", () => {
     expect(() => open(otherKey, seal(key, "cross-key"))).toThrow(); 
   }); 
  
-  it("derives the same key from hex and passphrase forms deterministically", () => { 
-    expect(deriveKey("passphrase")).toEqual(deriveKey("passphrase")); 
-  }); 
+  it("derives the same key from hex and passphrase forms deterministically", () => {
+    expect(deriveKey("passphrase")).toEqual(deriveKey("passphrase"));
+  });
 
-  it("does not treat malformed suffix-matching hex as key material", () => {
+it("does not treat malformed suffix-matching hex as key material", () => {
     const valid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     expect(() => deriveKey(`prefix-${valid}`)).not.toThrow();
     expect(() => deriveKey(`${valid.slice(0, 62)}`)).toThrow(/exactly 32 bytes/);
     expect(() => deriveKey(`hex:${valid.slice(0, 62)}`)).toThrow(/exactly 32 bytes/);
   });
-}); 
+
+  it("writes every new ciphertext in the versioned v2 format", () => {
+    expect(seal(key, "any-secret")).toMatch(/^v2\./);
+    expect(seal(key, "any-secret", "mox:credential:v2:customer:org:ext")).toMatch(/^v2\./);
+  });
+
+  it("keeps legacy unversioned ciphertext readable", () => {
+    const legacy = seal(key, "legacy-value").replace(/^v2\./, "");
+    expect(legacy).not.toMatch(/^v2\./);
+    expect(open(key, legacy)).toBe("legacy-value");
+  });
+
+  it("fails authenticated decryption when AAD is wrong or missing", () => {
+    const sealed = seal(key, "aad-secret", "mox:credential:v2:customer:org-a:key-1");
+    expect(open(key, sealed, "mox:credential:v2:customer:org-a:key-1")).toBe("aad-secret");
+    expect(() => open(key, sealed)).toThrow();
+    expect(() => open(key, sealed, "mox:credential:v2:customer:org-b:key-1")).toThrow();
+  });
+
+  it("binds ciphertext to the org so another org cannot reuse it", () => {
+    const sealed = seal(key, "org-bound", "mox:credential:v2:customer:org-a:key-1");
+    expect(() => open(key, sealed, "mox:credential:v2:customer:org-b:key-1")).toThrow();
+  });
+
+  it("binds ciphertext to the external id so another id cannot reuse it", () => {
+    const sealed = seal(key, "id-bound", "mox:credential:v2:customer:org-a:key-1");
+    expect(() => open(key, sealed, "mox:credential:v2:customer:org-a:key-2")).toThrow();
+  });
+
+  it("keeps customer and system namespaces cryptographically distinct", () => {
+    const customer = seal(key, "customer-value", "mox:credential:v2:customer:org-a:key-1");
+    expect(() => open(key, customer, "mox:credential:v2:system:key-1")).toThrow();
+    const system = seal(key, "system-value", "mox:credential:v2:system:key-1");
+    expect(() => open(key, system, "mox:credential:v2:customer:org-a:key-1")).toThrow();
+    expect(open(key, system, "mox:credential:v2:system:key-1")).toBe("system-value");
+  });
+});

@@ -24,7 +24,6 @@ import {
   channelProviders,
   computeClasses,
   costLedgerEntries,
-  credentialRefs,
   currencies,
   entitlementDefinitions,
   featureFlags,
@@ -53,6 +52,10 @@ import {
   serverOrders,
   sessionEvents,
   subscriptions,
+  systemCredentialRefs,
+  systemModelConnections,
+  systemModelProviders,
+  systemModels,
   usageEvents,
   users,
   verifiedWebhookEvents,
@@ -1505,12 +1508,14 @@ export function buildApiRouter(deps: ApiDeps): Router {
   // ---- Mox Admin: Models / Intelligence ------------------------------------------
 
   router.get("/api/admin/intelligence", async (ctx) => {
-    const admin = await requireAdminCapability(ctx, "admin.read");
+    await requireAdminCapability(ctx, "admin.read");
+    // Mox-system intelligence is PLATFORM state: it must never be scoped to
+    // the administrator's active/home organization.
     const [providers, connections, modelRows, refs] = await Promise.all([
-      db().select().from(modelProviders).where(eq(modelProviders.orgId, admin.orgId)),
-      db().select().from(modelConnections).where(eq(modelConnections.orgId, admin.orgId)),
-      db().select().from(models).where(eq(models.orgId, admin.orgId)),
-      db().select().from(credentialRefs).where(and(eq(credentialRefs.orgId, admin.orgId), eq(credentialRefs.scope, "mox_system_model_provider"))),
+      db().select().from(systemModelProviders),
+      db().select().from(systemModelConnections),
+      db().select().from(systemModels),
+      db().select().from(systemCredentialRefs),
     ]);
     return {
       providers: intelligenceProviderNames.map((slug) => {
@@ -1523,9 +1528,20 @@ export function buildApiRouter(deps: ApiDeps): Router {
           kind: provider?.kind ?? "api",
           configured: Boolean(connection?.credentialRefId),
           credentialFingerprint: ref?.label ?? undefined,
+          providerState: provider ? (provider.enabled ? "enabled" : "disabled") : "not_provisioned",
+          connectionState: connection?.connectionStatus ?? "not_configured",
           baseUrlConfigured: Boolean(connection?.baseUrl),
           settings: provider?.capabilities ?? {},
-          models: provider ? modelRows.filter((row) => row.providerId === provider.id) : [],
+          models: provider
+            ? modelRows
+                .filter((row) => row.providerId === provider.id)
+                .map((row) => ({
+                  modelId: row.slug,
+                  displayName: row.displayName,
+                  contextWindow: row.contextWindow,
+                  enabled: row.enabled,
+                }))
+            : [],
         };
       }),
     };
@@ -1549,9 +1565,10 @@ export function buildApiRouter(deps: ApiDeps): Router {
       internalLayer?: boolean;
     } | undefined;
     rejectSecretBearingUrl(body?.baseUrl);
-    let provider = (await db().select().from(modelProviders).where(and(eq(modelProviders.orgId, admin.orgId), eq(modelProviders.slug, slug))).limit(1))[0];
+    let provider = (
+      await db().select().from(systemModelProviders).where(eq(systemModelProviders.slug, slug)).limit(1)
+    )[0];
     const providerValues = {
-      orgId: admin.orgId,
       slug,
       displayName: body?.displayName ?? slug,
       kind: body?.kind ?? "api",
@@ -1567,35 +1584,38 @@ export function buildApiRouter(deps: ApiDeps): Router {
       updatedAt: new Date(),
     };
     if (provider) {
-      await db().update(modelProviders).set(providerValues).where(eq(modelProviders.id, provider.id));
+      await db().update(systemModelProviders).set(providerValues).where(eq(systemModelProviders.id, provider.id));
     } else {
-      const inserted = await db().insert(modelProviders).values(providerValues).returning();
+      const inserted = await db().insert(systemModelProviders).values(providerValues).returning();
       provider = inserted[0]!;
     }
     let credentialRefId: string | null | undefined;
     if (typeof body?.secretRef === "string" && body.secretRef.trim()) {
       const externalId = `mox:${slug}:${body.secretRef.trim()}`;
-      const ref = await db().insert(credentialRefs).values({
-        orgId: admin.orgId,
-        scope: "mox_system_model_provider",
+      const ref = await db().insert(systemCredentialRefs).values({
+        scope: "model",
         externalId,
         label: body.secretRef.trim(),
       }).onConflictDoUpdate({
-        target: [credentialRefs.orgId, credentialRefs.externalId],
+        target: systemCredentialRefs.externalId,
         set: { label: body.secretRef.trim() },
-      }).returning({ id: credentialRefs.id });
+      }).returning({ id: systemCredentialRefs.id });
       credentialRefId = ref[0]?.id;
     }
-    const existingConnection = (await db().select().from(modelConnections).where(and(eq(modelConnections.orgId, admin.orgId), eq(modelConnections.providerId, provider.id))).limit(1))[0];
+    const existingConnection = (
+      await db().select().from(systemModelConnections).where(eq(systemModelConnections.providerId, provider.id)).limit(1)
+    )[0];
     const connectionValues = {
-      orgId: admin.orgId,
       providerId: provider.id,
       credentialRefId,
       baseUrl: body?.baseUrl ?? null,
       updatedAt: new Date(),
     };
-    if (existingConnection) await db().update(modelConnections).set(connectionValues).where(eq(modelConnections.id, existingConnection.id));
-    else await db().insert(modelConnections).values(connectionValues);
+    if (existingConnection) {
+      await db().update(systemModelConnections).set(connectionValues).where(eq(systemModelConnections.id, existingConnection.id));
+    } else {
+      await db().insert(systemModelConnections).values(connectionValues);
+    }
     await appendAdminAudit(admin, {
       action: "intelligence.provider.upsert",
       resourceType: "model_provider",
