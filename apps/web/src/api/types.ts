@@ -196,6 +196,79 @@ export interface AdminNotificationJobs {
   stats: { scheduled: number; completed: number; failed: number };
 }
 
+// ---- Prompt 03: Staff & Access + Support console ---------------------------
+
+export interface StaffMember {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+  surface: "admin" | "support";
+  enabled: boolean;
+  grantedByUserId: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export interface AdminStaffInvite {
+  invitationId: string;
+  surface: "admin" | "support" | "both";
+  role: string;
+  email: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt?: string | null;
+  revokedAt?: string | null;
+}
+
+export interface AdminStaff {
+  members: StaffMember[];
+  invites: AdminStaffInvite[];
+}
+
+export interface CreateStaffInviteInput {
+  email: string;
+  role: string;
+  surface: "admin" | "support" | "both";
+}
+
+export interface CreatedStaffInvite {
+  invitationId: string;
+  role: string;
+  email: string;
+  surface: "admin" | "support" | "both";
+  token: string;
+  expiresAt: string;
+}
+
+export interface SupportCustomer {
+  orgId: string;
+  slug: string;
+  displayName: string;
+  workspaceName: string | null;
+  createdAt: string;
+  memberCount: number;
+  users: Array<Record<string, unknown>>;
+  subscriptions: Array<Record<string, unknown>>;
+  servers: Array<Record<string, unknown>>;
+  agents: Array<Record<string, unknown>>;
+  supportNoteCount: number;
+}
+
+export interface SupportCustomerDetail {
+  orgId: string;
+  slug: string;
+  displayName: string;
+  workspaceName: string | null;
+  createdAt: string;
+  users: Array<Record<string, unknown>>;
+  subscriptions: Array<Record<string, unknown>>;
+  servers: Array<Record<string, unknown>>;
+  agents: Array<Record<string, unknown>>;
+  supportNotes: Array<{ id: string; actorId: string | null; note: string; at: string }>;
+  recentActivity: Array<Record<string, unknown>>;
+}
+
 export interface ComputerSnapshot {
   sessionId: string;
   state: "pending" | "active" | "paused" | "closed";
@@ -284,6 +357,17 @@ export interface MoxApi {
   adminSendNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
   adminScheduleNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
   adminCancelNotificationJob(jobId: string): Promise<void>;
+
+  // Prompt 03: Staff & Access (admin.staff.write — superadmin only)
+  adminStaff(): Promise<AdminStaff>;
+  adminCreateStaffInvite(input: CreateStaffInviteInput): Promise<CreatedStaffInvite>;
+  adminRevokeStaffInvite(invitationId: string): Promise<void>;
+  adminStaffAction(userId: string, role: string, action: "disable" | "enable" | "revoke", reason?: string): Promise<void>;
+
+  // Prompt 03: Support console (support.customer.lookup / support.ticket.write)
+  supportCustomers(query?: string): Promise<SupportCustomer[]>;
+  supportCustomer(orgId: string): Promise<SupportCustomerDetail>;
+  supportAddNote(orgId: string, note: string): Promise<void>;
 
   // Computer (through the Mox Computer Gateway contractually)
   computerSnapshot(agentId: string): Promise<ComputerSnapshot | undefined>;

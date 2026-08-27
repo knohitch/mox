@@ -6,7 +6,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { ControlPlaneConfig } from "../src/config.js";
 import { DEFAULT_WEBHOOK_ABUSE } from "../src/config.js";
@@ -2546,6 +2546,456 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect(bUnread.count).toBe(0);
     const aUnread = (await (await call("/api/notifications/unread-count", { headers: { cookie: aCookie } })).body) as { count: number };
     expect(aUnread.count).toBe(1);
+  });
+
+  describe("Prompt 01: surface isolation, staff identity, invites, password reset", () => {
+    async function signupUser(email: string, password: string) {
+      const res = await call("/api/auth/signup", {
+        method: "POST",
+        headers: { ...CSRF, "content-type": "application/json" },
+        body: JSON.stringify({ email, password, orgName: "t-org-" + email.split("@")[0] }),
+      });
+      expect(res.status).toBe(200);
+      const cookie = cookieFrom(res.headers);
+      const me = await call("/api/me", { headers: { cookie } });
+      expect(me.status).toBe(200);
+      return { cookie, userId: (me.body as { userId: string }).userId };
+    }
+
+    async function seedStaff(userId: string, role: string) {
+      const { platformStaffMemberships } = await import("@mox/database");
+      await server.services.db.insert(platformStaffMemberships).values({
+        userId,
+        role: role as never,
+        enabled: true,
+      });
+    }
+
+    it("password reset lifecycle: token minted, password updated, sessions revoked, token one-use", async () => {
+      const { passwordResets } = await import("@mox/database");
+      const { u, p } = { u: `reset-${randomUUID().slice(0, 8)}@mox.test`, p: "resetpass-12345" };
+      const acc = await signupUser(u, p);
+      const oldP = acc.cookie;
+
+      // Anti-enumeration: unknown email returns a generic 200, nothing stored.
+      const unknown = await call("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "nobody@does-not-exist.test" }),
+      });
+      expect(unknown.status).toBe(200);
+
+      // Known account: token minted and returned to the (unconfigured) delivery path.
+      const forgot = await call("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: u }),
+      });
+      expect(forgot.status).toBe(200);
+      const body = forgot.body as { deliverableToken?: string };
+      expect(typeof body.deliverableToken).toBe("string");
+      const token = body.deliverableToken!;
+
+      // Only the hash is stored, never the plaintext.
+      const rows = await server.services.db.select().from(passwordResets);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const r of rows) {
+        expect(r.tokenHash).not.toContain("mox_reset_");
+        expect(r.tokenHash).not.toBe(token);
+        expect(r.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      }
+
+      // Establish a browser session for the user, then reset.
+      const loginBefore = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: u, password: p }),
+      });
+      expect(loginBefore.status).toBe(200);
+
+      const newP = "resetpass-67890";
+      const reset = await call("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, password: newP }),
+      });
+      expect(reset.status).toBe(200);
+
+      // Old password fails now; new password works.
+      const oldLogin = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: u, password: p }),
+      });
+      expect(oldLogin.status).toBe(401);
+      const newLogin = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: u, password: newP }),
+      });
+      expect(newLogin.status).toBe(200);
+
+      // Token cannot be reused.
+      const reuse = await call("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, password: "another-12345" }),
+      });
+      expect(reuse.status).toBe(400);
+
+      // The pre-reset session was revoked.
+      const meAfter = await call("/api/me", { headers: { cookie: oldP } });
+      expect(meAfter.status).toBe(401);
+    });
+
+    it("password reset rejects expired tokens", async () => {
+      const { passwordResets } = await import("@mox/database");
+      const { u } = { u: `expreset-${randomUUID().slice(0, 8)}@mox.test` };
+      await signupUser(u, "expiredpass-123");
+      const token = `mox_reset_expired_${randomUUID()}`;
+      const userRows = await server.services.db.execute(sql`select id from users where email = ${u}`);
+      const userId = (userRows.rows[0] as { id: string }).id;
+      await server.services.db.insert(passwordResets).values({
+        userId,
+        tokenHash: createHash("sha256").update(token).digest("hex"),
+        expiresAt: new Date(Date.now() - 60_000),
+      });
+      const res = await call("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, password: "whatever-12345" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("staff invitation lifecycle: create (admin-only), signup, once-only, list without plaintext", async () => {
+      const { staffInvitations } = await import("@mox/database");
+
+      // Need a real superadmin actor to create invites.
+      const admin = await signupUser(`super-${randomUUID().slice(0, 8)}@mox.test`, "superpass-12345");
+      await seedStaff(admin.userId, "superadmin");
+
+      const invitee = `invitee-${randomUUID().slice(0, 8)}@mox.test`;
+      const create = await call("/api/admin/staff/invites", {
+        method: "POST",
+        headers: { ...CSRF, cookie: admin.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ email: invitee, role: "support_agent", surface: "support" }),
+      });
+      expect(create.status).toBe(200);
+      const created = create.body as { token: string; invitationId: string; email: string };
+      expect(created.token).toMatch(/^mox_invite_/);
+      expect(created.email.toLowerCase()).toBe(invitee.toLowerCase());
+
+      // List API returns NO plaintext token.
+      const list = await call("/api/admin/staff/invites", {
+        method: "GET",
+        headers: { cookie: admin.cookie },
+      });
+      expect(list.status).toBe(200);
+      const listed = list.body as Array<{ email: string }>;
+      expect(JSON.stringify(listed)).not.toContain("mox_invite_");
+      expect(listed.some((i) => i.email.toLowerCase() === invitee.toLowerCase())).toBe(true);
+
+      // A customer (non-staff) cannot create invites.
+      const customer = await signupUser(`cust-${randomUUID().slice(0, 8)}@mox.test`, "custpass-12345");
+      const forbidden = await call("/api/admin/staff/invites", {
+        method: "POST",
+        headers: { ...CSRF, cookie: customer.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ email: "x@y.z", role: "support_agent", surface: "support" }),
+      });
+      expect(forbidden.status).toBe(403);
+
+      // /support/signup without an invite creates nothing.
+      const noInvite = await call("/api/support/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: `nodice-${randomUUID().slice(0, 8)}@mox.test`, password: "noinvite-12345678", inviteToken: "bogus" }),
+      });
+      expect(noInvite.status).toBe(400);
+
+      // Valid invite accepted once, staff grant attached.
+      const signup = await call("/api/support/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: invitee, password: "invitee-12345", inviteToken: created.token }),
+      });
+      expect(signup.status).toBe(200);
+      expect((signup.body as { surface: string }).surface).toBe("support");
+      const supportCookie = cookieFrom(signup.headers);
+
+      // Reuse of the consumed token fails.
+      const reuse = await call("/api/support/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: invitee, password: "invitee-12345", inviteToken: created.token }),
+      });
+      expect(reuse.status).toBe(400);
+
+      // The invitee (support_agent) can access Support but NOT Admin.
+      const supportSession = await call("/api/support/session", { headers: { cookie: supportCookie } });
+      expect(supportSession.status).toBe(200);
+      expect((supportSession.body as { roles: string[] }).roles).toContain("support_agent");
+      const adminSession = await call("/api/admin/session", { headers: { cookie: supportCookie } });
+      expect(adminSession.status).toBe(403);
+    });
+
+    it("wrong-email and revoked invites fail", async () => {
+      const { staffInvitations } = await import("@mox/database");
+      const admin = await signupUser(`super2-${randomUUID().slice(0, 8)}@mox.test`, "superpass-12345");
+      await seedStaff(admin.userId, "superadmin");
+
+      const wrongEmail = await call("/api/admin/staff/invites", {
+        method: "POST",
+        headers: { ...CSRF, cookie: admin.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ email: "right@wrong.test", role: "support_agent", surface: "support" }),
+      });
+      expect(wrongEmail.status).toBe(200);
+      const wToken = (wrongEmail.body as { token: string }).token;
+      const wrongSignup = await call("/api/support/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "notright@wrong.test", password: "wrongemail-12345678", inviteToken: wToken }),
+      });
+      expect(wrongSignup.status).toBe(400);
+
+      const revokeMe = await call("/api/admin/staff/invites", {
+        method: "POST",
+        headers: { ...CSRF, cookie: admin.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ email: "rev@wrong.test", role: "support_agent", surface: "support" }),
+      });
+      const rToken = (revokeMe.body as { token: string; invitationId: string }).token;
+      const invId = (revokeMe.body as { invitationId: string }).invitationId;
+      const revoke = await call(`/api/admin/staff/invites/${invId}`, {
+        method: "DELETE",
+        headers: { ...CSRF, cookie: admin.cookie },
+      });
+      expect(revoke.status).toBe(200);
+      const revokedSignup = await call("/api/support/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: "rev@wrong.test", password: "revoked-12345678", inviteToken: rToken }),
+      });
+      expect(revokedSignup.status).toBe(400);
+    });
+
+    it("surface isolation: customer (even org owner) denied Admin and Support; staff are not customers", async () => {
+      const email = `owner-${randomUUID().slice(0, 8)}@mox.test`;
+      const pw = "ownerpass-12345";
+      // Ordinary customer (org owner by signup) has NO platform authority.
+      const cust = await signupUser(email, pw);
+
+      const adminSession = await call("/api/admin/session", { headers: { cookie: cust.cookie } });
+      expect(adminSession.status).toBe(403);
+      const supportSession = await call("/api/support/session", { headers: { cookie: cust.cookie } });
+      expect(supportSession.status).toBe(403);
+
+      // Admin login (password auth + surface check) is denied for the owner.
+      const adminLogin = await call("/api/admin/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: pw }),
+      });
+      expect(adminLogin.status).toBe(403);
+      const supportLogin = await call("/api/support/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: pw }),
+      });
+      expect(supportLogin.status).toBe(403);
+    });
+
+    it("admin login grants Admin to staff superadmin only", async () => {
+      const email = `admin2-${randomUUID().slice(0, 8)}@mox.test`;
+      const pw = "adminpass-12345";
+      const acc = await signupUser(email, pw);
+      await seedStaff(acc.userId, "superadmin");
+
+      const login = await call("/api/admin/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: pw }),
+      });
+      expect(login.status).toBe(200);
+      const cookie = cookieFrom(login.headers);
+      const session = await call("/api/admin/session", { headers: { cookie } });
+      expect(session.status).toBe(200);
+      expect((session.body as { role: string }).role).toBe("superadmin");
+    });
+
+    it("customer login return target cannot escape into Admin/Support or open redirect", async () => {
+      // Absolute URL and protocol-relative are rejected; /admin is rejected.
+      const email = `rt-${randomUUID().slice(0, 8)}@mox.test`;
+      await signupUser(email, "rtpass-12345");
+
+      const abs = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "rtpass-12345", returnTo: "https://evil.example/phish" }),
+      });
+      expect(abs.status).toBe(200);
+      expect((abs.body as { returnTo: string }).returnTo).toBe("/");
+
+      const protoRel = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "rtpass-12345", returnTo: "//evil.example" }),
+      });
+      expect((protoRel.body as { returnTo: string }).returnTo).toBe("/");
+
+      const good = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "rtpass-12345", returnTo: "/agents?tab=1" }),
+      });
+      expect((good.body as { returnTo: string }).returnTo).toBe("/agents?tab=1");
+
+      const adminEscape = await call("/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: "rtpass-12345", returnTo: "/admin" }),
+      });
+      expect((adminEscape.body as { returnTo: string }).returnTo).toBe("/");
+    });
+  });
+
+  describe("Prompt 03: Staff & Access + least-privilege Support console", () => {
+    async function signupUser(email: string, password: string) {
+      const res = await call("/api/auth/signup", {
+        method: "POST",
+        headers: { ...CSRF, "content-type": "application/json" },
+        body: JSON.stringify({ email, password, orgName: "t-org-" + email.split("@")[0] }),
+      });
+      expect(res.status).toBe(200);
+      const cookie = cookieFrom(res.headers);
+      const me = await call("/api/me", { headers: { cookie } });
+      expect(me.status).toBe(200);
+      return { cookie, userId: (me.body as { userId: string }).userId };
+    }
+
+    async function seedStaff(userId: string, role: string) {
+      const { platformStaffMemberships } = await import("@mox/database");
+      await server.services.db.insert(platformStaffMemberships).values({
+        userId,
+        role: role as never,
+        enabled: true,
+      });
+    }
+
+    async function seedSupportAgent() {
+      const account = await signupUser(`sag-${randomUUID().slice(0, 8)}@mox.test`, "sagpass-12345");
+      await seedStaff(account.userId, "support_agent");
+      return account;
+    }
+
+    it("Staff & Access list/disable requires admin.staff.write (superadmin), denied for support", async () => {
+      const superadmin = await signupUser(`ssa-${randomUUID().slice(0, 8)}@mox.test`, "ssapass-12345");
+      await seedStaff(superadmin.userId, "superadmin");
+      const agent = await seedSupportAgent();
+
+      // Superadmin can read the staff roster.
+      const list = await call("/api/admin/staff", { headers: { cookie: superadmin.cookie } });
+      expect(list.status).toBe(200);
+      const body = list.body as { members: Array<{ userId: string; role: string; surface: string; enabled: boolean }>; invites: unknown[] };
+      expect(body.members.some((m) => m.role === "superadmin")).toBe(true);
+      expect(body.members.some((m) => m.userId === agent.userId && m.surface === "support")).toBe(true);
+
+      // A support_agent (no admin.staff.write) is denied the roster, 403.
+      const agentList = await call("/api/admin/staff", { headers: { cookie: agent.cookie } });
+      expect(agentList.status).toBe(403);
+
+      // Disable then enable the support_agent through the membership route.
+      const disable = await call(`/api/admin/staff/${agent.userId}/disable`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: superadmin.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ role: "support_agent", reason: "prompt03_test" }),
+      });
+      expect(disable.status).toBe(200);
+      const afterDisable = await call("/api/admin/staff", { headers: { cookie: superadmin.cookie } });
+      const disabled = (afterDisable.body as { members: Array<{ userId: string; enabled: boolean }> }).members.find((m) => m.userId === agent.userId);
+      expect(disabled?.enabled).toBe(false);
+
+      const enable = await call(`/api/admin/staff/${agent.userId}/enable`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: superadmin.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ role: "support_agent" }),
+      });
+      expect(enable.status).toBe(200);
+    });
+
+    it("support agent can look up customers but the projection is support-safe (no costs/credentials/ips)", async () => {
+      const owner = await signupUser(`sc-${randomUUID().slice(0, 8)}@mox.test`, "scpass-12345");
+      // Give the org an agent so the projection has rows to inspect.
+      const { agents } = await import("@mox/database");
+      const meBody = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await server.services.db.insert(agents).values({
+        orgId: meBody.orgId,
+        slug: "probe-agent",
+        displayName: "Probe Agent",
+        status: "active",
+        definition: { rows: [], when: [] },
+      });
+
+      const agent = await seedSupportAgent();
+      const list = await call("/api/support/customers", { headers: { cookie: agent.cookie } });
+      expect(list.status).toBe(200);
+      const body = list.body as { customers: Array<Record<string, unknown>> };
+      const json = JSON.stringify(body);
+      expect(body.customers.length).toBeGreaterThanOrEqual(1);
+      // Support-safe projection must EXCLUDE cost/margin/credential/IP material.
+      expect(json).not.toContain("costMargin");
+      expect(json).not.toContain("costMinor");
+      expect(json).not.toContain("revenue");
+      expect(json).not.toContain("providerAccountId");
+      expect(json).not.toContain("providerInstanceId");
+      expect(json).not.toContain("rootCredentialRefId");
+      expect(json).not.toMatch(/ipv4|ipv6|hostname|sshKeyId/);
+
+      // Detail endpoint also safe and shows the (empty) audited note list shape.
+      const found = body.customers[0]!.orgId as string;
+      const detail = await call(`/api/support/customers/${found}`, { headers: { cookie: agent.cookie } });
+      expect(detail.status).toBe(200);
+      const dJson = JSON.stringify(detail.body);
+      expect(dJson).not.toContain("costMargin");
+    });
+
+    it("support note write is capturable + audited with support.ticket.write", async () => {
+      const owner = await signupUser(`sn-${randomUUID().slice(0, 8)}@mox.test`, "snpass-12345");
+      const meBody = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      const agent = await seedSupportAgent();
+
+      const note = await call(`/api/support/customers/${meBody.orgId}/notes`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: agent.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ note: "Prompt 03 audited note" }),
+      });
+      expect(note.status).toBe(200);
+
+      const detail = await call(`/api/support/customers/${meBody.orgId}`, { headers: { cookie: agent.cookie } });
+      const notes = (detail.body as { supportNotes: Array<{ note: string }> }).supportNotes;
+      expect(notes.some((n) => n.note === "Prompt 03 audited note")).toBe(true);
+
+      const { auditEvents } = await import("@mox/database");
+      const { eq } = await import("drizzle-orm");
+      const rows = await server.services.db
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.orgId, meBody.orgId));
+      expect(rows.some((r) => r.action === "support.note")).toBe(true);
+      expect(rows.some((r) => String(r.actorType).startsWith("support:"))).toBe(true);
+    });
+
+    it("authorization matrix: customer and support staff can never reach admin staff routes", async () => {
+      const customer = await signupUser(`cm-${randomUUID().slice(0, 8)}@mox.test`, "cmpass-12345");
+      const support = await seedSupportAgent();
+
+      // A plain customer cannot even reach /api/admin/staff.
+      const asCustomer = await call("/api/admin/staff", { headers: { cookie: customer.cookie } });
+      expect(asCustomer.status).toBe(403);
+
+      // A support_agent (whose only grants are support.*) is denied admin/staff.
+      const asSupport = await call("/api/admin/staff", { headers: { cookie: support.cookie } });
+      expect(asSupport.status).toBe(403);
+    });
   });
 
 });

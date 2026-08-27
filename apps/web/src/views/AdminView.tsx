@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useMox } from "../api/store.js";
 import type {
@@ -11,22 +11,13 @@ import type {
   AdminPaymentProvider,
   AdminPlans,
   AdminRuntimeAgent,
+  AdminStaff,
+  CreatedStaffInvite,
 } from "../api/types.js";
 import { Badge, Card, EmptyState } from "../ui/primitives.js";
+import { ADMIN_TAB_LABEL, canManageStaff, visibleAdminTabs } from "../concepts/staffNav.js";
 
-type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations";
-
-const TABS: Array<{ key: AdminTab; label: string }> = [
-  { key: "dashboard", label: "Dashboard" },
-  { key: "customers", label: "Customers" },
-  { key: "plans", label: "Plans" },
-  { key: "payments", label: "Payments" },
-  { key: "compute", label: "Compute" },
-  { key: "intelligence", label: "Models" },
-  { key: "runtime", label: "Runtime" },
-  { key: "notifications", label: "Notifications" },
-  { key: "operations", label: "Operations" },
-];
+type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "staff";
 
 function asString(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -81,8 +72,17 @@ function Metric({ label, value, detail }: { label: string; value: ReactNode; det
 }
 
 export function AdminView() {
-  const { api } = useMox();
+  const { api, staffSession } = useMox();
+  const capabilities = staffSession?.capabilities ?? [];
+  const visibleTabs = visibleAdminTabs(capabilities);
   const [tab, setTab] = useState<AdminTab>("dashboard");
+  useEffect(() => {
+    // Prompt 03: never leave a capability-gated tab active after the visible
+    // set changes (e.g. a reduced-role staff member lands on a hidden tab).
+    if (!visibleTabs.includes(tab)) {
+      setTab(visibleTabs[0] ?? "dashboard");
+    }
+  }, [visibleTabs, tab]);
   const [overview, setOverview] = useState<AdminOverview>();
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
   const [plans, setPlans] = useState<AdminPlans>();
@@ -92,6 +92,7 @@ export function AdminView() {
   const [runtime, setRuntime] = useState<AdminRuntimeAgent[]>([]);
   const [operations, setOperations] = useState<AdminOperations>();
   const [notificationJobs, setNotificationJobs] = useState<AdminNotificationJobs>();
+  const [staff, setStaff] = useState<AdminStaff>();
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -99,7 +100,7 @@ export function AdminView() {
     setBusy(true);
     setStatus(null);
     try {
-      const [o, c, p, pay, comp, intel, run, ops, jobs] = await Promise.all([
+      const results = await Promise.allSettled([
         api.adminOverview(),
         api.adminCustomers(),
         api.adminPlans(),
@@ -109,16 +110,23 @@ export function AdminView() {
         api.adminRuntime(),
         api.adminOperations(),
         api.adminNotificationJobs(),
+        canManageStaff(capabilities) ? api.adminStaff() : Promise.resolve(undefined),
       ]);
-      setOverview(o);
-      setCustomers(c);
-      setPlans(p);
-      setPayments(pay);
-      setCompute(comp);
-      setIntelligence(intel);
-      setRuntime(run);
-      setOperations(ops);
-      setNotificationJobs(jobs);
+      const [o, c, p, pay, comp, intel, run, ops, jobs, staffRes] = results;
+      if (o.status === "fulfilled") setOverview(o.value);
+      if (c.status === "fulfilled") setCustomers(c.value);
+      if (p.status === "fulfilled") setPlans(p.value);
+      if (pay.status === "fulfilled") setPayments(pay.value);
+      if (comp.status === "fulfilled") setCompute(comp.value);
+      if (intel.status === "fulfilled") setIntelligence(intel.value);
+      if (run.status === "fulfilled") setRuntime(run.value);
+      if (ops.status === "fulfilled") setOperations(ops.value);
+      if (jobs.status === "fulfilled") setNotificationJobs(jobs.value);
+      if (staffRes.status === "fulfilled" && staffRes.value) setStaff(staffRes.value);
+      const firstError = results.find((r) => r.status === "rejected");
+      if (firstError && firstError.status === "rejected") {
+        setStatus(firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason));
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -140,7 +148,16 @@ export function AdminView() {
     runtime: <RuntimePanel runtime={runtime} onRefresh={refresh} />,
     notifications: <NotificationsPanel jobs={notificationJobs} onRefresh={refresh} />,
     operations: <OperationsPanel operations={operations} />,
+    staff: <StaffPanel staff={staff} onRefresh={refresh} />,
   }[tab];
+
+  if (visibleTabs.length === 0) {
+    return (
+      <div className="admin-console">
+        <div className="admin-alert" role="alert">This account has no platform-admin capability on this surface.</div>
+      </div>
+    );
+  }
 
   return (
     <div className="admin-console">
@@ -154,9 +171,9 @@ export function AdminView() {
         </button>
       </header>
       <nav className="admin-tabs" aria-label="Mox Admin sections">
-        {TABS.map((item) => (
-          <button key={item.key} type="button" className={tab === item.key ? "active" : ""} onClick={() => setTab(item.key)}>
-            {item.label}
+        {visibleTabs.map((key) => (
+          <button key={key} type="button" className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
+            {ADMIN_TAB_LABEL[key]}
           </button>
         ))}
       </nav>
@@ -164,6 +181,134 @@ export function AdminView() {
       {content}
     </div>
   );
+}
+
+function StaffPanel({ staff, onRefresh }: { staff?: AdminStaff; onRefresh: () => Promise<void> }) {
+  const { api } = useMox();
+  const [invite, setInvite] = useState({ email: "", role: "platform_admin", surface: "admin" as "admin" | "support" | "both" });
+  const [created, setCreated] = useState<CreatedStaffInvite | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (!staff) return <EmptyState>Loading Staff &amp; Access.</EmptyState>;
+  return (
+    <>
+      <div className="grid grid-2">
+        <Card title={`Platform staff (${staff.members.length})`}>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr><th>Display name</th><th>Email</th><th>Role</th><th>Surface</th><th>Status</th><th>Granted at</th><th /></tr>
+              </thead>
+              <tbody>
+                {staff.members.map((member) => (
+                  <tr key={`${member.userId}:${member.role}`}>
+                    <td>{member.displayName}</td>
+                    <td>{member.email}</td>
+                    <td>{member.role}</td>
+                    <td>{member.surface}</td>
+                    <td>{member.revokedAt ? "revoked" : member.enabled ? "active" : "disabled"}</td>
+                    <td>{member.createdAt}</td>
+                    <td className="admin-actions-cell">
+                      {!member.revokedAt && !member.enabled && (
+                        <button type="button" onClick={() => void confirmAnd(async () => {
+                          await api.adminStaffAction(member.userId, member.role, "enable");
+                          await onRefresh();
+                        })}>Enable</button>
+                      )}
+                      {!member.revokedAt && member.enabled && (
+                        <>
+                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                            await api.adminStaffAction(member.userId, member.role, "disable", "admin_console");
+                            await onRefresh();
+                          })}>Disable</button>
+                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                            await api.adminStaffAction(member.userId, member.role, "revoke", "admin_console");
+                            await onRefresh();
+                          })}>Revoke</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+        <div>
+          <Card title="Invite staff">
+            <form className="admin-form" onSubmit={(event) => {
+              event.preventDefault();
+              void (async () => {
+                setBusy(true);
+                setStatus(null);
+                try {
+                  setCreated(await api.adminCreateStaffInvite(invite));
+                  setInvite({ email: "", role: "platform_admin", surface: "admin" });
+                  await onRefresh();
+                } catch (error) {
+                  setStatus(error instanceof Error ? error.message : String(error));
+                } finally {
+                  setBusy(false);
+                }
+              })();
+            }}>
+              <input value={invite.email} onChange={(event) => setInvite({ ...invite, email: event.target.value })} placeholder="Staff email" required />
+              <select value={invite.role} onChange={(event) => setInvite({ ...invite, role: event.target.value })}>
+                <option value="platform_admin">Platform admin</option>
+                <option value="support_manager">Support manager</option>
+                <option value="support_agent">Support agent</option>
+              </select>
+              <select value={invite.surface} onChange={(event) => setInvite({ ...invite, surface: event.target.value as "admin" | "support" | "both" })}>
+                <option value="admin">Admin</option>
+                <option value="support">Support</option>
+                <option value="both">Both</option>
+              </select>
+              <button type="submit" disabled={busy}>{busy ? "Creating…" : "Create invite"}</button>
+            </form>
+            {status ? <div className="admin-alert" role="alert">{status}</div> : null}
+            {created ? (
+              <div className="admin-secret-state" role="status">
+                <strong>Invite created — share the one-time token (shown only once):</strong>
+                <code className="invite-token">{created.token}</code>
+                <div className="muted">Pending: {created.email} · {created.role} · {created.surface}</div>
+              </div>
+            ) : null}
+          </Card>
+          <Card title={`Pending invites (${staff.invites.length})`}>
+            <div className="admin-table-wrap">
+              <table className="admin-table">
+                <thead><tr><th>Email</th><th>Role</th><th>Surface</th><th>Expires</th><th>Status</th><th /></tr></thead>
+                <tbody>
+                  {staff.invites.map((inviteRow) => (
+                    <tr key={inviteRow.invitationId}>
+                      <td>{inviteRow.email}</td>
+                      <td>{inviteRow.role}</td>
+                      <td>{inviteRow.surface}</td>
+                      <td>{inviteRow.expiresAt}</td>
+                      <td>{inviteRow.revokedAt ? "revoked" : inviteRow.consumedAt ? "consumed" : "pending"}</td>
+                      <td className="admin-actions-cell">
+                        {!inviteRow.revokedAt && !inviteRow.consumedAt && (
+                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                            await api.adminRevokeStaffInvite(inviteRow.invitationId);
+                            await onRefresh();
+                          })}>Revoke</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** Confirmation before privileged staff-management mutations. */
+function confirmAnd(action: () => Promise<void>): Promise<void> {
+  return window.confirm("Confirm this privileged staff action?") ? action() : Promise.resolve();
 }
 
 function DashboardPanel({ overview }: { overview?: AdminOverview }) {

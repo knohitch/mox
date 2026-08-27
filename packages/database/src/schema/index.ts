@@ -1,6 +1,7 @@
 export * from "./identity-users.js"; 
 export * from "./identity-memberships.js"; 
 export * from "./identity-auth.js"; 
+export * from "./identity-staff.js";
 export * from "./agents-core.js"; 
 export * from "./agents-deploy.js"; 
 export * from "./agents-authoring.js"; 

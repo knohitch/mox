@@ -205,6 +205,13 @@ export class DemoMoxApi implements MoxApi {
   async adminSendNotification() { return this.adminUnavailable(); }
   async adminScheduleNotification() { return this.adminUnavailable(); }
   async adminCancelNotificationJob() { return this.adminUnavailable(); }
+  async adminStaff() { return this.adminUnavailable(); }
+  async adminCreateStaffInvite() { return this.adminUnavailable(); }
+  async adminRevokeStaffInvite() { return this.adminUnavailable(); }
+  async adminStaffAction() { return this.adminUnavailable(); }
+  async supportCustomers() { return this.adminUnavailable(); }
+  async supportCustomer() { return this.adminUnavailable(); }
+  async supportAddNote() { return this.adminUnavailable(); }
 
   // ---- Roster ----
 

@@ -5,7 +5,7 @@
  * readable codes instead of pretending.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
@@ -51,6 +51,7 @@ import {
   serverOperations,
   serverOrders,
   sessionEvents,
+  staffInvitations,
   subscriptions,
   systemCredentialRefs,
   systemModelConnections,
@@ -65,28 +66,41 @@ import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import {
   authenticate,
+  AuthError,
   completePlatformSetup,
+  consumeStaffInvitationById,
+  createStaffInvitation,
   extractSessionToken,
   hashToken,
   isCookieAuthenticated,
   issueApiToken,
   listApiTokens,
+  listStaffMemberships,
+  loadStaffGrants,
   login as loginAccount,
   logout as logoutSession,
+  peekStaffInvitation,
   programmaticLogin,
+  requestPasswordReset,
+  resetPassword,
   revokeApiToken,
+  revokeStaffInvitation,
   scopeSatisfied,
   serializeClearSessionCookie,
   serializeSessionCookie,
   signup as signupAccount,
   switchActiveOrg,
+  updateStaffMembershipStatus,
 } from "./auth.js";
 import { httpError, Router, sendJson, type RequestContext } from "./http.js";
 import {
   DEFAULT_WEBHOOK_ABUSE,
   PLATFORM_ROLE_CAPABILITIES,
+  STAFF_ROLE_CAPABILITIES,
   type PlatformAdminCapability,
   type PlatformAdminRole,
+  type StaffRole,
+  type SupportCapability,
 } from "./config.js";
 import { bucketHash, clientIp, DurableRateLimiter } from "./rate-limit.js";
 import { ClusterSseAdmission, DEFAULT_SSE_LIMITS, SseAdmissionDeniedError } from "./sse-admission.js";
@@ -102,6 +116,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const router = new Router();
   const { services } = deps;
   const db = () => services.db;
+  const randomShort = () => randomBytes(2).toString("hex");
   const authLimiter = new DurableRateLimiter(db());
   const webhookLimiter = new DurableRateLimiter(db());
   const sseAdmission = new ClusterSseAdmission(db(), services.config.sseLimits ?? DEFAULT_SSE_LIMITS);
@@ -246,10 +261,10 @@ export function buildApiRouter(deps: ApiDeps): Router {
     maxAgeSeconds: Math.floor(services.config.sessionTtlMs / 1000),
   });
 
-  const enforceAuthRateLimits = async (ctx: RequestContext, endpoint: "setup" | "signup" | "login" | "token-login", email?: string) => {
+  const enforceAuthRateLimits = async (ctx: RequestContext, endpoint: "setup" | "signup" | "login" | "token-login" | "forgot-password" | "reset-password" | "staff-invite", email?: string) => {
     const ip = clientIp(ctx.req, services.config.trustedProxyIps);
     const userAgent = ctx.req.headers["user-agent"];
-    const ipLimit = endpoint === "signup" ? 180 : endpoint === "setup" ? 20 : 90;
+    const ipLimit = endpoint === "signup" ? 180 : endpoint === "staff-invite" ? 40 : endpoint === "setup" ? 20 : 90;
     const checks = [
       { scope: `auth:${endpoint}:global`, bucketKey: "global", limit: 2000, windowMs: 60_000, lockMs: 60_000 },
       { scope: `auth:${endpoint}:ip`, bucketKey: bucketHash(ip || "unknown"), limit: ipLimit, windowMs: 60_000, lockMs: 5 * 60_000 },
@@ -290,6 +305,117 @@ export function buildApiRouter(deps: ApiDeps): Router {
       }
       throw error;
     }
+  };
+
+  /**
+   * Prompt 01: safe post-auth return target (open-redirect defense).
+   * Accepts only a same-origin relative path that stays within the given
+   * surface root. Rejects absolute, protocol-relative and encoded variants,
+   * and any path outside the allowed prefixes.
+   */
+  const surfaceRoots = (surface: "admin" | "support"): string[] =>
+    surface === "admin" ? ["/admin"] : ["/support"];
+
+  const safeReturnTarget = (
+    raw: unknown,
+    valid: string[],
+    fallback: string,
+  ): string => {
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) return fallback;
+    // Reject anything that is not a same-origin relative path.
+    if (!raw.startsWith("/") || raw.startsWith("//")) return fallback;
+    if (/[\r\n]/.test(raw)) return fallback;
+    // protocol-relative and scheme detection (double-encoded attempts too).
+    if (/(^|[\\/])[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return fallback;
+    // Decode once and re-check for encoded absolute/protocol-relative forms.
+    const decoded = safeDecodePathname(raw);
+    if (decoded !== raw) {
+      if (!decoded.startsWith("/") || decoded.startsWith("//")) return fallback;
+    }
+    const pathOnly = decoded.split("?")[0] ?? decoded;
+    const validHit = valid.find((prefix) => pathOnly === prefix || pathOnly.startsWith(`${prefix}/`));
+    return validHit ? decoded : fallback;
+  };
+
+  const safeDecodePathname = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
+
+  /**
+   * Customer-surface return target: same-origin relative and NOT a staff
+   * surface. Customers may return to any customer path, but never into the
+   * Admin or Support surfaces.
+   */
+  const safeCustomerReturnTarget = (raw: unknown): string => {
+    const fallback = "/";
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) return fallback;
+    if (!raw.startsWith("/") || raw.startsWith("//")) return fallback;
+    if (/[\r\n]/.test(raw)) return fallback;
+    if (/(^|[\\/])[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return fallback;
+    const decoded = safeDecodePathname(raw);
+    if (decoded !== raw) {
+      if (!decoded.startsWith("/") || decoded.startsWith("//")) return fallback;
+    }
+    const pathOnly = decoded.toLowerCase().split("?")[0] ?? decoded;
+    if (pathOnly === "/admin" || pathOnly.startsWith("/admin/")) return fallback;
+    if (pathOnly === "/support" || pathOnly.startsWith("/support/")) return fallback;
+    return decoded;
+  };
+
+  /**
+   * Prompt 01: durable staff authority context derived from the
+   * `platform_staff_memberships` table — never from route, email domain,
+   * localStorage, query string, or organization role.
+   */
+  const staffAdminContext = async (userId: string): Promise<{
+    staffRoles: StaffRole[];
+    adminCapabilities: string[];
+    isSuperAdmin: boolean;
+  }> => {
+    const grants = await loadStaffGrants(db(), userId);
+    const adminGrants = grants.filter((g) => g.surface === "admin" && g.enabled);
+    const staffRoles = adminGrants.map((g) => g.role as StaffRole);
+    const adminCapabilities: string[] = [];
+    let isSuperAdmin = false;
+    for (const g of adminGrants) {
+      const map = STAFF_ROLE_CAPABILITIES[g.role as StaffRole];
+      if (!map) continue;
+      if (g.role === "superadmin") {
+        isSuperAdmin = true;
+        continue;
+      }
+      const caps = map.adminCapabilities as string[];
+      if (caps.includes("*")) isSuperAdmin = true;
+      else adminCapabilities.push(...caps);
+    }
+    return { staffRoles, adminCapabilities: [...new Set(adminCapabilities)], isSuperAdmin };
+  };
+
+  const staffSupportContext = async (userId: string): Promise<{
+    staffRoles: StaffRole[];
+    supportCapabilities: string[];
+    isSupportAll: boolean;
+  }> => {
+    const grants = await loadStaffGrants(db(), userId);
+    const supportGrants = grants.filter((g) => g.surface === "support" && g.enabled);
+    const supportCapabilities: string[] = [];
+    let isSupportAll = false;
+    for (const g of supportGrants) {
+      const map = STAFF_ROLE_CAPABILITIES[g.role as StaffRole];
+      if (!map) continue;
+      const caps = map.supportCapabilities as string[];
+      if (caps.includes("*")) isSupportAll = true;
+      else supportCapabilities.push(...caps);
+    }
+    return {
+      staffRoles: supportGrants.map((g) => g.role as StaffRole),
+      supportCapabilities: [...new Set(supportCapabilities)],
+      isSupportAll,
+    };
   };
 
   // ---- Health ----------------------------------------------------------------
@@ -358,7 +484,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   router.post("/api/auth/login", async (ctx) => {
-    const body = ctx.body as { email?: string; password?: string } | undefined;
+    const body = ctx.body as { email?: string; password?: string; returnTo?: string } | undefined;
     if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
     await enforceAuthRateLimits(ctx, "login", body.email);
     const result = await loginAccount({
@@ -368,8 +494,72 @@ export function buildApiRouter(deps: ApiDeps): Router {
       meta: { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] },
     });
     ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
-    return toBrowserAuthResponse(result);
+    return {
+      ...toBrowserAuthResponse(result),
+      // Customer surface: anything EXCEPT the Admin/Support surfaces (this is
+      // the default surface, so there is no single prefix to constrain to).
+      returnTo: safeCustomerReturnTarget(body.returnTo),
+    };
   });
+
+  /**
+   * Admin login — password auth then SERVER-SIDE Admin capability
+   * verification. A customer account (even an org `owner`) without platform
+   * staff authority is denied 403 here; the response never guides them into
+   * the Admin shell.
+   */
+  router.post("/api/admin/login", async (ctx) => {
+    const body = ctx.body as { email?: string; password?: string; returnTo?: string } | undefined;
+    if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    await enforceAuthRateLimits(ctx, "login", body.email);
+    // Authenticate with the ONE password authority; no cookie yet.
+    const result = await loginAccount({
+      db: db(),
+      email: body.email,
+      password: body.password,
+      meta: { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] },
+    });
+    // Surface check: only durable staff with Admin capability may continue.
+    const staff = await staffAdminContext(result.userId);
+    if (staff.adminCapabilities.length === 0 && !staff.isSuperAdmin) {
+      throw httpError("Admin staff authority required", 403, { code: "role_denied" });
+    }
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
+    return {
+      ...toBrowserAuthResponse(result),
+      role: staff.isSuperAdmin ? "superadmin" : (staff.staffRoles[0] ?? "platform_admin"),
+      capabilities: staff.isSuperAdmin ? ["*"] : staff.adminCapabilities,
+      returnTo: safeReturnTarget(body.returnTo, surfaceRoots("admin"), "/admin"),
+    };
+  });
+
+  /**
+   * Support login — password auth THEN server-side Support capability
+   * verification. Customer (and Admin-only) accounts are denied 403.
+   */
+  router.post("/api/support/login", async (ctx) => {
+    const body = ctx.body as { email?: string; password?: string; returnTo?: string } | undefined;
+    if (!body?.email || !body?.password) throw httpError("email and password are required", 400);
+    await enforceAuthRateLimits(ctx, "login", body.email);
+    const result = await loginAccount({
+      db: db(),
+      email: body.email,
+      password: body.password,
+      meta: { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] },
+    });
+    const support = await staffSupportContext(result.userId);
+    if (support.supportCapabilities.length === 0 && !support.isSupportAll) {
+      throw httpError("Mox Support staff authority required", 403, { code: "role_denied" });
+    }
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(result.sessionToken, sessionCookieOptions()));
+    return {
+      ...toBrowserAuthResponse(result),
+      roles: support.staffRoles,
+      capabilities: support.isSupportAll ? ["*"] : support.supportCapabilities,
+      returnTo: safeReturnTarget(body.returnTo, surfaceRoots("support"), "/support"),
+    };
+  });
+
 
   /**
    * Prompt 00C §B: dedicated programmatic token-login — password → scoped
@@ -463,6 +653,445 @@ export function buildApiRouter(deps: ApiDeps): Router {
       ...result,
       expiresAt: new Date(Date.now() + services.config.sessionTtlMs),
     });
+  });
+
+  // ---- Password reset (Prompt 01: one password authority, all surfaces) -----
+
+  /**
+   * Forgot-password — anti-enumeration. Generates a durable one-use reset
+   * token for an existing account and returns it in the response envelope for
+   * the configured email transport (or a fail-closed state when no transport
+   * is registered — the token is never fabricated into a fake delivery).
+   */
+  router.post("/api/auth/forgot-password", async (ctx) => {
+    await enforceAuthRateLimits(ctx, "forgot-password");
+    const body = ctx.body as { email?: string } | undefined;
+    if (!body?.email) {
+      // Anti-enumeration: keep the response shape constant regardless of
+      // whether the account exists.
+      return { ok: true, note: "if an account exists, a reset link will be sent" };
+    }
+    const result = await requestPasswordReset({ db: db(), email: body.email });
+    if (!result.ok) {
+      return { ok: true, note: "if an account exists, a reset link will be sent" };
+    }
+    // No production email transport is registered at this time; return the
+    // plaintext token to a fail-closed delivery envelope and document that
+    // real delivery configuration is still required before production use.
+    return {
+      ok: true,
+      note: "if an account exists, a reset link will be sent",
+      deliveryRequired: true,
+      deliverableToken: result.token,
+    };
+  });
+
+  router.post("/api/auth/reset-password", async (ctx) => {
+    await enforceAuthRateLimits(ctx, "reset-password");
+    const body = ctx.body as { token?: string; password?: string } | undefined;
+    if (!body?.token || !body?.password) throw httpError("token and password are required", 400);
+    await resetPassword({ db: db(), token: body.token, password: body.password, revokeApiTokens: true });
+    ctx.res.setHeader("set-cookie", serializeClearSessionCookie());
+    return { ok: true };
+  });
+
+  // ---- Surface session / identity (Prompt 01) --------------------------------
+
+  /**
+   * GET /api/admin/session — returns the authenticated user's platform-admin
+   * context ONLY if the session already holds Admin capability. Ordinary
+   * customers and customer org owners receive 403 here.
+   */
+  router.get("/api/admin/session", async (ctx) => {
+    const auth = await requireAdminCapability(ctx, "admin.read");
+    return {
+      role: auth.platformRole ?? "platform_admin",
+      capabilities: auth.platformCapabilities,
+      staffRoles: auth.staffRoles ?? [],
+    };
+  });
+
+  /**
+   * GET /api/support/session — returns the authenticated user's Support
+   * context ONLY if the session already holds Support capability.
+   */
+  router.get("/api/support/session", async (ctx) => {
+    const auth = await requireSupportCapability(ctx, "support.read");
+    return {
+      roles: auth.supportRoles,
+      capabilities: auth.supportCapabilities,
+    };
+  });
+
+  // ---- Staff invites (Prompt 01: invite-only Admin/Support signup) -----------
+
+  router.post("/api/admin/staff/invites", async (ctx) => {
+    const auth = await requireAdminCapability(ctx, "admin.staff.write");
+    const body = ctx.body as
+      | { email?: string; role?: string; surface?: "admin" | "support" | "both" }
+      | undefined;
+    if (!body?.email || !body?.role || !body?.surface) {
+      throw httpError("email, role and surface are required", 400);
+    }
+    const invite = await createStaffInvitation({
+      db: db(),
+      email: body.email,
+      role: body.role,
+      surface: body.surface,
+      createdByUserId: auth.userId,
+    });
+    await appendAdminAudit(auth, {
+      action: "staff_invite_created",
+      resourceType: "staff_invitation",
+      result: "success",
+    });
+    return {
+      invitationId: invite.invitationId,
+      token: invite.token,
+      expiresAt: invite.expiresAt.toISOString(),
+      email: body.email,
+      role: body.role,
+      surface: body.surface,
+    };
+  });
+
+  router.get("/api/admin/staff/invites", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.staff.write");
+    const rows = await db().select().from(staffInvitations).orderBy(desc(staffInvitations.createdAt));
+    return rows.map((r) => ({
+      invitationId: r.id,
+      email: r.email,
+      role: r.role,
+      surface: r.surface,
+      createdAt: r.createdAt.toISOString(),
+      expiresAt: r.expiresAt.toISOString(),
+      consumedAt: r.consumedAt?.toISOString() ?? null,
+      revokedAt: r.revokedAt?.toISOString() ?? null,
+    }));
+  });
+
+  router.delete("/api/admin/staff/invites/:invitationId", async (ctx) => {
+    const auth = await requireAdminCapability(ctx, "admin.staff.write");
+    const revoked = await revokeStaffInvitation(db(), ctx.params.invitationId!);
+    if (!revoked) throw httpError(`invite ${ctx.params.invitationId} not found or already consumed`, 404);
+    await appendAdminAudit(auth, {
+      action: "staff_invite_revoked",
+      resourceType: "staff_invitation",
+      result: "success",
+    });
+    return { ok: true };
+  });
+
+  /**
+   * Prompt 03 Staff & Access: durable platform staff memberships. Only a role
+   * holding `admin.staff.write` (presently superadmin) may read or mutate the
+   * staff roster. Support roles can never reach these routes.
+   */
+  router.get("/api/admin/staff", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.staff.write");
+    const memberships = await listStaffMemberships(db());
+    const invites = await db().select().from(staffInvitations).orderBy(desc(staffInvitations.createdAt));
+    return {
+      members: memberships,
+      invites: invites.map((r) => ({
+        invitationId: r.id,
+        email: r.email,
+        role: r.role,
+        surface: r.surface,
+        createdAt: r.createdAt.toISOString(),
+        expiresAt: r.expiresAt.toISOString(),
+        consumedAt: r.consumedAt?.toISOString() ?? null,
+        revokedAt: r.revokedAt?.toISOString() ?? null,
+      })),
+    };
+  });
+
+  router.post("/api/admin/staff/:userId/:action", async (ctx) => {
+    const actor = await requireAdminCapability(ctx, "admin.staff.write");
+    const action = ctx.params.action!;
+    const targetUserId = ctx.params.userId!;
+    if (action !== "disable" && action !== "enable" && action !== "revoke") {
+      throw httpError("unsupported staff action", 400);
+    }
+    const body = ctx.body as { role?: string; reason?: string } | undefined;
+    const role = body?.role;
+    if (!role) throw httpError("role is required to target a staff membership", 400);
+    // Never allow an actor to disable/revoke their own only grant (self-lockout).
+    if (targetUserId === actor.userId && action !== "enable") {
+      throw httpError("you cannot disable or revoke your own staff assignment", 400);
+    }
+    const changed = await updateStaffMembershipStatus(db(), targetUserId, role, action);
+    if (!changed) throw httpError(`staff membership not found for user ${targetUserId} role ${role}`, 404);
+    await appendAdminAudit(actor, {
+      action: `staff.${action}`,
+      resourceType: "staff_membership",
+      resourceId: targetUserId,
+      after: { role, userId: targetUserId, reason: body?.reason ?? null },
+    });
+    return { ok: true };
+  });
+
+  /**
+   * Prompt 01: Admin signup is invite-only. Validates the invite and creates
+   * the account if it does not exist, then consumes the invite transactionally
+   * and attaches the staff grant to the SAME identity (never a duplicate).
+   */
+  router.post("/api/admin/signup", async (ctx) => {
+    await enforceAuthRateLimits(ctx, "signup");
+    const body = ctx.body as { email?: string; password?: string; inviteToken?: string; displayName?: string } | undefined;
+    if (!body?.email || !body?.password || !body?.inviteToken) {
+      throw httpError("email, password and inviteToken are required", 400);
+    }
+    // Validate the invite BEFORE any account side-effect so a bad invite
+    // creates nothing. The intended-email binding is enforced here.
+    const invite = await peekStaffInvitation({ db: db(), token: body.inviteToken, email: body.email ?? "", surface: "admin" });
+    const inviteEmail = invite.email;
+    const authMeta = { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] };
+    // Create the account if it does not yet exist (never a duplicate); the
+    // resulting session is where the staff grant will be attached.
+    let session = await signupAccount({
+      db: db(),
+      email: inviteEmail,
+      password: body.password,
+      displayName: body.displayName,
+      orgName: `mox-admin-${randomShort()}`,
+      meta: authMeta,
+    }).catch((error) => {
+      if (error instanceof AuthError && error.status === 409) return null;
+      throw error;
+    });
+    if (!session) {
+      session = await loginAccount({
+        db: db(),
+        email: inviteEmail,
+        password: body.password,
+        meta: authMeta,
+      });
+    }
+    // Consume the invite and attach the Admin staff grant to this identity.
+    await consumeStaffInvitationById({
+      db: db(),
+      invitationId: invite.invitationId,
+      userId: session.userId,
+      role: invite.role,
+    });
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(session.sessionToken, sessionCookieOptions()));
+    return { ok: true, surface: "admin" };
+  });
+
+  router.post("/api/support/signup", async (ctx) => {
+    await enforceAuthRateLimits(ctx, "signup");
+    const body = ctx.body as { email?: string; password?: string; inviteToken?: string; displayName?: string } | undefined;
+    if (!body?.email || !body?.password || !body?.inviteToken) {
+      throw httpError("email, password and inviteToken are required", 400);
+    }
+    const invite = await peekStaffInvitation({ db: db(), token: body.inviteToken, email: body.email ?? "", surface: "support" });
+    const inviteEmail = invite.email;
+    const authMeta = { ipAddress: clientIp(ctx.req, services.config.trustedProxyIps), userAgent: ctx.req.headers["user-agent"] };
+    let session = await signupAccount({
+      db: db(),
+      email: inviteEmail,
+      password: body.password,
+      displayName: body.displayName,
+      orgName: `mox-support-${randomShort()}`,
+      meta: authMeta,
+    }).catch((error) => {
+      if (error instanceof AuthError && error.status === 409) return null;
+      throw error;
+    });
+    if (!session) {
+      session = await loginAccount({
+        db: db(),
+        email: inviteEmail,
+        password: body.password,
+        meta: authMeta,
+      });
+    }
+    await consumeStaffInvitationById({
+      db: db(),
+      invitationId: invite.invitationId,
+      userId: session.userId,
+      role: invite.role,
+    });
+    ctx.res.setHeader("set-cookie", serializeSessionCookie(session.sessionToken, sessionCookieOptions()));
+    return { ok: true, surface: "support" };
+  });
+
+  // ---- Mox Support: least-privilege customer lookup --------------------------
+  // Prompt 03: Support ONLY sees safe diagnostics (no costs, no revenue, no
+  // secrets, no inventory credentials). Every note write is audited.
+
+  router.get("/api/support/customers", async (ctx) => {
+    await requireSupportCapability(ctx, "support.customer.lookup");
+    const q = (ctx.query.get("q") as string | undefined)?.trim().toLowerCase() || "";
+    const [orgRows, memberRows, subRows, serverRows, agentRows, noteRows] = await Promise.all([
+      db().select().from(organizations).orderBy(desc(organizations.createdAt)).limit(300),
+      db()
+        .select({
+          orgId: memberships.orgId,
+          userId: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: memberships.role,
+          joinedAt: memberships.joinedAt,
+          disabledAt: users.disabledAt,
+        })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .limit(1500),
+      db()
+        .select({
+          id: subscriptions.id,
+          orgId: subscriptions.orgId,
+          state: subscriptions.state,
+          currentPeriodEnd: subscriptions.currentPeriodEnd,
+          plan: products.displayName,
+        })
+        .from(subscriptions)
+        .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
+        .innerJoin(products, eq(products.id, planVersions.productId))
+        .limit(1000),
+      db().select().from(serverOrders).limit(1500),
+      db()
+        .select({ id: agents.id, orgId: agents.orgId, slug: agents.slug, displayName: agents.displayName, status: agents.status })
+        .from(agents)
+        .limit(1500),
+      db()
+        .select()
+        .from(auditEvents)
+        .where(eq(auditEvents.action, "support.note"))
+        .orderBy(desc(auditEvents.at))
+        .limit(500),
+    ]);
+    const filtered = (q
+      ? orgRows.filter(
+          (org) =>
+            org.displayName.toLowerCase().includes(q) ||
+            org.slug.toLowerCase().includes(q) ||
+            org.id.toLowerCase().includes(q),
+        )
+      : orgRows) as Array<{
+      id: string;
+      slug: string;
+      displayName: string;
+      workspaceName: string | null;
+      createdAt: Date;
+    }>;
+    return {
+      customers: filtered.map((org) => {
+        const members = memberRows.filter((m) => m.orgId === org.id);
+        return {
+          orgId: org.id,
+          slug: org.slug,
+          displayName: org.displayName,
+          workspaceName: org.workspaceName,
+          createdAt: org.createdAt.toISOString(),
+          memberCount: members.length,
+          users: members.map((m) => ({
+            userId: m.userId,
+            email: m.email,
+            displayName: m.displayName,
+            role: m.role,
+            disabledAt: m.disabledAt?.toISOString() ?? null,
+          })),
+          subscriptions: subRows
+            .filter((s) => s.orgId === org.id)
+            .map((s) => ({ subscriptionId: s.id, state: s.state, plan: s.plan, currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null })),
+          servers: serverRows.filter((s) => s.orgId === org.id).map(projectServerOrderForSupport),
+          agents: agentRows
+            .filter((a) => a.orgId === org.id)
+            .map((a) => ({ agentId: a.id, slug: a.slug, displayName: a.displayName, status: a.status })),
+          supportNoteCount: noteRows.filter((n) => n.orgId === org.id).length,
+        };
+      }),
+    };
+  });
+
+  router.get("/api/support/customers/:orgId", async (ctx) => {
+    await requireSupportCapability(ctx, "support.customer.lookup");
+    const orgRows = await db()
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, ctx.params.orgId!))
+      .limit(1);
+    const org = orgRows[0];
+    if (!org) throw httpError(`organization ${ctx.params.orgId} not found`, 404);
+    const [memberRows, subRows, serverRows, agentRows, noteRows, recentAudit] = await Promise.all([
+      db()
+        .select({
+          userId: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          role: memberships.role,
+          joinedAt: memberships.joinedAt,
+          disabledAt: users.disabledAt,
+        })
+        .from(memberships)
+        .innerJoin(users, eq(users.id, memberships.userId))
+        .where(eq(memberships.orgId, ctx.params.orgId!)),
+      db()
+        .select({
+          id: subscriptions.id,
+          state: subscriptions.state,
+          currentPeriodEnd: subscriptions.currentPeriodEnd,
+          plan: products.displayName,
+        })
+        .from(subscriptions)
+        .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
+        .innerJoin(products, eq(products.id, planVersions.productId))
+        .where(eq(subscriptions.orgId, ctx.params.orgId!)),
+      db().select().from(serverOrders).where(eq(serverOrders.orgId, ctx.params.orgId!)),
+      db().select().from(agents).where(eq(agents.orgId, ctx.params.orgId!)),
+      db()
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.orgId, ctx.params.orgId!), eq(auditEvents.action, "support.note")))
+        .orderBy(desc(auditEvents.at))
+        .limit(100),
+      db()
+        .select({ id: auditEvents.id, action: auditEvents.action, at: auditEvents.at, actorType: auditEvents.actorType, resourceType: auditEvents.resourceType })
+        .from(auditEvents)
+        .where(eq(auditEvents.orgId, ctx.params.orgId!))
+        .orderBy(desc(auditEvents.at))
+        .limit(50),
+    ]);
+    return {
+      orgId: org.id,
+      slug: org.slug,
+      displayName: org.displayName,
+      workspaceName: org.workspaceName,
+      createdAt: org.createdAt.toISOString(),
+      users: memberRows.map((m) => ({
+        userId: m.userId,
+        email: m.email,
+        displayName: m.displayName,
+        role: m.role,
+        joinedAt: m.joinedAt?.toISOString() ?? null,
+        disabledAt: m.disabledAt?.toISOString() ?? null,
+      })),
+      subscriptions: subRows.map((s) => ({ subscriptionId: s.id, state: s.state, plan: s.plan, currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null })),
+      servers: serverRows.map(projectServerOrderForSupport),
+      agents: agentRows.map((a) => ({ agentId: a.id, slug: a.slug, displayName: a.displayName, status: a.status, currentVersion: a.currentVersion })),
+      supportNotes: noteRows.map((n) => ({ id: n.id, actorId: n.actorId, note: (n.after as { note?: string } | null)?.note ?? "", at: n.at.toISOString() })),
+      recentActivity: recentAudit.map((r) => ({ id: r.id, action: r.action, at: r.at.toISOString(), actorType: r.actorType, resourceType: r.resourceType })),
+    };
+  });
+
+  router.post("/api/support/customers/:orgId/notes", async (ctx) => {
+    const support = await requireSupportCapability(ctx, "support.ticket.write");
+    const body = ctx.body as { note?: string } | undefined;
+    if (!body?.note?.trim()) throw httpError("note is required", 400);
+    const note = body.note.trim().slice(0, 4000);
+    const orgRows = await db().select().from(organizations).where(eq(organizations.id, ctx.params.orgId!)).limit(1);
+    if (!orgRows[0]) throw httpError(`organization ${ctx.params.orgId} not found`, 404);
+    await appendSupportAudit(support, {
+      action: "support.note",
+      resourceType: "organization",
+      resourceId: ctx.params.orgId!,
+      targetOrgId: ctx.params.orgId!,
+      after: { note },
+    });
+    return { ok: true };
   });
 
   // ---- Agents ---------------------------------------------------------------
@@ -996,18 +1625,36 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { role, capabilities: [...new Set([...fromRole, ...explicit])] };
   };
 
+  /**
+   * Merge durable staff grants (Prompt 01) with the legacy deployment-config
+   * admin allowlist. Durable staff memberships are the primary, durable
+   * authority; the config lists remain supported for backward compatibility.
+   */
   const requireAdminSession = async (ctx: RequestContext) => {
     const auth = await requireSessionAuth(ctx);
     // Prompt 01 §Provider config: provider administration is a PLATFORM
-    // authority — an explicit deployment-configured admin/capability list,
-    // NOT merely org owner/admin. Empty list denies everyone (fail-closed).
+    // authority — NOT merely org owner/admin. Empty list denies everyone
+    // (fail-closed). Durable staff grants are merged below.
     const { role, capabilities } = platformCapabilitiesFor(auth.userId);
-    if (capabilities.length === 0) {
+    const staff = await staffAdminContext(auth.userId);
+    const merged = [...new Set([...capabilities, ...staff.adminCapabilities])];
+    // Least-privilege (Prompt 03): only a real superadmin grant yields the
+    // wildcard. A durable `platform_admin` member gets its OWN capability set
+    // and is never promoted to "superadmin".
+    const effectiveRole: PlatformAdminRole | "platform_admin" | undefined = staff.isSuperAdmin
+      ? "superadmin"
+      : role ?? (staff.staffRoles.length > 0 ? "platform_admin" : undefined);
+    if (merged.length === 0 && !staff.isSuperAdmin) {
       throw httpError("platform administrator authority required for provider configuration", 403, {
         code: "role_denied",
       });
     }
-    return { ...auth, platformRole: role, platformCapabilities: capabilities };
+    return {
+      ...auth,
+      platformRole: staff.isSuperAdmin ? "superadmin" : (effectiveRole ?? "platform_admin"),
+      platformCapabilities: staff.isSuperAdmin ? ["*"] : merged,
+      staffRoles: staff.staffRoles,
+    };
   };
 
   type AdminCapability = PlatformAdminCapability;
@@ -1015,11 +1662,39 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const requireAdminCapability = async (ctx: RequestContext, capability: AdminCapability) => {
     const auth = await requireAdminSession(ctx);
     const capabilities = auth.platformCapabilities;
-    const allCapabilities = auth.platformRole === "superadmin";
-    if (!allCapabilities && !capabilities.includes("*") && !capabilities.includes(capability)) {
+    // Least-privilege gate: allow only when the capability list (or wildcard)
+    // actually contains the requested capability. A non-superadmin platform
+    // role is NEVER granted blanket access by its role alone.
+    if (!capabilities.includes("*") && !capabilities.includes(capability)) {
       throw httpError(`admin capability required: ${capability}`, 403, { code: "capability_denied" });
     }
     return { ...auth, adminCapability: capability };
+  };
+
+  const requireSupportSession = async (ctx: RequestContext) => {
+    const auth = await requireSessionAuth(ctx);
+    const support = await staffSupportContext(auth.userId);
+    if (support.supportCapabilities.length === 0 && !support.isSupportAll) {
+      throw httpError("Mox Support staff authority required", 403, {
+        code: "role_denied",
+      });
+    }
+    return {
+      ...auth,
+      supportRoles: support.staffRoles,
+      supportCapabilities: support.isSupportAll ? ["*"] : support.supportCapabilities,
+    };
+  };
+
+  type SupportCap = SupportCapability;
+
+  const requireSupportCapability = async (ctx: RequestContext, capability: SupportCap) => {
+    const auth = await requireSupportSession(ctx);
+    const capabilities = auth.supportCapabilities;
+    if (!capabilities.includes("*") && !capabilities.includes(capability)) {
+      throw httpError(`support capability required: ${capability}`, 403, { code: "capability_denied" });
+    }
+    return { ...auth, supportCapability: capability };
   };
 
   const appendAdminAudit = async (
@@ -1044,6 +1719,29 @@ export function buildApiRouter(deps: ApiDeps): Router {
         actorCapability: actor.adminCapability,
         targetOrgId: input.targetOrgId ?? null,
         data: input.after,
+      }),
+    });
+  };
+
+  const appendSupportAudit = async (
+    actor: Awaited<ReturnType<typeof requireSupportCapability>>,
+    input: { action: string; resourceType: string; resourceId?: string; targetOrgId?: string; result?: string; before?: unknown; after?: unknown },
+  ) => {
+    // Support notes/actions are ALWAYS tenant-targeted and fully audited.
+    await db().insert(auditEvents).values({
+      orgId: input.targetOrgId ?? null,
+      actorType: `support:${actor.supportRoles.join(",") || "agent"}`,
+      actorId: actor.userId,
+      action: input.action,
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
+      result: input.result ?? "success",
+      before: redactAdminPayload(input.before),
+      after: redactAdminPayload({
+        actorRoles: actor.supportRoles,
+        actorCapability: actor.supportCapability,
+        targetOrgId: input.targetOrgId ?? null,
+        ...((input.after ?? {}) as object),
       }),
     });
   };
@@ -2411,6 +3109,24 @@ function projectServerOrderForAdmin(row: typeof serverOrders.$inferSelect) {
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     hasRootCredentialRef: Boolean(row.rootCredentialRefId),
+  };
+}
+
+/**
+ * Prompt 03 Support-safe server projection: infrastructure name and state only.
+ * Deliberately excludes provider accounts, instance ids, IP addresses, hostnames,
+ * keys, root-credential refs and error detail (no diagnostics beyond safe metadata).
+ */
+function projectServerOrderForSupport(row: typeof serverOrders.$inferSelect) {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    computeClassCode: row.computeClassCode,
+    state: row.state,
+    providerName: row.providerName,
+    regionCode: row.regionCode,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }
 

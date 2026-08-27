@@ -17,10 +17,15 @@ import type {
   ApiTokenMetadata,
   BrowserAuthResponse,
   CreateApiTokenResponse,
+  ForgotPasswordResponse,
   LoginRequest,
   MeResponse,
   ProgrammaticLoginResponse,
+  ResetPasswordRequest,
   SignupRequest,
+  StaffLoginResponse,
+  StaffSessionResponse,
+  StaffSignupRequest,
 } from "@mox/control-plane-contracts";
 import type { NotificationItem } from "./notification-types.js";
 import { SseRealtimeTransport, type RealtimeTransport } from "./realtime.js";
@@ -35,15 +40,20 @@ import type {
   AdminPaymentProvider,
   AdminPlans,
   AdminRuntimeAgent,
+  AdminStaff,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
+  CreatedStaffInvite,
+  CreateStaffInviteInput,
   Entitlements,
   InvoiceRow,
   ModelOption,
   MoxApi,
   SendRunHandle,
   ServerSummary,
+  SupportCustomer,
+  SupportCustomerDetail,
   UsageRow,
 } from "./types.js";
 
@@ -180,6 +190,66 @@ export class HttpMoxApi implements MoxApi {
     return this.call<BrowserAuthResponse>("/api/auth/orgs/select", {
       method: "POST",
       body: JSON.stringify({ orgId }),
+    });
+  }
+
+  // ---- Staff surface auth (Prompt 01: admin/support isolation) ------------
+
+  /** Admin surface login: password → server-verified admin cookie. */
+  adminLogin(input: LoginRequest): Promise<StaffLoginResponse> {
+    return this.call<StaffLoginResponse>("/api/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ email: input.email, password: input.password, returnTo: input.returnTo }),
+    });
+  }
+
+  /** Support surface login: password → server-verified support cookie. */
+  supportLogin(input: LoginRequest): Promise<StaffLoginResponse> {
+    return this.call<StaffLoginResponse>("/api/support/login", {
+      method: "POST",
+      body: JSON.stringify({ email: input.email, password: input.password, returnTo: input.returnTo }),
+    });
+  }
+
+  /** Admin surface session probe (identity + capabilities; no credential). */
+  adminSession(): Promise<StaffSessionResponse> {
+    return this.call<StaffSessionResponse>("/api/admin/session");
+  }
+
+  /** Support surface session probe (identity + capabilities; no credential). */
+  supportSession(): Promise<StaffSessionResponse> {
+    return this.call<StaffSessionResponse>("/api/support/session");
+  }
+
+  /** Invite-first staff signup on the Admin surface. */
+  adminSignup(input: StaffSignupRequest): Promise<StaffLoginResponse> {
+    return this.call<StaffLoginResponse>("/api/admin/signup", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  /** Invite-first staff signup on the Support surface. */
+  supportSignup(input: StaffSignupRequest): Promise<StaffLoginResponse> {
+    return this.call<StaffLoginResponse>("/api/support/signup", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  // ---- Password recovery (Prompt 01: anti-enumeration, token delivery) ------
+
+  forgotPassword(email: string): Promise<ForgotPasswordResponse> {
+    return this.call<ForgotPasswordResponse>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  resetPassword(input: ResetPasswordRequest): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify(input),
     });
   }
 
@@ -581,6 +651,48 @@ export class HttpMoxApi implements MoxApi {
     return this.call<{ ok: boolean }>(`/api/admin/notifications/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: "POST",
       body: "{}",
+    }).then(() => undefined);
+  }
+
+  // ---- Prompt 03: Staff & Access + Support console ------------------------------
+
+  adminStaff(): Promise<AdminStaff> {
+    return this.call("/api/admin/staff");
+  }
+
+  adminCreateStaffInvite(input: CreateStaffInviteInput): Promise<CreatedStaffInvite> {
+    return this.call<CreatedStaffInvite>("/api/admin/staff/invites", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  adminRevokeStaffInvite(invitationId: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/staff/invites/${encodeURIComponent(invitationId)}`, {
+      method: "DELETE",
+    }).then(() => undefined);
+  }
+
+  adminStaffAction(userId: string, role: string, action: "disable" | "enable" | "revoke", reason?: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/admin/staff/${encodeURIComponent(userId)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ role, reason }),
+    }).then(() => undefined);
+  }
+
+  supportCustomers(query?: string): Promise<SupportCustomer[]> {
+    const qs = query?.trim() ? `?q=${encodeURIComponent(query.trim())}` : "";
+    return this.call<{ customers: SupportCustomer[] }>(`/api/support/customers${qs}`).then((r) => r.customers);
+  }
+
+  supportCustomer(orgId: string): Promise<SupportCustomerDetail> {
+    return this.call(`/api/support/customers/${encodeURIComponent(orgId)}`);
+  }
+
+  supportAddNote(orgId: string, note: string): Promise<void> {
+    return this.call<{ ok: boolean }>(`/api/support/customers/${encodeURIComponent(orgId)}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ note }),
     }).then(() => undefined);
   }
 

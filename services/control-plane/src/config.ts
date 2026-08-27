@@ -10,6 +10,27 @@ export class ConfigError extends Error {}
 
 export type PlatformAdminRole = "superadmin" | "billing_admin" | "ops_admin" | "support";
 
+/**
+ * Prompt 01: durable platform-staff roles (server-authoritative). These are
+ * stored in `platform_staff_memberships` and are SEPARATE from customer org
+ * membership roles. A customer `owner`/`admin` never implies staff authority.
+ */
+export type StaffRole = "superadmin" | "platform_admin" | "support_manager" | "support_agent";
+
+/** Capability surface a staff role is allowed to operate. */
+export type StaffSurface = "admin" | "support";
+
+/**
+ * Mox Support capabilities — distinct from Mox Admin capabilities. Support
+ * agents manage customer-facing support and tickets, never platform
+ * configuration.
+ */
+export type SupportCapability =
+  | "support.read"
+  | "support.ticket.write"
+  | "support.customer.lookup"
+  | "support.escalate";
+
 import type { SseLimits } from "./sse-admission.js";
 
 export type PlatformAdminCapability =
@@ -20,13 +41,42 @@ export type PlatformAdminCapability =
   | "admin.compute.write"
   | "admin.intelligence.write"
   | "admin.notifications.write"
-  | "admin.operations.write";
+  | "admin.operations.write"
+  | "admin.staff.write";
 
 export const PLATFORM_ROLE_CAPABILITIES: Record<PlatformAdminRole, readonly PlatformAdminCapability[] | readonly ["*"]> = {
   superadmin: ["*"],
   billing_admin: ["admin.read", "admin.billing.write", "admin.notifications.write"],
   ops_admin: ["admin.read", "admin.compute.write", "admin.intelligence.write", "admin.operations.write", "admin.notifications.write"],
   support: ["admin.read", "admin.support.write"],
+};
+
+/**
+ * Prompt 01: capability surface per durable staff role. `superadmin` and
+ * `platform_admin` are admin-surface; `support_manager` and `support_agent`
+ * are support-surface. A staff role granting one surface does NOT imply the
+ * other; the server gates every Admin/Support API to its own capability set.
+ */
+export const STAFF_ROLE_CAPABILITIES: Record<
+  StaffRole,
+  { surface: StaffSurface; adminCapabilities: readonly PlatformAdminCapability[] | readonly ["*"]; supportCapabilities: readonly SupportCapability[] | readonly ["*"] }
+> = {
+  superadmin: { surface: "admin", adminCapabilities: ["*"], supportCapabilities: [] },
+  platform_admin: {
+    surface: "admin",
+    adminCapabilities: ["admin.read", "admin.customers.write", "admin.support.write", "admin.operations.write"],
+    supportCapabilities: [],
+  },
+  support_manager: {
+    surface: "support",
+    adminCapabilities: [],
+    supportCapabilities: ["support.read", "support.ticket.write", "support.customer.lookup", "support.escalate"],
+  },
+  support_agent: {
+    surface: "support",
+    adminCapabilities: [],
+    supportCapabilities: ["support.read", "support.ticket.write", "support.customer.lookup"],
+  },
 };
 
 const PLATFORM_CAPABILITY_SET = new Set<string>([
@@ -38,6 +88,7 @@ const PLATFORM_CAPABILITY_SET = new Set<string>([
   "admin.intelligence.write",
   "admin.notifications.write",
   "admin.operations.write",
+  "admin.staff.write",
   "*",
 ]);
 

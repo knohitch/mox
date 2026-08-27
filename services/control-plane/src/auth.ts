@@ -22,7 +22,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 import type { MoxDb } from "@mox/database";
 import {
   apiTokens,
@@ -30,7 +30,10 @@ import {
   authSessions,
   memberships,
   organizations,
+  passwordResets,
+  platformStaffMemberships,
   platformSetup,
+  staffInvitations,
   users,
 } from "@mox/database";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
@@ -640,4 +643,343 @@ export async function switchActiveOrg(
   }
   // Reload so the response reflects the switched context.
   return authenticateByBearer(db, sessionToken);
+}
+
+export const RESET_TOKEN_TTL_MS = 60 * 60_000;
+export const INVITE_TOKEN_TTL_MS = 7 * 24 * 3600_000;
+
+// ---- Platform staff authority (Prompt 01) ------------------------------------
+
+export interface StaffGrant {
+  userId: string;
+  role: string;
+  surface: "admin" | "support";
+  enabled: boolean;
+}
+
+/**
+ * Resolves the durable platform-staff grants for a user directly from
+ * PostgreSQL. This is the server-authoritative staff authority: customer org
+ * roles never feed into it, and it is never inferred from the client.
+ */
+export async function loadStaffGrants(db: MoxDb, userId: string): Promise<StaffGrant[]> {
+  const rows = await db
+    .select()
+    .from(platformStaffMemberships)
+    .where(and(eq(platformStaffMemberships.userId, userId), isNull(platformStaffMemberships.revoked_at)));
+  return rows.map((r) => ({
+    userId: r.userId,
+    role: r.role,
+    surface: r.role === "support_manager" || r.role === "support_agent" ? "support" : "admin",
+    enabled: r.enabled,
+  }));
+}
+
+/**
+ * Assigns a durable staff membership to a real user id (idempotent per
+ * role). Only an already-authorized staff actor may grant staff authority.
+ */
+export async function grantStaffMembership(input: {
+  db: MoxDb;
+  userId: string;
+  role: string;
+  grantedByUserId: string;
+}): Promise<void> {
+  await input.db
+    .insert(platformStaffMemberships)
+    .values({
+      userId: input.userId,
+      role: input.role as never,
+      enabled: true,
+      grantedByUserId: input.grantedByUserId,
+    })
+    .onConflictDoUpdate({
+      target: [platformStaffMemberships.userId, platformStaffMemberships.role],
+      set: { enabled: true, revoked_at: null, updated_at: new Date() },
+    });
+}
+
+/** Disables/revokes a durable staff membership. */
+export async function revokeStaffMembership(db: MoxDb, userId: string, role: string): Promise<boolean> {
+  const updated = await db
+    .update(platformStaffMemberships)
+    .set({ revoked_at: new Date(), updated_at: new Date() })
+    .where(
+      and(
+        eq(platformStaffMemberships.userId, userId),
+        eq(platformStaffMemberships.role, role as never),
+        isNull(platformStaffMemberships.revoked_at),
+      ),
+    )
+    .returning({ id: platformStaffMemberships.id });
+  return updated.length > 0;
+}
+
+/** A durable staff membership projected for the Staff & Access console. */
+export interface StaffMembershipRow {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+  surface: "admin" | "support";
+  enabled: boolean;
+  grantedByUserId: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+/** Lists all durable staff memberships (Prompt 03 Staff & Access). */
+export async function listStaffMemberships(db: MoxDb): Promise<StaffMembershipRow[]> {
+  const rows = await db
+    .select({
+      userId: platformStaffMemberships.userId,
+      email: users.email,
+      displayName: users.displayName,
+      role: platformStaffMemberships.role,
+      enabled: platformStaffMemberships.enabled,
+      grantedByUserId: platformStaffMemberships.grantedByUserId,
+      createdAt: platformStaffMemberships.created_at,
+      revokedAt: platformStaffMemberships.revoked_at,
+    })
+    .from(platformStaffMemberships)
+    .innerJoin(users, eq(users.id, platformStaffMemberships.userId))
+    .orderBy(desc(platformStaffMemberships.created_at));
+  return rows.map((r) => ({
+    userId: r.userId,
+    email: r.email,
+    displayName: r.displayName ?? r.email,
+    role: r.role,
+    surface: r.role === "support_manager" || r.role === "support_agent" ? "support" : "admin",
+    enabled: r.enabled,
+    grantedByUserId: r.grantedByUserId,
+    createdAt: r.createdAt.toISOString(),
+    revokedAt: r.revokedAt?.toISOString() ?? null,
+  }));
+}
+
+/** Sets enabled/revoked status on a durable staff membership. */
+export async function updateStaffMembershipStatus(
+  db: MoxDb,
+  userId: string,
+  role: string,
+  action: "disable" | "enable" | "revoke",
+): Promise<boolean> {
+  const set =
+    action === "disable"
+      ? { enabled: false, updated_at: new Date() }
+      : action === "enable"
+        ? { enabled: true, revoked_at: null, updated_at: new Date() }
+        : { enabled: false, revoked_at: new Date(), updated_at: new Date() };
+  const updated = await db
+    .update(platformStaffMemberships)
+    .set(set)
+    .where(
+      and(
+        eq(platformStaffMemberships.userId, userId),
+        eq(platformStaffMemberships.role, role as never),
+        isNull(platformStaffMemberships.revoked_at),
+      ),
+    )
+    .returning({ id: platformStaffMemberships.id });
+  return updated.length > 0;
+}
+
+// ---- Staff invitations (Prompt 01) -------------------------------------------
+
+/**
+ * Creates a durable, single-use staff invitation for invite-only Admin and
+ * Support signup. Returns the plaintext token exactly once.
+ */
+export async function createStaffInvitation(input: {
+  db: MoxDb;
+  email: string;
+  role: string;
+  surface: "admin" | "support" | "both";
+  createdByUserId: string;
+  ttlMs?: number;
+}): Promise<{ invitationId: string; token: string; expiresAt: Date }> {
+  if (!EMAIL_RE.test(input.email)) throw new AuthError("email is invalid", 400);
+  if (!["superadmin", "platform_admin", "support_manager", "support_agent"].includes(input.role)) {
+    throw new AuthError("unknown staff role", 400);
+  }
+  if (!["admin", "support", "both"].includes(input.surface)) {
+    throw new AuthError("surface must be admin, support, or both", 400);
+  }
+  const token = `mox_invite_${randomBytes(32).toString("base64url")}`;
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? INVITE_TOKEN_TTL_MS));
+  const inserted = await input.db
+    .insert(staffInvitations)
+    .values({
+      tokenHash: hashToken(token),
+      email: input.email.toLowerCase(),
+      role: input.role as never,
+      surface: input.surface,
+      createdByUserId: input.createdByUserId,
+      expiresAt,
+    })
+    .returning({ id: staffInvitations.id });
+  if (!inserted[0]) throw new AuthError("invite persistence failed", 500);
+  return { invitationId: inserted[0].id, token, expiresAt };
+}
+
+export async function revokeStaffInvitation(db: MoxDb, invitationId: string): Promise<boolean> {
+  const updated = await db
+    .update(staffInvitations)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(eq(staffInvitations.id, invitationId), isNull(staffInvitations.consumedAt), isNull(staffInvitations.revokedAt)),
+    )
+    .returning({ id: staffInvitations.id });
+  return updated.length > 0;
+}
+
+/**
+ * Validates an invite WITHOUT consuming it. This must run BEFORE the caller
+ * creates or logs into an account so that a bad invite never side-effects an
+ * account. Rejects invalid, expired, revoked, reused and wrong-surface
+ * invites. Returns the invite identity for the subsequent consume step.
+ */
+export async function peekStaffInvitation(input: {
+  db: MoxDb;
+  token: string;
+  email: string;
+  surface: "admin" | "support";
+}): Promise<{ invitationId: string; email: string; role: string }> {
+  if (!input.token || !input.email) throw new AuthError("invalid invite", 400);
+
+  const rows = await input.db
+    .select()
+    .from(staffInvitations)
+    .where(and(eq(staffInvitations.tokenHash, hashToken(input.token)), isNull(staffInvitations.revokedAt)))
+    .limit(1);
+  const invite = rows[0];
+  if (!invite) throw new AuthError("invalid invite", 400);
+  if (invite.consumedAt) throw new AuthError("invalid invite", 400);
+  if (invite.expiresAt.getTime() < Date.now()) throw new AuthError("invalid invite", 400);
+  // Intended-email binding: the invite is only usable by its bound address.
+  if (invite.email !== input.email.toLowerCase()) throw new AuthError("invalid invite", 400);
+  const surfaceOk =
+    input.surface === "admin"
+      ? invite.surface === "admin" || invite.surface === "both"
+      : invite.surface === "support" || invite.surface === "both";
+  if (!surfaceOk) throw new AuthError("invalid invite", 400);
+  return { invitationId: invite.id, email: invite.email, role: invite.role };
+}
+
+/**
+ * Transactionally consume a validate invite and attach the staff grant to the
+ * existing identity (by email) instead of creating a duplicate user. Requires
+ * the invite id AND the resolved user id (from the just-created-or-existing
+ * account) and re-validates consumed/revoked inside the transaction.
+ */
+export async function consumeStaffInvitationById(input: {
+  db: MoxDb;
+  invitationId: string;
+  userId: string;
+  role: string;
+}): Promise<{ userId: string; role: string }> {
+  const consumed = await input.db.transaction(async (tx) => {
+    const updated = await tx
+      .update(staffInvitations)
+      .set({ consumedAt: new Date() })
+      .where(
+        and(
+          eq(staffInvitations.id, input.invitationId),
+          isNull(staffInvitations.consumedAt),
+          isNull(staffInvitations.revokedAt),
+        ),
+      )
+      .returning({ id: staffInvitations.id });
+    if (updated.length === 0) throw new AuthError("invalid invite", 400);
+    await tx
+      .insert(platformStaffMemberships)
+      .values({ userId: input.userId, role: input.role as never, enabled: true })
+      .onConflictDoUpdate({
+        target: [platformStaffMemberships.userId, platformStaffMemberships.role],
+        set: { enabled: true, revoked_at: null, updated_at: new Date() },
+      });
+    return { userId: input.userId, role: input.role };
+  });
+  return consumed;
+}
+
+
+// ---- Password reset (Prompt 01) -----------------------------------------------
+
+/**
+ * Forgot-password: mint a durable one-use reset token for an existing,
+ * non-disabled account. Anti-enumeration: unknown emails return the same
+ * generic result and store nothing. Returns the plaintext token once so it
+ * can be delivered by the configured email transport.
+ */
+export async function requestPasswordReset(input: {
+  db: MoxDb;
+  email: string;
+  ttlMs?: number;
+}): Promise<{ ok: boolean; token?: string; userId?: string }> {
+  if (!EMAIL_RE.test(input.email)) return { ok: false };
+  const userRows = await input.db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.email, input.email.toLowerCase()), isNull(users.disabledAt)))
+    .limit(1);
+  const user = userRows[0];
+  if (!user) return { ok: false };
+  const token = `mox_reset_${randomBytes(32).toString("base64url")}`;
+  const expiresAt = new Date(Date.now() + (input.ttlMs ?? RESET_TOKEN_TTL_MS));
+  await input.db.insert(passwordResets).values({
+    userId: user.id,
+    tokenHash: hashToken(token),
+    expiresAt,
+  });
+  return { ok: true, token, userId: user.id };
+}
+
+/**
+ * Reset-password: verify the one-use token, update the password, revoke the
+ * user's existing browser sessions and (optionally) API tokens, and ack the
+ * token so it can never be reused.
+ */
+export async function resetPassword(input: {
+  db: MoxDb;
+  token: string;
+  password: string;
+  revokeApiTokens?: boolean;
+}): Promise<{ ok: boolean }> {
+  if (!input.token) throw new AuthError("invalid reset token", 400);
+  assertPasswordPolicy(input.password);
+
+  const rows = await input.db
+    .select()
+    .from(passwordResets)
+    .where(and(eq(passwordResets.tokenHash, hashToken(input.token)), isNull(passwordResets.consumedAt)))
+    .limit(1);
+  const reset = rows[0];
+  if (!reset) throw new AuthError("invalid reset token", 400);
+  if (reset.expiresAt.getTime() < Date.now()) throw new AuthError("invalid reset token", 400);
+
+  const passwordHash = await hashPassword(input.password);
+  await input.db.transaction(async (tx) => {
+    const consumed = await tx
+      .update(passwordResets)
+      .set({ consumedAt: new Date() })
+      .where(and(eq(passwordResets.id, reset.id), isNull(passwordResets.consumedAt)))
+      .returning({ id: passwordResets.id });
+    if (consumed.length === 0) throw new AuthError("invalid reset token", 400);
+    await tx
+      .update(authCredentials)
+      .set({ passwordHash, algorithm: "scrypt", updatedAt: new Date() })
+      .where(eq(authCredentials.userId, reset.userId));
+    await tx
+      .update(authSessions)
+      .set({ revokedAt: new Date(), updatedAt: new Date() })
+      .where(and(eq(authSessions.userId, reset.userId), isNull(authSessions.revokedAt)));
+    if (input.revokeApiTokens) {
+      await tx
+        .update(apiTokens)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(apiTokens.userId, reset.userId), isNull(apiTokens.revokedAt)));
+    }
+  });
+  return { ok: true };
 }

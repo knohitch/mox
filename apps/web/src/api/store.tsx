@@ -1,6 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { AgentEvent, ApprovalRequest } from "@mox/contracts";
+import type {
+  ForgotPasswordResponse,
+  MeResponse,
+  ResetPasswordRequest,
+  StaffSessionResponse,
+} from "@mox/control-plane-contracts";
 import { ApiUnavailableError, HttpMoxApi } from "./http-api.js";
 import type { RealtimeSubscription } from "./realtime.js";
 import { resolveWebConfig } from "../config.js";
@@ -27,9 +33,25 @@ interface MoxStore {
   error: string | null;
   /** True when the server rejected the session (login required). */
   needsAuth: boolean;
+  /** Authenticated identity + org memberships (authoritative, from /api/me). */
+  me: MeResponse | null;
+  switchOrg(orgId: string): Promise<void>;
   signIn(input: { email: string; password: string }): Promise<void>;
   signUp(input: { email: string; password: string; orgName?: string }): Promise<void>;
   signOut(): Promise<void>;
+  /** Staff surface (Prompt 01): admin/support session + auth. */
+  staffSession: StaffSessionResponse | null;
+  staffSurface: "admin" | "support" | null;
+  staffReady: boolean;
+  staffError: string | null;
+  verifyStaffSession(surface: "admin" | "support"): Promise<StaffSessionResponse | null>;
+  adminLogin(input: { email: string; password: string; returnTo?: string }): Promise<string | undefined>;
+  supportLogin(input: { email: string; password: string; returnTo?: string }): Promise<string | undefined>;
+  adminSignup(input: { email: string; password: string; inviteToken: string }): Promise<void>;
+  supportSignup(input: { email: string; password: string; inviteToken: string }): Promise<void>;
+  staffSignOut(): Promise<void>;
+  forgotPassword(email: string): Promise<ForgotPasswordResponse>;
+  resetPassword(input: ResetPasswordRequest): Promise<void>;
   agents: AgentSummary[];
   entitlements: Entitlements | undefined;
   approvals: ApprovalRequest[];
@@ -113,6 +135,13 @@ function failingApi(message: string): MoxApi {
     adminSendNotification: fail,
     adminScheduleNotification: fail,
     adminCancelNotificationJob: fail,
+    adminStaff: fail,
+    adminCreateStaffInvite: fail,
+    adminRevokeStaffInvite: fail,
+    adminStaffAction: fail,
+    supportCustomers: fail,
+    supportCustomer: fail,
+    supportAddNote: fail,
     computerSnapshot: fail,
     computerTakeover: fail,
     computerRestart: fail,
@@ -139,6 +168,11 @@ export function MoxProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [needsAuth, setNeedsAuth] = useState(false);
   const [backendError, setBackendError] = useState<string | null>(composed.error);
+  const [me, setMe] = useState<MeResponse | null>(null);
+  const [staffSession, setStaffSession] = useState<StaffSessionResponse | null>(null);
+  const [staffSurface, setStaffSurface] = useState<"admin" | "support" | null>(null);
+  const [staffReady, setStaffReady] = useState(false);
+  const [staffError, setStaffError] = useState<string | null>(null);
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [entitlements, setEntitlements] = useState<Entitlements>();
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
@@ -157,12 +191,14 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     let alive = true;
     (async () => {
       try {
-        const [list, ents, open] = await Promise.all([
+        const [identity, list, ents, open] = await Promise.all([
+          httpApi?.me() ?? Promise.resolve(null),
           api.listAgents(),
           api.getEntitlements(),
           api.openApprovals(),
         ]);
         if (!alive) return;
+        setMe(identity);
         setAgents(list);
         setEntitlements(ents);
         setApprovals(open);
@@ -209,11 +245,13 @@ export function MoxProvider({ children }: { children: ReactNode }) {
   const authenticateAndLoad = useCallback(async (action: () => Promise<unknown>) => {
     if (!httpApi) return;
     await action();
-    const [list, ents, open] = await Promise.all([
+    const [identity, list, ents, open] = await Promise.all([
+      httpApi.me(),
       httpApi.listAgents(),
       httpApi.getEntitlements(),
       httpApi.openApprovals(),
     ]);
+    setMe(identity);
     setAgents(list);
     setEntitlements(ents);
     setApprovals(open);
@@ -241,10 +279,114 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     await httpApi.logout().catch(() => undefined);
     setReady(false);
     setNeedsAuth(true);
+    setMe(null);
     setAgents([]);
     setApprovals([]);
     setMessagesByThread(new Map());
   }, [httpApi]);
+
+  const switchOrg = useCallback(
+    async (orgId: string) => {
+      if (!httpApi) return;
+      await authenticateAndLoad(() => httpApi.selectOrg(orgId));
+    },
+    [authenticateAndLoad, httpApi],
+  );
+
+  // ---- Staff surface (Prompt 01) -------------------------------------------
+
+  const verifyStaffSession = useCallback(
+    async (surface: "admin" | "support") => {
+      if (!httpApi) return null;
+      try {
+        const session = surface === "admin" ? await httpApi.adminSession() : await httpApi.supportSession();
+        setStaffSession(session);
+        setStaffSurface(surface);
+        setStaffReady(true);
+        setStaffError(null);
+        return session;
+      } catch (error) {
+        if (!isUnauthorized(error)) setStaffError(error instanceof Error ? error.message : String(error));
+        setStaffSession(null);
+        setStaffSurface(null);
+        setStaffReady(false);
+        return null;
+      }
+    },
+    [httpApi],
+  );
+
+  const finalizeStaffLogin = useCallback((result: StaffSessionResponse) => {
+    setStaffSession(result);
+    setStaffReady(true);
+    setStaffError(null);
+  }, []);
+
+  const adminLogin = useCallback(
+    async (input: { email: string; password: string; returnTo?: string }) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      const result = await httpApi.adminLogin(input);
+      setStaffSurface("admin");
+      finalizeStaffLogin(result);
+      return result.returnTo;
+    },
+    [httpApi, finalizeStaffLogin],
+  );
+
+  const supportLogin = useCallback(
+    async (input: { email: string; password: string; returnTo?: string }) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      const result = await httpApi.supportLogin(input);
+      setStaffSurface("support");
+      finalizeStaffLogin(result);
+      return result.returnTo;
+    },
+    [httpApi, finalizeStaffLogin],
+  );
+
+  const adminSignup = useCallback(
+    async (input: { email: string; password: string; inviteToken: string }) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      const result = await httpApi.adminSignup(input);
+      setStaffSurface("admin");
+      finalizeStaffLogin(result);
+    },
+    [httpApi, finalizeStaffLogin],
+  );
+
+  const supportSignup = useCallback(
+    async (input: { email: string; password: string; inviteToken: string }) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      const result = await httpApi.supportSignup(input);
+      setStaffSurface("support");
+      finalizeStaffLogin(result);
+    },
+    [httpApi, finalizeStaffLogin],
+  );
+
+  const staffSignOut = useCallback(async () => {
+    if (httpApi) await httpApi.logout().catch(() => undefined);
+    setStaffSession(null);
+    setStaffSurface(null);
+    setStaffReady(false);
+    setStaffError(null);
+  }, [httpApi]);
+
+  const forgotPassword = useCallback(
+    async (email: string) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      return httpApi.forgotPassword(email);
+    },
+    [httpApi],
+  );
+
+  const resetPassword = useCallback(
+    async (input: ResetPasswordRequest) => {
+      if (!httpApi) throw new ApiUnavailableError("control plane unavailable");
+      await httpApi.resetPassword(input);
+    },
+    [httpApi],
+  );
 
   const send = useCallback(
     async (agentId: string, threadId: string, text: string) => {
@@ -373,9 +515,23 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     ready,
     error: backendError,
     needsAuth,
+    me,
+    switchOrg,
     signIn,
     signUp,
     signOut,
+    staffSession,
+    staffSurface,
+    staffReady,
+    staffError,
+    verifyStaffSession,
+    adminLogin,
+    supportLogin,
+    adminSignup,
+    supportSignup,
+    staffSignOut,
+    forgotPassword,
+    resetPassword,
     agents,
     entitlements,
     approvals,

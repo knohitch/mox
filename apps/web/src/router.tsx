@@ -2,9 +2,15 @@ import { useCallback, useEffect, useState } from "react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 
 /**
- * Minimal dependency-free router (Prompt 05). The web product is primary and
- * must not require Electron; this keeps the bundle small while providing the
+ * Minimal dependency-free path router built on the History API (Prompt 05,
+ * refactored in Prompt 01 to REAL paths — not hashes — so surface isolation
+ * is enforced by the URL itself). The web product is primary and must not
+ * require Electron; this keeps the bundle small while providing the
  * navigation IA (paths + params) the product needs.
+ *
+ * Path routing requires a static-server fallback that maps any unmatched URL
+ * to `index.html` (dev/preview handled in vite.config.ts; the production
+ * static host must be configured likewise — never a 404 at a real path).
  */
 
 export interface RouteMatch {
@@ -14,9 +20,32 @@ export interface RouteMatch {
   params: Record<string, string>;
 }
 
+export interface RouterConfig {
+  /** Base path prefix when the app is served under a sub-path (default "/"). */
+  basename?: string;
+}
+
+function routeBasename(config: RouterConfig = {}): string {
+  const base = config.basename?.trim() ?? "";
+  if (!base || base === "/") return "";
+  return base.startsWith("/") ? base.replace(/\/$/, "") : `/${base.replace(/\/$/, "")}`;
+}
+
 function currentPath(): string {
-  const raw = window.location.hash.slice(1);
-  return raw === "" ? "/" : raw.startsWith("/") ? raw : `/${raw}`;
+  const raw = window.location.pathname.replace(routeBasename(), "") || "/";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+/** Navigation events that are NOT browser-initiated (pushState) must still
+ *  rerender observers; useRoute subscribes to this custom event as well. */
+const NAV_EVENT = "mox:navigate";
+function emitNavigate(): void {
+  window.dispatchEvent(new Event(NAV_EVENT));
+}
+function pushPath(to: string): void {
+  const target = to.startsWith("/") ? to : `/${to}`;
+  window.history.pushState(null, "", `${routeBasename()}${target}`);
+  emitNavigate();
 }
 
 export function matchPath(pattern: string, path: string): Record<string, string> | null {
@@ -39,18 +68,29 @@ export function matchPath(pattern: string, path: string): Record<string, string>
   return params;
 }
 
-export function useRoute(): RouteMatch & { navigate: (to: string) => void } {
+export function useRoute(config?: RouterConfig): RouteMatch & { navigate: (to: string) => void } {
   const [path, setPath] = useState(currentPath);
 
   useEffect(() => {
     const onChange = () => setPath(currentPath());
-    window.addEventListener("hashchange", onChange);
-    return () => window.removeEventListener("hashchange", onChange);
+    window.addEventListener("popstate", onChange);
+    window.addEventListener(NAV_EVENT, onChange);
+    return () => {
+      window.removeEventListener("popstate", onChange);
+      window.removeEventListener(NAV_EVENT, onChange);
+    };
   }, []);
 
-  const navigate = useCallback((to: string) => {
-    window.location.hash = to;
-  }, []);
+  const navigate = useCallback(
+    (to: string) => {
+      if (to === currentPath()) {
+        // still normalize a scroll reset / state sync without a duplicate entry
+        return;
+      }
+      pushPath(to);
+    },
+    [config],
+  );
 
   // Route table is evaluated by callers via <Route> composition; here we
   // expose the raw path plus a helper consumers use with their patterns.
@@ -74,8 +114,20 @@ export function Link({
   children,
   ...rest
 }: { to: string; children: ReactNode } & AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const onClick = rest.onClick;
   return (
-    <a href={`#${to}`} {...rest}>
+    <a
+      href={`${routeBasename()}${to.startsWith("/") ? to : `/${to}`}`}
+      {...rest}
+      onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented) return;
+        const modifier = event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
+        if (modifier || event.target instanceof HTMLAnchorElement && event.target.target === "_blank") return;
+        event.preventDefault();
+        pushPath(to);
+      }}
+    >
       {children}
     </a>
   );
