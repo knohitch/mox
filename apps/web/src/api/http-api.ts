@@ -64,7 +64,15 @@ import type {
   SupportCustomerDetail,
   ToolGrantRow,
   UsageRow,
+  UsageDetails,
+  NotificationPreferencesView,
+  BackupsOverview,
+  WorkspaceTeamOverview,
+  CreatedWorkspaceInvitation,
+  KnowledgeSourceItem,
+  VoiceOption,
 } from "./types.js";
+
 
 export interface HttpMoxApiOptions {
   baseUrl: string;
@@ -646,6 +654,11 @@ export class HttpMoxApi implements MoxApi {
     return this.call("/api/usage");
   }
 
+  async getUsageDetails(): Promise<UsageDetails> {
+    return this.call("/api/usage/details");
+  }
+
+
   async listInvoices(): Promise<InvoiceRow[]> {
     return this.call("/api/billing/invoices");
   }
@@ -730,6 +743,90 @@ export class HttpMoxApi implements MoxApi {
   async revokeApiToken(tokenId: string): Promise<void> {
     await this.call(`/api/auth/tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
   }
+
+  // ---- Phase 04: Customer Extended Capabilities -------------------------------
+
+  async getNotificationPreferences(): Promise<NotificationPreferencesView> {
+    return this.call("/api/notifications/preferences");
+  }
+
+  async updateNotificationPreferences(prefs: {
+    routes: Record<string, string[]>;
+    mutedEventTypes: string[];
+  }): Promise<NotificationPreferencesView> {
+    return this.call("/api/notifications/preferences", {
+      method: "PUT",
+      body: JSON.stringify(prefs),
+    });
+  }
+
+  async getBackupsOverview(): Promise<BackupsOverview> {
+    return this.call("/api/backups");
+  }
+
+  async triggerManualBackup(serverOrderId?: string): Promise<{ ok: boolean; backupId: string; state: string }> {
+    return this.call("/api/backups", {
+      method: "POST",
+      body: JSON.stringify(serverOrderId ? { serverOrderId } : {}),
+    });
+  }
+
+  async testBackupRestore(backupId: string): Promise<{ ok: boolean; message: string }> {
+    return this.call(`/api/backups/${encodeURIComponent(backupId)}/restore-test`);
+  }
+
+  async getTeamOverview(): Promise<WorkspaceTeamOverview> {
+    return this.call("/api/team/members");
+  }
+
+  async inviteTeamMember(email: string, role: "admin" | "member" | "viewer"): Promise<CreatedWorkspaceInvitation> {
+    return this.call("/api/team/invitations", {
+      method: "POST",
+      body: JSON.stringify({ email, role }),
+    });
+  }
+
+  async revokeTeamInvitation(invitationId: string): Promise<void> {
+    await this.call(`/api/team/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+  }
+
+  async updateTeamMemberRole(userId: string, role: "admin" | "member" | "viewer"): Promise<void> {
+    await this.call(`/api/team/members/${encodeURIComponent(userId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    });
+  }
+
+  async removeTeamMember(userId: string): Promise<void> {
+    await this.call(`/api/team/members/${encodeURIComponent(userId)}`, { method: "DELETE" });
+  }
+
+  async listKnowledgeSources(): Promise<KnowledgeSourceItem[]> {
+    return this.call("/api/knowledge");
+  }
+
+  async createKnowledgeSource(input: { name: string; kind: string; config?: Record<string, unknown> }): Promise<KnowledgeSourceItem> {
+    return this.call("/api/knowledge", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteKnowledgeSource(id: string): Promise<void> {
+    await this.call(`/api/knowledge/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  async listVoices(): Promise<VoiceOption[]> {
+    return this.call("/api/voice/voices");
+  }
+
+  async previewVoice(voiceId: string, text: string): Promise<{ ok: boolean; sampleUrl?: string; reason?: string }> {
+    return this.call("/api/voice/preview", {
+      method: "POST",
+      body: JSON.stringify({ voiceId, text }),
+    });
+  }
+
 
   // ---- Protected Mox Admin ----------------------------------------------------------
 

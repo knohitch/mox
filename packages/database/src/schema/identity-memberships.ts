@@ -61,3 +61,34 @@ export const membershipPermissions = pgTable(
   },
   (t) => [primaryKey({ columns: [t.orgId, t.userId, t.permission] })],
 );
+
+/**
+ * Customer workspace invitations (Phase 04 §D).
+ * Kept strictly separate from platform staff invitations.
+ * Only the hash of the token is stored; the plaintext token is shown to
+ * the authorized creator once.
+ */
+export const workspaceInvitations = pgTable(
+  "workspace_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: membershipRole("role").notNull().default("member"),
+    tokenHash: text("token_hash").notNull(),
+    invitedByUserId: uuid("invited_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("workspace_invitations_token_hash_key").on(t.tokenHash),
+    index("workspace_invitations_org_idx").on(t.orgId),
+    index("workspace_invitations_email_idx").on(t.email),
+  ],
+);

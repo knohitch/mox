@@ -127,3 +127,105 @@ export function projectServerSummary(order: ServerOrderView): ServerSummaryView 
     updatedAt: order.updatedAt,
   };
 }
+
+// ---- Phase 04: Extended Capabilities Projections ----------------------------
+
+export type UsageStatus =
+  | "within_included"
+  | "soft_limit_warning"
+  | "hard_limit_blocked"
+  | "unlimited"
+  | "overage";
+
+export function projectUsageStatus(
+  consumed: number,
+  included: number,
+  limits?: { hardLimit?: number; softLimit?: number },
+): UsageStatus {
+  if (included < 0 && limits?.hardLimit === undefined) {
+    return "unlimited";
+  }
+  if (limits?.hardLimit !== undefined && consumed > limits.hardLimit) {
+    return "hard_limit_blocked";
+  }
+  if (limits?.softLimit !== undefined && consumed > limits.softLimit) {
+    return "soft_limit_warning";
+  }
+  if (included >= 0 && consumed > included) {
+    return "overage";
+  }
+  return "within_included";
+}
+
+/** Customer-safe backup location descriptor (never leaks s3 credentials or internal bucket paths). */
+export function maskBackupLocation(location: string, kind: string): string {
+  if (kind === "s3_copy" || location.startsWith("s3://")) {
+    return "Mox Cloud Storage";
+  }
+  if (kind === "provider_snapshot" || location.includes("snapshot")) {
+    return "Server Snapshot";
+  }
+  return "Cloud Storage";
+}
+
+/** Owner safety rules for team member mutations. */
+export function canMutateMember(params: {
+  callerRole: string;
+  targetRole: string;
+  isOwnerTarget: boolean;
+  activeOwnerCount: number;
+  action: "demote" | "remove";
+}): { allowed: boolean; reason?: string } {
+  if (params.isOwnerTarget) {
+    if (params.callerRole !== "owner") {
+      return { allowed: false, reason: "only workspace owners can modify owner memberships" };
+    }
+    if (params.activeOwnerCount <= 1) {
+      return { allowed: false, reason: "cannot demote or remove the only remaining workspace owner" };
+    }
+  }
+  return { allowed: true };
+}
+
+/** Validates schedule count against schedule_workflow_limit entitlement. */
+export function validateScheduleLimit(
+  schedulesCount: number,
+  limit: number,
+): { allowed: boolean; reason?: string } {
+  if (limit >= 0 && schedulesCount > limit) {
+    return { allowed: false, reason: `schedules count (${schedulesCount}) exceeds entitlement limit (${limit})` };
+  }
+  return { allowed: true };
+}
+
+/** Validates subagent delegation refs to prevent self-reference cycles. */
+export function validateSubagents(
+  subagents: Array<{ agentId: string }>,
+  currentAgentId: string,
+  currentSlug?: string,
+): { valid: boolean; reason?: string } {
+  for (const sub of subagents) {
+    if (sub.agentId === currentAgentId || (currentSlug && sub.agentId === currentSlug)) {
+      return { valid: false, reason: "subagent cannot self-reference the agent itself" };
+    }
+  }
+  return { valid: true };
+}
+
+/** Validates knowledge access permissions. */
+export function validateKnowledgeAccess(
+  access: string[],
+): { valid: boolean; reason?: string } {
+  if (!access || access.length === 0) {
+    return { valid: false, reason: "at least one access permission is required" };
+  }
+  const allowed = new Set(["read", "search", "attach"]);
+  for (const a of access) {
+    if (!allowed.has(a)) {
+      return { valid: false, reason: `invalid knowledge access permission: ${a}` };
+    }
+  }
+  return { valid: true };
+}
+
+

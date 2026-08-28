@@ -10,6 +10,7 @@ import { Badge, Card, EmptyState } from "./ui/primitives.js";
 import { canSupportLookup, canSupportNote } from "./concepts/staffNav.js";
 import type { SupportCustomer, SupportCustomerDetail } from "./api/types.js";
 import {
+  BackupsView,
   BillingView,
   ChannelsView,
   DeploymentsView,
@@ -39,8 +40,10 @@ const CUSTOMER_ROUTES: Record<string, (params: Record<string, string>) => ReactN
   "/channels": () => <ChannelsView />,
   "/usage": () => <UsageView />,
   "/billing": () => <BillingView />,
+  "/backups": () => <BackupsView />,
   "/settings": () => <SettingsView />,
 };
+
 
 /** Customer-facing public auth routes (standalone, NO app shell). */
 const CUSTOMER_PUBLIC = ["/login", "/signup", "/forgot-password", "/reset-password"] as const;

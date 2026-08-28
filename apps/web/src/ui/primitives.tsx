@@ -58,9 +58,9 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
 }
 
 /** Layered surface panel (section) with optional header. */
-export function Panel({ title, subtitle, actions, children }: { title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
+export function Panel({ id, title, subtitle, actions, children }: { id?: string; title?: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
   return (
-    <section className="panel">
+    <section id={id} className="panel">
       {title || actions ? (
         <header className="panel-head">
           <div>

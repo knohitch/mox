@@ -38,7 +38,17 @@ import type {
   SubscriptionView,
   ToolGrantRow,
   UsageRow,
+  UsageDetails,
+  NotificationPreferencesView,
+  BackupsOverview,
+  StoredBackupSummary,
+  WorkspaceMemberView,
+  WorkspaceTeamOverview,
+  CreatedWorkspaceInvitation,
+  KnowledgeSourceItem,
+  VoiceOption,
 } from "./types.js";
+
 
 /**
  * DEMO DATA implementation of the MoxApi seam (Prompt 05).
@@ -154,7 +164,15 @@ interface StoreShape {
   integrations: IntegrationCatalogRow[];
   integrationGrants: Map<string, ToolGrantRow[]>;
   channels: ChannelCatalogRow[];
+  // Phase 04 — extended capabilities (backups, team, prefs, knowledge, voices)
+  backups: StoredBackupSummary[];
+  teamMembers: WorkspaceMemberView[];
+  invitations: Array<{ id: string; email: string; role: "admin" | "member" | "viewer"; createdAt: string; expiresAt: string }>;
+  notificationPreferences: NotificationPreferencesView;
+  knowledgeSources: KnowledgeSourceItem[];
+  voices: VoiceOption[];
 }
+
 
 function seedServers(): ServerSummary[] {
   const at = now();
@@ -304,7 +322,75 @@ function seedChannels(): ChannelCatalogRow[] {
   ];
 }
 
+function seedBackups(): StoredBackupSummary[] {
+  const at = now();
+  return [
+    {
+      backupId: "bkp_demo_01",
+      serverOrderId: "ord_1",
+      kind: "s3_copy",
+      state: "completed",
+      sizeBytes: 104_857_600,
+      createdAt: new Date(Date.now() - 86400000).toISOString(),
+      completedAt: new Date(Date.now() - 86300000).toISOString(),
+      locationLabel: "Mox Cloud Storage",
+    },
+    {
+      backupId: "bkp_demo_02",
+      serverOrderId: "ord_2",
+      kind: "provider_snapshot",
+      state: "completed",
+      sizeBytes: 52_428_800,
+      createdAt: new Date(Date.now() - 172800000).toISOString(),
+      completedAt: new Date(Date.now() - 172700000).toISOString(),
+      locationLabel: "Server Snapshot",
+    },
+  ];
+}
+
+function seedTeamMembers(): WorkspaceMemberView[] {
+  const at = now();
+  return [
+    { id: "mem_1", userId: "u_demo_owner", email: "alice@example.com", displayName: "Alice Owner", role: "owner", isOwner: true, joinedAt: at, createdAt: at },
+    { id: "mem_2", userId: "u_demo_admin", email: "bob@example.com", displayName: "Bob Admin", role: "admin", isOwner: false, joinedAt: at, createdAt: at },
+    { id: "mem_3", userId: "u_demo_member", email: "charlie@example.com", displayName: "Charlie Developer", role: "member", isOwner: false, joinedAt: at, createdAt: at },
+  ];
+}
+
+function seedNotificationPreferences(): NotificationPreferencesView {
+  return {
+    availableRoutes: ["in_app", "email", "web_push"],
+    items: [
+      { eventType: "subscription.past_due", title: "Subscription Past Due", category: "billing", mandatory: true, routes: ["in_app", "email"], muted: false },
+      { eventType: "subscription.canceled", title: "Subscription Canceled", category: "billing", mandatory: true, routes: ["in_app", "email"], muted: false },
+      { eventType: "abuse.case_opened", title: "Security Alert / Abuse Case", category: "security", mandatory: true, routes: ["in_app", "email"], muted: false },
+      { eventType: "server.provisioned", title: "Server Provisioned", category: "servers", mandatory: false, routes: ["in_app"], muted: false },
+      { eventType: "node.offline", title: "Server Node Offline", category: "servers", mandatory: false, routes: ["in_app", "email"], muted: false },
+      { eventType: "agent.deployed", title: "Agent Deployed", category: "agents", mandatory: false, routes: ["in_app"], muted: false },
+      { eventType: "approval.requested", title: "Approval Requested", category: "agents", mandatory: false, routes: ["in_app", "email"], muted: false },
+      { eventType: "backup.completed", title: "Backup Completed", category: "servers", mandatory: false, routes: ["in_app"], muted: false },
+    ],
+  };
+}
+
+function seedKnowledgeSources(): KnowledgeSourceItem[] {
+  const at = now();
+  return [
+    { id: "kn_1", name: "Engineering Handbook", kind: "documentation", lastSyncedAt: at, createdAt: at },
+    { id: "kn_2", name: "Customer FAQ Corpus", kind: "support_docs", lastSyncedAt: at, createdAt: at },
+  ];
+}
+
+function seedVoices(): VoiceOption[] {
+  return [
+    { id: "voice_rachel", label: "Rachel (Calm & Professional)", description: "Clear, expressive conversational tone", provider: "elevenlabs" },
+    { id: "voice_drew", label: "Drew (Authoritative & Steady)", description: "Ideal for business workflows and briefings", provider: "elevenlabs" },
+    { id: "voice_clyde", label: "Clyde (Energetic & Dynamic)", description: "Engaging tone for interactive conversational turns", provider: "elevenlabs" },
+  ];
+}
+
 export class DemoMoxApi implements MoxApi {
+
   private readonly s: StoreShape;
 
   constructor() {
@@ -330,7 +416,14 @@ export class DemoMoxApi implements MoxApi {
       integrations: seedIntegrations(),
       integrationGrants: new Map(),
       channels: seedChannels(),
+      backups: seedBackups(),
+      teamMembers: seedTeamMembers(),
+      invitations: [],
+      notificationPreferences: seedNotificationPreferences(),
+      knowledgeSources: seedKnowledgeSources(),
+      voices: seedVoices(),
     };
+
     for (const a of agents) this.s.agents.set(a.agentId, a);
 
     // Primary thread per agent.
@@ -979,6 +1072,29 @@ export class DemoMoxApi implements MoxApi {
     ];
   }
 
+  async getUsageDetails(): Promise<UsageDetails> {
+    return {
+      period: {
+        start: "2026-08-01T00:00:00.000Z",
+        end: "2026-08-31T23:59:59.999Z",
+      },
+      metrics: [
+        { kind: "ai_input_tokens", metric: "Tokens In", quantity: 1_284_112, unit: "tokens", includedQuantity: 5_000_000, remaining: 3_715_888, unlimited: false, status: "within_included" },
+        { kind: "ai_output_tokens", metric: "Tokens Out", quantity: 302_889, unit: "tokens", includedQuantity: 1_000_000, remaining: 697_111, unlimited: false, status: "within_included" },
+        { kind: "browser_minutes", metric: "Browser Sessions", quantity: 214, unit: "min", includedQuantity: 500, remaining: 286, unlimited: false, status: "within_included" },
+        { kind: "voice_minutes", metric: "Voice Minutes", quantity: 36, unit: "min", includedQuantity: 60, remaining: 24, unlimited: false, status: "within_included" },
+        { kind: "storage_gb", metric: "Storage", quantity: 4, unit: "GB", includedQuantity: 20, remaining: 16, unlimited: false, status: "within_included" },
+        { kind: "actions", metric: "Actions", quantity: 5_402, unit: "actions", includedQuantity: -1, remaining: null, unlimited: true, status: "unlimited" },
+      ],
+      credits: {
+        included: 100,
+        consumed: 22,
+        remaining: 78,
+      },
+    };
+  }
+
+
   async listInvoices(): Promise<InvoiceRow[]> {
     return [
       { invoiceId: "in_2026_07", periodStart: "2026-07-01", periodEnd: "2026-07-31", amountCents: 8_900, currency: "EUR", state: "paid" },
@@ -1065,6 +1181,162 @@ export class DemoMoxApi implements MoxApi {
     if (!token) throw new Error("token not found");
     token.revoked = true;
   }
+
+  // ---- Phase 04: Customer Extended Capabilities (§B-§F) ------------------------
+
+  async getNotificationPreferences(): Promise<NotificationPreferencesView> {
+    return {
+      availableRoutes: [...this.s.notificationPreferences.availableRoutes],
+      items: this.s.notificationPreferences.items.map((i) => ({ ...i, routes: [...i.routes] })),
+    };
+  }
+
+  async updateNotificationPreferences(prefs: {
+    routes: Record<string, string[]>;
+    mutedEventTypes: string[];
+  }): Promise<NotificationPreferencesView> {
+    for (const item of this.s.notificationPreferences.items) {
+      if (item.mandatory && prefs.mutedEventTypes.includes(item.eventType)) {
+        throw new Error(`cannot mute mandatory ${item.category} notifications: ${item.eventType}`);
+      }
+      item.muted = prefs.mutedEventTypes.includes(item.eventType);
+      if (prefs.routes[item.eventType]) {
+        item.routes = prefs.routes[item.eventType] as never;
+      }
+    }
+    return this.getNotificationPreferences();
+  }
+
+  async getBackupsOverview(): Promise<BackupsOverview> {
+    const completed = this.s.backups.filter((b) => b.state === "completed");
+    return {
+      availability: true,
+      retentionDays: 30,
+      lastSuccessfulAt: completed[0]?.completedAt,
+      failedCount: this.s.backups.filter((b) => b.state === "failed").length,
+      backups: this.s.backups.map((b) => ({ ...b })),
+      cancellationExportSummary: {
+        eligible: true,
+        retentionWindowDays: 30,
+        description: "Automated snapshot archive outlives server destruction",
+      },
+    };
+  }
+
+  async triggerManualBackup(serverOrderId?: string): Promise<{ ok: boolean; backupId: string; state: string }> {
+    const backupId = `bkp_demo_${randomUUID().slice(0, 8)}`;
+    const at = now();
+    const backup: StoredBackupSummary = {
+      backupId,
+      serverOrderId: serverOrderId ?? "ord_1",
+      kind: "s3_copy",
+      state: "completed",
+      sizeBytes: 83_886_080,
+      createdAt: at,
+      completedAt: at,
+      locationLabel: "Mox Cloud Storage",
+    };
+    this.s.backups.unshift(backup);
+    return { ok: true, backupId, state: "completed" };
+  }
+
+  async testBackupRestore(backupId: string): Promise<{ ok: boolean; message: string }> {
+    const backup = this.s.backups.find((b) => b.backupId === backupId);
+    if (!backup) throw new Error("backup not found");
+    return { ok: true, message: "Backup artifact integrity verified against offsite storage" };
+  }
+
+  async getTeamOverview(): Promise<WorkspaceTeamOverview> {
+    return {
+      members: this.s.teamMembers.map((m) => ({ ...m })),
+      invitations: this.s.invitations.map((i) => ({ ...i })),
+      totalUsed: this.s.teamMembers.length + this.s.invitations.length,
+      limit: 10,
+    };
+  }
+
+  async inviteTeamMember(email: string, role: "admin" | "member" | "viewer"): Promise<CreatedWorkspaceInvitation> {
+    if (!email || !email.includes("@")) throw new Error("valid email address required");
+    const existing = this.s.teamMembers.find((m) => m.email.toLowerCase() === email.toLowerCase());
+    if (existing) throw new Error("user is already a member of this workspace");
+    const pending = this.s.invitations.find((i) => i.email.toLowerCase() === email.toLowerCase());
+    if (pending) throw new Error("invitation already pending for this email");
+    const invitationId = `inv_demo_${randomUUID().slice(0, 8)}`;
+    const inviteToken = `inv_tok_${randomUUID().replace(/-/g, "")}`;
+    const at = now();
+    const expiresAt = new Date(Date.now() + 7 * 86400000).toISOString();
+    this.s.invitations.push({ id: invitationId, email, role, createdAt: at, expiresAt });
+    return {
+      invitationId,
+      email,
+      role,
+      inviteToken,
+      inviteUrl: `https://app.mox.local/signup?invite=${inviteToken}`,
+      expiresAt,
+    };
+  }
+
+  async revokeTeamInvitation(invitationId: string): Promise<void> {
+    const idx = this.s.invitations.findIndex((i) => i.id === invitationId);
+    if (idx < 0) throw new Error("invitation not found");
+    this.s.invitations.splice(idx, 1);
+  }
+
+  async updateTeamMemberRole(userId: string, role: "admin" | "member" | "viewer"): Promise<void> {
+    const member = this.s.teamMembers.find((m) => m.userId === userId);
+    if (!member) throw new Error("member not found");
+    if (member.isOwner) {
+      const owners = this.s.teamMembers.filter((m) => m.isOwner);
+      if (owners.length <= 1 && role !== "owner" as never) {
+        throw new Error("cannot demote the only remaining workspace owner");
+      }
+    }
+    member.role = role;
+  }
+
+  async removeTeamMember(userId: string): Promise<void> {
+    const member = this.s.teamMembers.find((m) => m.userId === userId);
+    if (!member) throw new Error("member not found");
+    if (member.isOwner) {
+      const owners = this.s.teamMembers.filter((m) => m.isOwner);
+      if (owners.length <= 1) {
+        throw new Error("cannot remove the only remaining workspace owner");
+      }
+    }
+    this.s.teamMembers = this.s.teamMembers.filter((m) => m.userId !== userId);
+  }
+
+  async listKnowledgeSources(): Promise<KnowledgeSourceItem[]> {
+    return this.s.knowledgeSources.map((k) => ({ ...k }));
+  }
+
+  async createKnowledgeSource(input: { name: string; kind: string; config?: Record<string, unknown> }): Promise<KnowledgeSourceItem> {
+    if (!input.name.trim()) throw new Error("name is required");
+    const item: KnowledgeSourceItem = {
+      id: `kn_${randomUUID().slice(0, 8)}`,
+      name: input.name.trim(),
+      kind: input.kind || "document",
+      createdAt: now(),
+      lastSyncedAt: now(),
+    };
+    this.s.knowledgeSources.push(item);
+    return item;
+  }
+
+  async deleteKnowledgeSource(id: string): Promise<void> {
+    this.s.knowledgeSources = this.s.knowledgeSources.filter((k) => k.id !== id);
+  }
+
+  async listVoices(): Promise<VoiceOption[]> {
+    return this.s.voices.map((v) => ({ ...v }));
+  }
+
+  async previewVoice(voiceId: string, text: string): Promise<{ ok: boolean; sampleUrl?: string; reason?: string }> {
+    void voiceId;
+    void text;
+    return { ok: true, sampleUrl: "data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAAAA" };
+  }
+
 
   // ---- Computer (gateway contract) ----
 

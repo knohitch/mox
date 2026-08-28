@@ -118,6 +118,9 @@ export function InboxPanel(props: { onAnyChange: () => void; onClose: () => void
         <button type="button" onClick={() => act(() => httpApi!.markAllNotificationsRead().then())}>
           Mark all read
         </button>
+        <a href="/settings#notifications" className="linklike" onClick={props.onClose} title="Notification Preferences" style={{ textDecoration: "none", fontSize: 14 }}>
+          ⚙
+        </a>
         <button type="button" className="linklike" onClick={props.onClose}>
           ✕
         </button>

@@ -1,7 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentEvent } from "@mox/contracts";
+import type { AgentEvent, AgentId, SubagentRef } from "@mox/contracts";
 import { useBrowser, useDeveloperMode, useEntitlements, useMox, useTerminal } from "../api/store.js";
-import type { AgentSummary, AgentVersionRow, ChatMessage, ComputerSnapshot, CreateAgentDraftInput, SimpleAgentInput } from "../api/types.js";
+import { Link } from "../router.js";
+
+
+import type {
+  AgentSummary,
+  AgentVersionRow,
+  ChatMessage,
+  ComputerSnapshot,
+  CreateAgentDraftInput,
+  KnowledgeSourceItem,
+  SimpleAgentInput,
+  VoiceOption,
+} from "../api/types.js";
+
+
 import { limitOf } from "../api/entitlement.js";
 import { agentStatus, STATUS_LABEL } from "../domain/roster.js";
 import { simpleInputFromDefinition, slugFromName } from "../domain/authoring.js";
@@ -791,8 +805,20 @@ function FeatureUnavailable({ label, reason }: { label: string; reason: string }
 // Simple-mode round-tripping lives in domain/authoring.ts (shared with tests).
 // ---------------------------------------------------------------------------
 
+export const REGISTERED_SKILLS = [
+  { id: "data_analysis", label: "Data Analysis", description: "Statistical computation, tabular analytics, and chart generation" },
+  { id: "web_search", label: "Web Search", description: "Web querying, link extraction, and web search retrieval" },
+  { id: "code_interpreter", label: "Code Interpreter", description: "Isolated Python code execution environment" },
+  { id: "sql_query", label: "SQL Query Engine", description: "Database schema inspection and SQL formulation" },
+  { id: "doc_summarizer", label: "Document Summarizer", description: "Multi-page text distillation and executive takeaways" },
+] as const;
+
 function SettingsTab({ summary }: { summary: AgentSummary }) {
   const mox = useMox();
+  const ents = useEntitlements();
+  const caps = ents?.values ?? {};
+  const schedLimit = typeof caps.schedule_workflow_limit === "number" ? caps.schedule_workflow_limit : 5;
+
   const d = summary.definition;
   const isDraft = summary.status === "draft";
   const simpleMode = d.authoring.mode === "simple";
@@ -807,9 +833,41 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
 
+  // Extended capability states (Phase 04 §E/§F)
+  const [knowledgeList, setKnowledgeList] = useState<KnowledgeSourceItem[]>([]);
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [voicePreviewStatus, setVoicePreviewStatus] = useState<string | null>(null);
+
+  const [schedules, setSchedules] = useState(d.schedules ?? []);
+  const [newCron, setNewCron] = useState("0 9 * * 1-5");
+  const [newTz, setNewTz] = useState("UTC");
+  const [newPrompt, setNewPrompt] = useState("");
+
+  const [subagents, setSubagents] = useState<SubagentRef[]>(d.subagents ?? []);
+  const [selectedSubagentId, setSelectedSubagentId] = useState("");
+  const [subagentMode, setSubagentMode] = useState<"ask" | "auto">("auto");
+
+  const [skills, setSkills] = useState(d.skills ?? []);
+  const [selectedSkillId, setSelectedSkillId] = useState<string>(REGISTERED_SKILLS[0].id);
+
+  const [knowledgeBindings, setKnowledgeBindings] = useState(d.knowledge ?? []);
+  const [selectedKnowledgeId, setSelectedKnowledgeId] = useState("");
+
+  const [memoryEnabled, setMemoryEnabled] = useState(d.memory?.enabled ?? true);
+  const [memoryScope, setMemoryScope] = useState<"org" | "agent" | "thread" | "room">(d.memory?.scope ?? "org");
+  const [memoryRetentionDays, setMemoryRetentionDays] = useState<number | undefined>(d.memory?.retentionDays ?? 30);
+
+  const [voiceEnabled, setVoiceEnabled] = useState(d.voice?.enabled ?? false);
+  const [selectedVoiceId, setSelectedVoiceId] = useState(d.voice?.voiceId ?? "voice_rachel");
+
+  const isSchedLimitReached = schedLimit >= 0 && schedules.length >= schedLimit;
+  const voiceEntitled = typeof caps.voice_minutes === "number" ? caps.voice_minutes > 0 : false;
+
   useEffect(() => {
     void mox.api.listModels().then(setModels);
     void mox.api.listAgentVersions(summary.agentId).then(setVersions).catch(() => setVersions([]));
+    void mox.api.listKnowledgeSources().then(setKnowledgeList).catch(() => setKnowledgeList([]));
+    void mox.api.listVoices().then(setVoices).catch(() => setVoices([]));
   }, [mox.api, summary.agentId]);
 
   const log = (err: unknown) => setError(err instanceof Error ? err.message : String(err));
@@ -818,11 +876,26 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
     setError(null);
     setBusy(true);
     try {
-      const current = simpleInputFromDefinition(summary.definition);
+      const updatedDefinition = {
+        ...summary.definition,
+        identity: { ...summary.definition.identity, role: role.trim() || undefined },
+        instructions: { text: instructions },
+        computer: { ...summary.definition.computer, enabled: browser, allowBrowser: browser },
+        voice: { enabled: voiceEnabled, voiceId: selectedVoiceId },
+        schedules,
+        subagents,
+        skills,
+        knowledge: knowledgeBindings,
+        memory: {
+          enabled: memoryEnabled,
+          scope: memoryScope,
+          ...(memoryRetentionDays ? { retentionDays: Number(memoryRetentionDays) } : {}),
+        },
+      };
       await mox.api.updateAgentDraft(summary.agentId, {
-        mode: "simple",
+        mode: "developer",
         slug: summary.definition.slug,
-        input: { ...current, role: role.trim() || undefined, instructions, browserEnabled: browser, permissionsPreset: preset },
+        raw: updatedDefinition,
       });
       setDirty(false);
       await mox.refreshAgents();
@@ -833,6 +906,103 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
       setBusy(false);
     }
   };
+
+  const handleAddSchedule = () => {
+    if (!newCron.trim() || !newPrompt.trim() || isSchedLimitReached) return;
+    const schedId = `sched_${Date.now()}`;
+    setSchedules([...schedules, { scheduleId: schedId, cron: newCron.trim(), timezone: newTz.trim() || "UTC", prompt: newPrompt.trim(), enabled: true }]);
+    setNewPrompt("");
+    setDirty(true);
+  };
+
+  const handleToggleSchedule = (id: string) => {
+    setSchedules(schedules.map((s) => (s.scheduleId === id ? { ...s, enabled: !s.enabled } : s)));
+    setDirty(true);
+  };
+
+  const handleRemoveSchedule = (id: string) => {
+    setSchedules(schedules.filter((s) => s.scheduleId !== id));
+    setDirty(true);
+  };
+
+  const handleAddSubagent = () => {
+    if (!selectedSubagentId) return;
+    if (selectedSubagentId === summary.agentId || selectedSubagentId === summary.definition.slug) {
+      setError("An agent cannot delegate to itself as a subagent.");
+      return;
+    }
+    if (subagents.some((s) => s.agentId === selectedSubagentId)) {
+      setError("Subagent already configured.");
+      return;
+    }
+    setSubagents([...subagents, { agentId: selectedSubagentId as AgentId, delegation: subagentMode }]);
+    setSelectedSubagentId("");
+    setDirty(true);
+  };
+
+  const handleRemoveSubagent = (agentId: string) => {
+    setSubagents(subagents.filter((s) => s.agentId !== agentId));
+    setDirty(true);
+  };
+
+  const handleAddSkill = () => {
+    const s = selectedSkillId.trim();
+    if (!s || skills.some((sk) => sk.skillId === s)) return;
+    setSkills([...skills, { skillId: s }]);
+    setDirty(true);
+  };
+
+  const handleRemoveSkill = (skillId: string) => {
+    setSkills(skills.filter((s) => s.skillId !== skillId));
+    setDirty(true);
+  };
+
+  const handleAddKnowledge = () => {
+    if (!selectedKnowledgeId || knowledgeBindings.some((k) => k.knowledgeId === selectedKnowledgeId)) return;
+    setKnowledgeBindings([...knowledgeBindings, { knowledgeId: selectedKnowledgeId as any, access: ["read", "search"] as const }]);
+    setSelectedKnowledgeId("");
+    setDirty(true);
+  };
+
+  const handleToggleKnowledgeAccess = (knowledgeId: string, perm: "read" | "search" | "attach") => {
+    setKnowledgeBindings(
+      knowledgeBindings.map((kb) => {
+        if (kb.knowledgeId !== knowledgeId) return kb;
+        const current = kb.access ?? ["read", "search"];
+        const has = current.includes(perm);
+        let next: ("read" | "search" | "attach")[];
+        if (has) {
+          if (current.length <= 1) return kb;
+          next = current.filter((p) => p !== perm);
+        } else {
+          next = [...current, perm];
+        }
+        return { ...kb, access: next as [("read" | "search" | "attach"), ...("read" | "search" | "attach")[]] };
+      }),
+    );
+    setDirty(true);
+  };
+
+  const handleRemoveKnowledge = (id: string) => {
+    setKnowledgeBindings(knowledgeBindings.filter((k) => k.knowledgeId !== id));
+    setDirty(true);
+  };
+
+  const handlePreviewVoice = async () => {
+    if (!selectedVoiceId) return;
+    setVoicePreviewStatus("Synthesizing preview sample…");
+    try {
+      const res = await mox.api.previewVoice(selectedVoiceId, "Hello! I am your Mox AI agent voice.");
+      if (res.ok) {
+        setVoicePreviewStatus("Preview verified (audio sample synthesized).");
+      } else {
+        setVoicePreviewStatus(res.reason ?? "Voice synthesis unavailable.");
+      }
+    } catch (e) {
+      setVoicePreviewStatus(e instanceof Error ? e.message : String(e));
+    }
+  };
+
 
   const publish = async () => {
     setError(null);
@@ -983,6 +1153,373 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
         </select>
         {error ? <ErrorState message={error} /> : null}
       </Card>
+
+      {/* Phase 04 §E: Schedules */}
+      <Card title="Schedules & Heartbeats (Cron Automations)">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Configure recurrent triggers and periodic prompt executions for autonomous agent operation.
+        </p>
+        {schedules.length === 0 ? (
+          <EmptyState>No schedules configured for this agent.</EmptyState>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            {schedules.map((s) => (
+              <div key={s.scheduleId} className="work-item" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={s.enabled !== false}
+                        onChange={() => handleToggleSchedule(s.scheduleId)}
+                        disabled={busy}
+                      />
+                      <Badge tone={s.enabled !== false ? "good" : "neutral"}>
+                        {s.enabled !== false ? "Enabled" : "Disabled"}
+                      </Badge>
+                    </label>
+                    <code className="mono">{s.cron}</code>
+                    <Badge tone="accent">{s.timezone ?? "UTC"}</Badge>
+                  </div>
+                  <div style={{ fontSize: 12.5, marginTop: 4 }}>Prompt: <em>{s.prompt}</em></div>
+                </div>
+                <Button size="sm" kind="danger" disabled={busy} onClick={() => handleRemoveSchedule(s.scheduleId)}>
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        {isSchedLimitReached ? (
+          <div className="notice" style={{ marginTop: 8, marginBottom: 8 }}>
+            <Badge tone="warn">Limit Reached</Badge> Schedule limit reached on current plan ({schedules.length} of {schedLimit} allowed). Remove an existing schedule to add another.
+          </div>
+        ) : null}
+        <div className="form-grid" style={{ marginTop: 10 }}>
+          <label className="form-field">
+            Cron expression
+            <input value={newCron} placeholder="0 9 * * 1-5" onChange={(e) => setNewCron(e.target.value)} disabled={busy || isSchedLimitReached} />
+          </label>
+          <label className="form-field">
+            Timezone
+            <input value={newTz} placeholder="UTC" onChange={(e) => setNewTz(e.target.value)} disabled={busy || isSchedLimitReached} />
+          </label>
+          <label className="form-field form-field-wide">
+            Execution prompt
+            <input value={newPrompt} placeholder="Analyze daily metrics and produce report" onChange={(e) => setNewPrompt(e.target.value)} disabled={busy || isSchedLimitReached} />
+          </label>
+          <div className="row-actions" style={{ alignItems: "flex-end" }}>
+            <Button
+              size="sm"
+              kind="primary"
+              disabled={busy || !newPrompt.trim() || isSchedLimitReached}
+              title={isSchedLimitReached ? "Schedule limit reached on current plan" : undefined}
+              onClick={handleAddSchedule}
+            >
+              Add schedule
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* Phase 04 §E: Subagents */}
+      <Card title="Subagent Delegation (Multi-Agent Workspace)">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Delegate tasks to peer or subordinate agents within this workspace. Agents cannot self-reference.
+        </p>
+        {subagents.length === 0 ? (
+          <EmptyState>No subagents configured.</EmptyState>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            {subagents.map((sub) => {
+              const targetAgent = mox.agents.find((a) => a.agentId === sub.agentId);
+              return (
+                <div key={sub.agentId} className="work-item" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <strong>{targetAgent?.definition.identity.displayName ?? sub.agentId}</strong>
+                    <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>({sub.delegation ?? "hierarchical"})</span>
+                  </div>
+                  <Button size="sm" kind="danger" disabled={busy} onClick={() => handleRemoveSubagent(sub.agentId)}>
+                    Remove
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="form-grid" style={{ marginTop: 10 }}>
+          <label className="form-field">
+            Delegate to agent
+            <select value={selectedSubagentId} onChange={(e) => setSelectedSubagentId(e.target.value)}>
+              <option value="">Select workspace agent…</option>
+              {mox.agents
+                .filter((a) => a.agentId !== summary.agentId && a.definition.slug !== summary.definition.slug)
+                .map((a) => (
+                  <option key={a.agentId} value={a.agentId}>
+                    {a.definition.identity.displayName} ({a.definition.identity.role ?? "agent"})
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="form-field">
+            Delegation mode
+            <select value={subagentMode} onChange={(e) => setSubagentMode(e.target.value as "ask" | "auto")}>
+              <option value="auto">Auto (automatic task delegation)</option>
+              <option value="ask">Ask (supervised / requires approval)</option>
+            </select>
+          </label>
+          <div className="row-actions" style={{ alignItems: "flex-end" }}>
+            <Button size="sm" kind="primary" disabled={busy || !selectedSubagentId} onClick={handleAddSubagent}>
+              Add subagent
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* Phase 04 §E: Skills */}
+      <Card title="Skills & Grounding Tools">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Assign modular tool skills to expand agent domain problem-solving. Only curated, registered skills are available.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+          {skills.length === 0 ? <span className="muted">No skills assigned yet.</span> : null}
+          {skills.map((sk) => {
+            const def = REGISTERED_SKILLS.find((r) => r.id === sk.skillId);
+            return (
+              <span key={sk.skillId} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                <Badge tone="neutral">{def?.label ?? sk.skillId}</Badge>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveSkill(sk.skillId)}
+                  disabled={busy}
+                  style={{ background: "none", border: "none", cursor: "pointer", padding: 0, fontSize: 11 }}
+                  aria-label={`Remove ${sk.skillId}`}
+                >
+                  ✕
+                </button>
+              </span>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <select
+            value={selectedSkillId}
+            onChange={(e) => setSelectedSkillId(e.target.value)}
+            style={{ flex: 1 }}
+            disabled={busy}
+          >
+            {REGISTERED_SKILLS.map((sk) => (
+              <option key={sk.id} value={sk.id} disabled={skills.some((s) => s.skillId === sk.id)}>
+                {sk.label} — {sk.description} {skills.some((s) => s.skillId === sk.id) ? "(assigned)" : ""}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" disabled={busy || skills.some((s) => s.skillId === selectedSkillId)} onClick={handleAddSkill}>
+            Assign skill
+          </Button>
+        </div>
+      </Card>
+
+      {/* Phase 04 §E/§H: Knowledge sources */}
+      <Card title="Knowledge Sources (RAG & Documents)">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Ground agent context in organization knowledge repositories and documentation catalogs.
+        </p>
+        {knowledgeBindings.length === 0 ? (
+          <EmptyState>No knowledge sources bound to this agent.</EmptyState>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+            {knowledgeBindings.map((kb) => {
+              const src = knowledgeList.find((k) => k.id === kb.knowledgeId);
+              return (
+                <div key={kb.knowledgeId} className="work-item" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div>
+                      <strong>{src?.name ?? kb.knowledgeId}</strong>
+                      <span style={{ marginLeft: 8 }}><Badge tone="accent">{src?.kind ?? "documents"}</Badge></span>
+                    </div>
+                    <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 6, fontSize: 12 }}>
+                      <span className="muted">Access:</span>
+                      {(["read", "search", "attach"] as const).map((perm) => (
+                        <label key={perm} style={{ display: "inline-flex", gap: 4, alignItems: "center", cursor: "pointer" }}>
+                          <input
+                            type="checkbox"
+                            checked={kb.access?.includes(perm) ?? (perm !== "attach")}
+                            onChange={() => handleToggleKnowledgeAccess(kb.knowledgeId, perm)}
+                            disabled={busy}
+                          />
+                          {perm}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <Button size="sm" kind="danger" disabled={busy} onClick={() => handleRemoveKnowledge(kb.knowledgeId)}>
+                    Unbind
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {knowledgeList.length === 0 ? (
+          <div className="notice" style={{ marginTop: 10, fontSize: 12.5 }}>
+            No organization knowledge sources registered yet. You can create document and data repositories in <Link to="/settings#knowledge">Settings → Knowledge Sources & Storage</Link>.
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <select
+              value={selectedKnowledgeId}
+              onChange={(e) => setSelectedKnowledgeId(e.target.value)}
+              style={{ flex: 1 }}
+              disabled={busy}
+            >
+              <option value="">Select organization knowledge source…</option>
+              {knowledgeList
+                .filter((k) => !knowledgeBindings.some((kb) => kb.knowledgeId === k.id))
+                .map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.name} ({k.kind})
+                  </option>
+                ))}
+            </select>
+            <Button size="sm" kind="primary" disabled={busy || !selectedKnowledgeId} onClick={handleAddKnowledge}>
+              Bind source
+            </Button>
+          </div>
+        )}
+      </Card>
+
+      {/* Phase 04 §E: Memory */}
+      <Card title="Memory & Cross-Session Recall">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Control memory isolation and contextual persistence across conversation turns.
+        </p>
+        <div className="notice" style={{ borderLeft: "3px solid var(--warn, #e6a23c)", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <Badge tone="warn">Configuration Stored Only</Badge>
+            <strong>Runtime Memory Engine Inactive</strong>
+          </div>
+          <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+            Memory scope and retention policies are validated and persisted in the canonical AgentDefinition, but persistent cross-session memory recall is not yet consumed by the active runtime engine.
+          </p>
+        </div>
+        <div className="form-grid">
+          <label className="form-field form-field-wide" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={memoryEnabled}
+              onChange={(e) => { setMemoryEnabled(e.target.checked); setDirty(true); }}
+            />
+            Enable persistent memory recall
+          </label>
+          <label className="form-field">
+            Memory scope
+            <select
+              value={memoryScope}
+              disabled={!memoryEnabled}
+              onChange={(e) => { setMemoryScope(e.target.value as "org" | "agent" | "thread" | "room"); setDirty(true); }}
+            >
+              <option value="org">Organization scope (shared across agents in org)</option>
+              <option value="agent">Agent scope (isolated to this agent)</option>
+              <option value="thread">Thread scope (isolated to single thread)</option>
+              <option value="room">Room scope (shared in multi-agent room)</option>
+            </select>
+          </label>
+          <label className="form-field">
+            Retention period (days)
+            <input
+              type="number"
+              min={1}
+              max={365}
+              value={memoryRetentionDays ?? ""}
+              placeholder="30"
+              disabled={!memoryEnabled}
+              onChange={(e) => {
+                const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                setMemoryRetentionDays(val);
+                setDirty(true);
+              }}
+            />
+          </label>
+        </div>
+      </Card>
+
+      {/* Phase 04 §F: Voice */}
+      <Card title="Voice Synthesis (ElevenLabs Integration)">
+        <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
+          Enable speech synthesis for spoken responses and conversational room participation.
+        </p>
+        {!voiceEntitled ? (
+          <div className="notice" style={{ marginBottom: 12 }}>
+            <Badge tone="warn">Not Entitled</Badge> Voice synthesis is not included in your current plan entitlement (voice minutes quota is 0).
+          </div>
+        ) : null}
+        <div className="form-grid">
+          <label className="form-field form-field-wide" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={voiceEnabled}
+              onChange={(e) => { setVoiceEnabled(e.target.checked); setDirty(true); }}
+            />
+            Enable voice synthesis
+          </label>
+          <label className="form-field">
+            Voice personality
+            <select
+              value={selectedVoiceId}
+              disabled={!voiceEnabled}
+              onChange={(e) => { setSelectedVoiceId(e.target.value); setDirty(true); }}
+            >
+              {voices.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.label} · {v.description ?? v.provider}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="row-actions" style={{ alignItems: "flex-end" }}>
+            <Button
+              size="sm"
+              disabled={busy || !voiceEnabled || !voiceEntitled}
+              title={!voiceEntitled ? "Voice synthesis not entitled on current plan" : undefined}
+              onClick={() => void handlePreviewVoice()}
+            >
+              Synthesize audio sample
+            </Button>
+          </div>
+        </div>
+        {voicePreviewStatus ? <div className="notice" style={{ marginTop: 10 }}>{voicePreviewStatus}</div> : null}
+      </Card>
+
+      {/* Phase 04 §E: Honest Unavailable Workflows Card */}
+      <Card title="Workflow Automation Engine">
+        <FeatureUnavailable
+          label="Workflow Automations"
+          reason="The active runtime does not compose a workflow execution engine (code: not_configured). Directed multi-step workflow graphs require an external engine gateway."
+        />
+      </Card>
+
+      {/* Phase 04 §E: Honest NOT_PRODUCTIZED_BLOCKED Local Device Card */}
+      <Card title="Deployment Target: Local Device">
+        <div className="notice" style={{ borderLeft: "3px solid var(--accent-bad)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <Badge tone="bad">NOT_PRODUCTIZED_BLOCKED</Badge>
+            <strong>Local device deployment blocked</strong>
+          </div>
+          <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+            Execution on local physical devices is blocked because no local device relay daemon is composed on this customer deployment. Deployments are restricted to Cloud Sandbox, Mox Cloud, or Customer VPS.
+          </p>
+        </div>
+      </Card>
+
+      {dirty ? (
+        <div style={{ display: "flex", justifyContent: "flex-end", padding: "12px 0" }}>
+          <Button kind="primary" disabled={busy} onClick={() => void saveDraft()}>
+            {busy ? "Saving draft…" : "Save draft changes"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
+

@@ -483,7 +483,134 @@ export interface SendRunHandle {
   cancel(): void;
 }
 
+// ----------------------------------------------------------------------------
+// Phase 04: Customer Extended Capabilities Types
+// ----------------------------------------------------------------------------
+
+export type UsageStatus =
+  | "within_included"
+  | "soft_limit_warning"
+  | "hard_limit_blocked"
+  | "unlimited"
+  | "overage";
+
+export interface UsageMetricItem {
+  kind: string;
+  metric: string;
+  quantity: number;
+  unit: string;
+  includedQuantity: number;
+  remaining: number | null;
+  unlimited: boolean;
+  status: UsageStatus;
+}
+
+export interface UsageCredits {
+  included: number;
+  consumed: number;
+  remaining: number;
+}
+
+export interface UsageDetails {
+  period: {
+    start: string;
+    end: string;
+  };
+  metrics: UsageMetricItem[];
+  credits: UsageCredits;
+}
+
+export interface NotificationRouteItem {
+  eventType: string;
+  title: string;
+  category: "system" | "billing" | "servers" | "agents" | "security";
+  mandatory: boolean;
+  routes: Array<"in_app" | "email" | "web_push">;
+  muted: boolean;
+}
+
+export interface NotificationPreferencesView {
+  availableRoutes: Array<"in_app" | "email" | "web_push">;
+  items: NotificationRouteItem[];
+}
+
+export interface StoredBackupSummary {
+  backupId: string;
+  serverOrderId?: string;
+  kind: "provider_snapshot" | "s3_copy";
+  state: "pending" | "completed" | "failed" | "expired";
+  sizeBytes?: number;
+  createdAt: string;
+  completedAt?: string;
+  error?: string;
+  locationLabel: string;
+}
+
+export interface BackupsOverview {
+  availability: boolean;
+  retentionDays: number;
+  lastSuccessfulAt?: string;
+  failedCount: number;
+  backups: StoredBackupSummary[];
+  cancellationExportSummary?: {
+    eligible: boolean;
+    retentionWindowDays: number;
+    description: string;
+  };
+}
+
+export interface WorkspaceMemberView {
+  id: string;
+  userId: string;
+  email: string;
+  displayName: string;
+  role: "owner" | "admin" | "member" | "viewer";
+  joinedAt?: string;
+  createdAt: string;
+  isOwner: boolean;
+}
+
+export interface WorkspaceInvitationView {
+  id: string;
+  email: string;
+  role: "admin" | "member" | "viewer";
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface WorkspaceTeamOverview {
+  members: WorkspaceMemberView[];
+  invitations: WorkspaceInvitationView[];
+  totalUsed: number;
+  limit: number;
+}
+
+export interface CreatedWorkspaceInvitation {
+  invitationId: string;
+  email: string;
+  role: string;
+  inviteToken: string;
+  inviteUrl: string;
+  expiresAt: string;
+}
+
+export interface KnowledgeSourceItem {
+  id: string;
+  name: string;
+  kind: string;
+  lastSyncedAt?: string;
+  createdAt: string;
+}
+
+export interface VoiceOption {
+  id: string;
+  label: string;
+  description?: string;
+  provider: string;
+}
+
 export interface MoxApi {
+
   // Roster / definitions
   listAgents(): Promise<AgentSummary[]>;
   getAgent(agentId: string): Promise<AgentSummary | undefined>;
@@ -555,6 +682,7 @@ export interface MoxApi {
 
   // Usage/billing/settings
   getUsage(): Promise<UsageRow[]>;
+  getUsageDetails(): Promise<UsageDetails>;
   listInvoices(): Promise<InvoiceRow[]>;
   getEntitlements(): Promise<Entitlements>;
   listPlans(): Promise<PlanOption[]>;
@@ -570,10 +698,36 @@ export interface MoxApi {
   cancelSubscription(): Promise<{ ok: boolean; subscriptionId: string }>;
   reconcileCheckout(input: { sessionId?: string }): Promise<Record<string, unknown>>;
 
+  // Notification Preferences (Phase 04 §B)
+  getNotificationPreferences(): Promise<NotificationPreferencesView>;
+  updateNotificationPreferences(prefs: { routes: Record<string, string[]>; mutedEventTypes: string[] }): Promise<NotificationPreferencesView>;
+
+  // Backups (Phase 04 §C)
+  getBackupsOverview(): Promise<BackupsOverview>;
+  triggerManualBackup(serverOrderId?: string): Promise<{ ok: boolean; backupId: string; state: string }>;
+  testBackupRestore(backupId: string): Promise<{ ok: boolean; message: string }>;
+
+  // Team / Workspace Members (Phase 04 §D)
+  getTeamOverview(): Promise<WorkspaceTeamOverview>;
+  inviteTeamMember(email: string, role: "admin" | "member" | "viewer"): Promise<CreatedWorkspaceInvitation>;
+  revokeTeamInvitation(invitationId: string): Promise<void>;
+  updateTeamMemberRole(userId: string, role: "admin" | "member" | "viewer"): Promise<void>;
+  removeTeamMember(userId: string): Promise<void>;
+
+  // Knowledge Sources (Phase 04 §E/§H)
+  listKnowledgeSources(): Promise<KnowledgeSourceItem[]>;
+  createKnowledgeSource(input: { name: string; kind: string; config?: Record<string, unknown> }): Promise<KnowledgeSourceItem>;
+  deleteKnowledgeSource(id: string): Promise<void>;
+
+  // Voice (Phase 04 §F)
+  listVoices(): Promise<VoiceOption[]>;
+  previewVoice(voiceId: string, text: string): Promise<{ ok: boolean; sampleUrl?: string; reason?: string }>;
+
   // Personal access tokens (Phase 03 §E)
   createApiToken(input: { name: string; scopes?: string[] }): Promise<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }>;
   listApiTokens(): Promise<ApiTokenRow[]>;
   revokeApiToken(tokenId: string): Promise<void>;
+
 
   // Protected Mox Admin
   adminOverview(): Promise<AdminOverview>;

@@ -11,16 +11,25 @@ import type {
   AgentSummary,
   AgentVersionRow,
   ApiTokenRow,
+  BackupsOverview,
   BillingProviderOption,
   ChannelCatalogRow,
   CreatedApiTokenView,
+  CreatedWorkspaceInvitation,
   IntegrationCatalogRow,
+  KnowledgeSourceItem,
   ModelConnectionRow,
+  NotificationPreferencesView,
   PlanOption,
   ServerSummary,
+  StoredBackupSummary,
   SubscriptionView,
   ToolGrantRow,
+  UsageDetails,
+  WorkspaceMemberView,
+  WorkspaceTeamOverview,
 } from "../api/types.js";
+
 import type { AgentStatus } from "../domain/roster.js";
 import { channelState, integrationState, kindLabel, modelConnectionState, stateLabel } from "../domain/connections.js";
 import { bestPlanPrice, commercialStatus, moneyMinorToDisplay } from "../domain/billing.js";
@@ -340,7 +349,12 @@ export function ServersView() {
 
   return (
     <div>
-      <PageHeader title="Servers" subtitle="Compute infrastructure hosting your agents." />
+      <PageHeader
+        title="Servers"
+        subtitle="Compute infrastructure hosting your agents."
+        actions={<Link to="/backups"><Button size="sm">Manage Backups</Button></Link>}
+      />
+
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       <Panel>
@@ -1198,22 +1212,78 @@ export function ChannelsView() {
 export function UsageView() {
   const mox = useMox();
   const [usage, setUsage] = useState<Awaited<ReturnType<typeof mox.api.getUsage>>>([]);
+  const [details, setDetails] = useState<UsageDetails | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
+
   useEffect(() => {
-    void mox.api.getUsage().then((u) => { setUsage(u); setTotal(u.reduce((n, x) => n + x.quantity, 0)); setLoading(false); }).catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)); setLoading(false); });
+    let alive = true;
+    Promise.allSettled([mox.api.getUsage(), mox.api.getUsageDetails()])
+      .then(([uRes, dRes]) => {
+        if (!alive) return;
+        if (uRes.status === "fulfilled") {
+          setUsage(uRes.value);
+          setTotal(uRes.value.reduce((n, x) => n + x.quantity, 0));
+        }
+        if (dRes.status === "fulfilled") {
+          setDetails(dRes.value);
+        } else if (uRes.status === "rejected") {
+          setError(uRes.reason instanceof Error ? uRes.reason.message : String(uRes.reason));
+        }
+        setLoading(false);
+      });
+    return () => { alive = false; };
   }, [mox.api]);
 
   return (
     <div>
-      <PageHeader title="Usage" subtitle="Consumption in the current billing period." />
+      <PageHeader title="Usage" subtitle="Consumption and plan quotas in the current billing period." />
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       <section className="kpi-row" aria-label="Usage summary">
         <KpiCard label="Total measured units" value={total.toLocaleString()} hint="across this period" />
         <KpiCard label="Line items" value={usage.length} hint="distinct metrics tracked" />
+        {details?.credits ? (
+          <KpiCard
+            label="Mox AI Credits"
+            value={`${details.credits.remaining.toLocaleString()} / ${details.credits.included.toLocaleString()}`}
+            hint={`Consumed: ${details.credits.consumed.toLocaleString()}`}
+          />
+        ) : null}
+        {details?.period ? (
+          <KpiCard
+            label="Billing window"
+            value={new Date(details.period.start).toLocaleDateString()}
+            hint={`to ${new Date(details.period.end).toLocaleDateString()}`}
+          />
+        ) : null}
       </section>
+      {details?.metrics && details.metrics.length > 0 ? (
+        <Panel title="Plan Quotas & Entitlement Limits" subtitle="Authoritative limits evaluated against your current active plan">
+          <DataTable
+            head={[
+              { key: "metric", label: "Metric", render: (r) => r.metric },
+              { key: "quantity", label: "Consumed", render: (r) => `${r.quantity.toLocaleString()} ${r.unit}` },
+              { key: "included", label: "Plan Limit", render: (r) => r.unlimited ? "Unlimited" : `${r.includedQuantity.toLocaleString()} ${r.unit}` },
+              { key: "remaining", label: "Remaining", render: (r) => r.unlimited ? "∞" : r.remaining !== null ? `${r.remaining.toLocaleString()} ${r.unit}` : "—" },
+              {
+                key: "status",
+                label: "Status",
+                render: (r) => {
+                  const tone =
+                    r.status === "hard_limit_blocked" ? "bad" :
+                    r.status === "soft_limit_warning" || r.status === "overage" ? "warn" :
+                    r.status === "unlimited" ? "accent" : "good";
+                  return <Badge tone={tone}>{humanState(r.status)}</Badge>;
+                },
+              },
+            ]}
+            rows={details.metrics}
+            empty="No quota metrics available."
+          />
+        </Panel>
+      ) : null}
       <Panel title="This billing period">
         <DataTable
           head={[
@@ -1228,6 +1298,7 @@ export function UsageView() {
     </div>
   );
 }
+
 
 // ----------------------------------------------------------------------------
 // Billing
@@ -1462,8 +1533,146 @@ export function BillingView() {
 }
 
 // ----------------------------------------------------------------------------
+// Backups (customer-only)
+// ----------------------------------------------------------------------------
+
+export function BackupsView() {
+  const mox = useMox();
+  const [overview, setOverview] = useState<BackupsOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ id: string; message: string } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await mox.api.getBackupsOverview();
+      setOverview(data);
+      setLoading(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setLoading(false);
+    }
+  }, [mox.api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const triggerBackup = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mox.api.triggerManualBackup();
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const testRestore = async (backupId: string) => {
+    setBusy(true);
+    setTestResult(null);
+    try {
+      const res = await mox.api.testBackupRestore(backupId);
+      setTestResult({ id: backupId, message: res.message });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <PageHeader
+        title="Backups"
+        subtitle="Automated and manual snapshot archives for disaster recovery and offsite persistence."
+        actions={
+          <Button
+            kind="primary"
+            disabled={busy || (overview !== null && !overview.availability)}
+            title={overview !== null && !overview.availability ? "Backups not included in current plan entitlement" : undefined}
+            onClick={() => void triggerBackup()}
+          >
+            {busy ? "Backing up…" : "Create manual backup"}
+          </Button>
+        }
+      />
+
+      {error ? <ErrorState message={error} /> : null}
+      {loading ? <LoadingState /> : null}
+      {testResult ? (
+        <div className="notice" style={{ marginBottom: 16 }}>
+          <strong>Restore verification:</strong> {testResult.message} (backup <code>{testResult.id}</code>)
+        </div>
+      ) : null}
+      <section className="kpi-row" aria-label="Backup summary">
+        <KpiCard
+          label="Retention allowance"
+          value={overview ? `${overview.retentionDays} days` : "—"}
+          hint={overview?.availability ? "Active plan allowance" : "Not included in plan"}
+        />
+        <KpiCard
+          label="Last successful backup"
+          value={overview?.lastSuccessfulAt ? new Date(overview.lastSuccessfulAt).toLocaleDateString() : "Never"}
+          hint={overview?.lastSuccessfulAt ? new Date(overview.lastSuccessfulAt).toLocaleTimeString() : "No successful backups"}
+        />
+        <KpiCard
+          label="Total snapshots"
+          value={overview ? overview.backups.length : 0}
+          hint={`Failed count: ${overview?.failedCount ?? 0}`}
+        />
+      </section>
+
+      {overview?.cancellationExportSummary ? (
+        <Panel title="Cancellation & Snapshot Retention Policy">
+          <p className="muted" style={{ margin: 0 }}>
+            <strong>{overview.cancellationExportSummary.description}</strong> — Even if compute servers are canceled or torn down, snapshots remain accessible offsite throughout the {overview.cancellationExportSummary.retentionWindowDays}-day retention window for cancellation export or migration.
+          </p>
+        </Panel>
+      ) : null}
+
+      <Panel title="Stored Backups">
+        <DataTable
+          head={[
+            { key: "id", label: "Backup ID", render: (r) => <code className="mono">{r.backupId}</code> },
+            { key: "kind", label: "Kind", render: (r) => humanState(r.kind) },
+            {
+              key: "state",
+              label: "Status",
+              render: (r) => (
+                <Badge tone={r.state === "completed" ? "good" : r.state === "failed" ? "bad" : "warn"}>
+                  {humanState(r.state)}
+                </Badge>
+              ),
+            },
+            { key: "size", label: "Size", render: (r) => r.sizeBytes ? `${(r.sizeBytes / (1024 * 1024)).toFixed(1)} MB` : "—" },
+            { key: "location", label: "Storage Location", render: (r) => r.locationLabel },
+            { key: "date", label: "Created At", render: (r) => new Date(r.createdAt).toLocaleString() },
+            {
+              key: "action",
+              label: "Action",
+              render: (r) => (
+                <Button size="sm" disabled={busy || r.state !== "completed"} onClick={() => void testRestore(r.backupId)}>
+                  Verify Integrity
+                </Button>
+              ),
+            },
+          ]}
+          rows={overview?.backups ?? []}
+          empty="No backups created yet."
+        />
+      </Panel>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Settings (customer-only)
 // ----------------------------------------------------------------------------
+
 
 export function SettingsView() {
   const mox = useMox();
@@ -1506,7 +1715,200 @@ export function SettingsView() {
     // the CLI snippet generic rather than leaking an empty/incorrect URL.
   }
 
+  // Phase 04 §D: Team state
+  const [team, setTeam] = useState<WorkspaceTeamOverview | null>(null);
+  const [loadingTeam, setLoadingTeam] = useState(true);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<"admin" | "member" | "viewer">("member");
+  const [createdInvite, setCreatedInvite] = useState<CreatedWorkspaceInvitation | null>(null);
+  const [teamError, setTeamError] = useState<string | null>(null);
+
+  // Phase 04 §B: Notification preferences state
+  const [notifPrefs, setNotifPrefs] = useState<NotificationPreferencesView | null>(null);
+  const [loadingNotifs, setLoadingNotifs] = useState(true);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const [savingNotifs, setSavingNotifs] = useState(false);
+  const [notifSuccess, setNotifSuccess] = useState<string | null>(null);
+
+  // Phase 04 §E/§H: Knowledge sources & storage state
+  const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceItem[]>([]);
+  const [loadingKnowledge, setLoadingKnowledge] = useState(true);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  const [newKnowledgeName, setNewKnowledgeName] = useState("");
+  const [newKnowledgeKind, setNewKnowledgeKind] = useState("document");
+
+  const loadTeam = useCallback(async () => {
+    try {
+      setTeam(await mox.api.getTeamOverview());
+      setLoadingTeam(false);
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+      setLoadingTeam(false);
+    }
+  }, [mox.api]);
+
+  const loadNotifPrefs = useCallback(async () => {
+    try {
+      setNotifPrefs(await mox.api.getNotificationPreferences());
+      setLoadingNotifs(false);
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : String(e));
+      setLoadingNotifs(false);
+    }
+  }, [mox.api]);
+
+  const loadKnowledge = useCallback(async () => {
+    try {
+      setKnowledgeSources(await mox.api.listKnowledgeSources());
+      setLoadingKnowledge(false);
+    } catch (e) {
+      setKnowledgeError(e instanceof Error ? e.message : String(e));
+      setLoadingKnowledge(false);
+    }
+  }, [mox.api]);
+
+  useEffect(() => {
+    void loadTeam();
+    void loadNotifPrefs();
+    void loadKnowledge();
+  }, [loadTeam, loadNotifPrefs, loadKnowledge]);
+
+  const handleInvite = async () => {
+    const email = inviteEmail.trim();
+    if (!email || busy) return;
+    setBusy(true);
+    setTeamError(null);
+    try {
+      const inv = await mox.api.inviteTeamMember(email, inviteRole);
+      setCreatedInvite(inv);
+      setInviteEmail("");
+      await loadTeam();
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRevokeInvite = async (invitationId: string) => {
+    setBusy(true);
+    setTeamError(null);
+    try {
+      await mox.api.revokeTeamInvitation(invitationId);
+      await loadTeam();
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUpdateRole = async (userId: string, role: "admin" | "member" | "viewer") => {
+    setBusy(true);
+    setTeamError(null);
+    try {
+      await mox.api.updateTeamMemberRole(userId, role);
+      await loadTeam();
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRemoveMember = async (userId: string) => {
+    if (!window.confirm("Remove this team member from the workspace?")) return;
+    setBusy(true);
+    setTeamError(null);
+    try {
+      await mox.api.removeTeamMember(userId);
+      await loadTeam();
+    } catch (e) {
+      setTeamError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleRoute = (eventType: string, route: "in_app" | "email" | "web_push") => {
+    if (!notifPrefs) return;
+    setNotifPrefs({
+      ...notifPrefs,
+      items: notifPrefs.items.map((item) => {
+        if (item.eventType !== eventType) return item;
+        const exists = item.routes.includes(route);
+        const nextRoutes = exists ? item.routes.filter((r) => r !== route) : [...item.routes, route];
+        return { ...item, routes: nextRoutes };
+      }),
+    });
+  };
+
+  const toggleMute = (eventType: string) => {
+    if (!notifPrefs) return;
+    setNotifPrefs({
+      ...notifPrefs,
+      items: notifPrefs.items.map((item) => {
+        if (item.eventType !== eventType) return item;
+        if (item.mandatory) return item;
+        return { ...item, muted: !item.muted };
+      }),
+    });
+  };
+
+  const saveNotifPrefs = async () => {
+    if (!notifPrefs || savingNotifs) return;
+    setSavingNotifs(true);
+    setNotifError(null);
+    setNotifSuccess(null);
+    try {
+      const routes: Record<string, string[]> = {};
+      const mutedEventTypes: string[] = [];
+      for (const item of notifPrefs.items) {
+        routes[item.eventType] = item.routes;
+        if (item.muted) mutedEventTypes.push(item.eventType);
+      }
+      const updated = await mox.api.updateNotificationPreferences({ routes, mutedEventTypes });
+      setNotifPrefs(updated);
+      setNotifSuccess("Notification preferences saved successfully.");
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingNotifs(false);
+    }
+  };
+
+  const handleCreateKnowledge = async () => {
+    const name = newKnowledgeName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setKnowledgeError(null);
+    try {
+      await mox.api.createKnowledgeSource({ name, kind: newKnowledgeKind });
+      setNewKnowledgeName("");
+      await loadKnowledge();
+    } catch (e) {
+      setKnowledgeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteKnowledge = async (id: string) => {
+    if (!window.confirm("Delete this knowledge source? Agents referencing it will lose grounding access.")) return;
+    setBusy(true);
+    setKnowledgeError(null);
+    try {
+      await mox.api.deleteKnowledgeSource(id);
+      await loadKnowledge();
+    } catch (e) {
+      setKnowledgeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const createToken = async () => {
+
     const name = newTokenName.trim();
     if (!name || busy) return;
     setBusy(true);
@@ -1570,7 +1972,284 @@ export function SettingsView() {
         </Panel>
       </div>
 
-      <Panel title="Developer" subtitle="Personal API tokens for the Mox API.">
+      <Panel
+        id="team"
+        title="Team Members & Collaboration"
+        subtitle={team ? `${team.totalUsed} of ${team.limit} seats allocated on current plan` : "Workspace membership"}
+      >
+        <p className="muted" style={{ marginBottom: 10 }}>
+          Manage workspace members and invitations. At least one workspace owner is required at all times; owner accounts cannot be removed or demoted.
+        </p>
+        {teamError ? <ErrorState message={teamError} /> : null}
+        {createdInvite ? (
+          <div className="notice" style={{ marginBottom: 12 }}>
+            <p style={{ margin: "0 0 4px" }}><strong>Invitation generated for {createdInvite.email}:</strong></p>
+            <code className="mono">{createdInvite.inviteUrl}</code>
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>Role: {humanState(createdInvite.role)} · Expires: {new Date(createdInvite.expiresAt).toLocaleDateString()}</p>
+          </div>
+        ) : null}
+
+        <div className="form-grid" style={{ marginBottom: 16 }}>
+          <label className="form-field">
+            Email address
+            <input
+              type="email"
+              value={inviteEmail}
+              placeholder="colleague@example.com"
+              onChange={(e) => setInviteEmail(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label className="form-field">
+            Role
+            <select
+              value={inviteRole}
+              onChange={(e) => setInviteRole(e.target.value as "admin" | "member" | "viewer")}
+              disabled={busy}
+            >
+              <option value="admin">Admin (full workspace management)</option>
+              <option value="member">Member (build, deploy, run agents)</option>
+              <option value="viewer">Viewer (read-only audit access)</option>
+            </select>
+          </label>
+          <div className="row-actions" style={{ alignItems: "flex-end" }}>
+            <Button
+              kind="primary"
+              disabled={busy || !inviteEmail.trim()}
+              onClick={() => void handleInvite()}
+            >
+              {busy ? "Sending…" : "Send Invitation"}
+            </Button>
+          </div>
+        </div>
+
+        {team?.invitations && team.invitations.length > 0 ? (
+          <div style={{ marginBottom: 16 }}>
+            <h4 style={{ margin: "0 0 8px" }}>Pending Invitations</h4>
+            <DataTable
+              head={[
+                { key: "email", label: "Email" },
+                { key: "role", label: "Role", render: (r) => <Badge tone="accent">{humanState(r.role)}</Badge> },
+                { key: "expires", label: "Expires", render: (r) => new Date(r.expiresAt).toLocaleDateString() },
+                {
+                  key: "action",
+                  label: "",
+                  render: (r) => (
+                    <Button size="sm" kind="danger" disabled={busy} onClick={() => void handleRevokeInvite(r.id)}>
+                      Revoke
+                    </Button>
+                  ),
+                },
+              ]}
+              rows={team.invitations}
+              empty="No pending invitations."
+            />
+          </div>
+        ) : null}
+
+        <h4 style={{ margin: "0 0 8px" }}>Active Members</h4>
+        {loadingTeam ? <LoadingState label="Loading team members…" /> : (
+          <DataTable
+            head={[
+              { key: "name", label: "Name", render: (r) => r.displayName || r.email },
+              { key: "email", label: "Email" },
+              {
+                key: "role",
+                label: "Role",
+                render: (r) => (
+                  <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <Badge tone={r.isOwner ? "good" : "neutral"}>{humanState(r.role)}</Badge>
+                    {r.isOwner ? <small className="muted">(Owner)</small> : null}
+                  </div>
+                ),
+              },
+              { key: "joined", label: "Joined", render: (r) => r.joinedAt ? new Date(r.joinedAt).toLocaleDateString() : "—" },
+              {
+                key: "actions",
+                label: "",
+                render: (r) => {
+                  if (r.isOwner) return <span className="muted">Protected</span>;
+                  return (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <select
+                        value={r.role}
+                        onChange={(e) => void handleUpdateRole(r.userId, e.target.value as "admin" | "member" | "viewer")}
+                        disabled={busy}
+                        style={{ padding: "2px 6px", fontSize: 12 }}
+                        aria-label={`Change role for ${r.email}`}
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="member">Member</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                      <Button size="sm" kind="danger" disabled={busy} onClick={() => void handleRemoveMember(r.userId)}>
+                        Remove
+                      </Button>
+                    </div>
+                  );
+                },
+              },
+            ]}
+            rows={team?.members ?? []}
+            empty="No team members loaded."
+          />
+        )}
+      </Panel>
+
+      <Panel
+        id="notifications"
+        title="Notification Preferences"
+        subtitle="Manage routing channels and mute alert categories"
+        actions={
+          <Button
+            kind="primary"
+            size="sm"
+            disabled={savingNotifs || loadingNotifs}
+            onClick={() => void saveNotifPrefs()}
+          >
+            {savingNotifs ? "Saving…" : "Save preferences"}
+          </Button>
+        }
+      >
+        <p className="muted" style={{ marginBottom: 10 }}>
+          Configure delivery channels (in-app notifications, email, browser push). Mandatory alerts (security incidents and billing status updates) cannot be muted to ensure account security.
+        </p>
+        {notifError ? <ErrorState message={notifError} /> : null}
+        {notifSuccess ? <div className="notice" style={{ marginBottom: 12 }}>{notifSuccess}</div> : null}
+        {loadingNotifs ? <LoadingState label="Loading notification preferences…" /> : (
+          <DataTable
+            head={[
+              { key: "title", label: "Notification Event" },
+              {
+                key: "category",
+                label: "Category",
+                render: (r) => (
+                  <Badge tone={r.mandatory ? "bad" : "neutral"}>
+                    {humanState(r.category)} {r.mandatory ? "· Mandatory" : ""}
+                  </Badge>
+                ),
+              },
+              {
+                key: "routes",
+                label: "Delivery Channels",
+                render: (r) => (
+                  <div style={{ display: "inline-flex", gap: 12, alignItems: "center" }}>
+                    <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={r.routes.includes("in_app")}
+                        onChange={() => toggleRoute(r.eventType, "in_app")}
+                      />
+                      In-app
+                    </label>
+                    <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={r.routes.includes("email")}
+                        onChange={() => toggleRoute(r.eventType, "email")}
+                      />
+                      Email
+                    </label>
+                    <label style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={r.routes.includes("web_push")}
+                        onChange={() => toggleRoute(r.eventType, "web_push")}
+                      />
+                      Push
+                    </label>
+                  </div>
+                ),
+              },
+              {
+                key: "muted",
+                label: "Mute",
+                render: (r) => (
+                  r.mandatory ? (
+                    <span className="muted" style={{ fontSize: 12 }}>Required</span>
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={r.muted}
+                      onChange={() => toggleMute(r.eventType)}
+                      aria-label={`Mute ${r.title}`}
+                    />
+                  )
+                ),
+              },
+            ]}
+            rows={notifPrefs?.items ?? []}
+            empty="No notifications configured."
+          />
+        )}
+      </Panel>
+ 
+      <Panel
+        id="knowledge"
+        title="Knowledge Sources & Storage"
+        subtitle={`Storage quota: ${typeof caps.storage_gb === "number" ? `${caps.storage_gb} GB` : "10 GB"} allowance`}
+      >
+        <p className="muted" style={{ marginBottom: 10 }}>
+          Manage organization knowledge resources and document stores for agent context grounding (RAG). Note: This persistent knowledge storage is distinct from isolated agent container execution scratchpads.
+        </p>
+        {knowledgeError ? <ErrorState message={knowledgeError} /> : null}
+        <div className="form-grid" style={{ marginBottom: 16 }}>
+          <label className="form-field">
+            Source name
+            <input
+              value={newKnowledgeName}
+              placeholder="e.g. Product Documentation, API Reference"
+              onChange={(e) => setNewKnowledgeName(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label className="form-field">
+            Source kind
+            <select
+              value={newKnowledgeKind}
+              onChange={(e) => setNewKnowledgeKind(e.target.value)}
+              disabled={busy}
+            >
+              <option value="document">Document catalog (PDF, Markdown, Text)</option>
+              <option value="website">Web crawl & scraped knowledge</option>
+              <option value="api">External API schema / OpenAPI</option>
+              <option value="database">Structured data / database dictionary</option>
+            </select>
+          </label>
+          <div className="row-actions" style={{ alignItems: "flex-end" }}>
+            <Button
+              kind="primary"
+              disabled={busy || !newKnowledgeName.trim()}
+              onClick={() => void handleCreateKnowledge()}
+            >
+              {busy ? "Adding…" : "Add Knowledge Source"}
+            </Button>
+          </div>
+        </div>
+        {loadingKnowledge ? <LoadingState label="Loading knowledge sources…" /> : (
+          <DataTable
+            head={[
+              { key: "name", label: "Name" },
+              { key: "kind", label: "Kind", render: (r) => <Badge tone="accent">{r.kind}</Badge> },
+              { key: "created", label: "Created", render: (r) => new Date(r.createdAt).toLocaleDateString() },
+              { key: "synced", label: "Last Synced", render: (r) => r.lastSyncedAt ? new Date(r.lastSyncedAt).toLocaleString() : "—" },
+              {
+                key: "actions",
+                label: "",
+                render: (r) => (
+                  <Button size="sm" kind="danger" disabled={busy} onClick={() => void handleDeleteKnowledge(r.id)}>
+                    Delete
+                  </Button>
+                ),
+              },
+            ]}
+            rows={knowledgeSources}
+            empty="No knowledge sources registered yet."
+          />
+        )}
+      </Panel>
+
+      <Panel id="developer" title="Developer" subtitle="Personal API tokens for the Mox API.">
         <p className="muted" style={{ marginBottom: 10 }}>
           Tokens grant access scoped to you and your workspace. The plaintext value is shown once at creation — store it somewhere safe.
         </p>

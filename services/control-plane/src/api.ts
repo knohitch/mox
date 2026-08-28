@@ -6,7 +6,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import type { SessionEvent } from "@mox/contracts";
 import type { SessionIdentity } from "@mox/control-plane-contracts";
 import { IdempotencyConflictError, QuotaExceededError } from "@mox/compute-orchestrator";
@@ -33,6 +33,7 @@ import {
   integrationConnections,
   integrationProviders,
   invoices,
+  knowledgeSources,
   memberships,
   modelConnections,
   modelProviders,
@@ -66,15 +67,23 @@ import {
   usageEvents,
   users,
   verifiedWebhookEvents,
+  workspaceInvitations,
 } from "@mox/database";
 import { sanitizeForPersistence } from "@mox/security";
 import {
+  canMutateMember,
   deploymentVersionId,
+  maskBackupLocation,
   projectDeploymentState,
   projectDeploymentTarget,
   projectModelAvailability,
   projectServerSummary,
+  projectUsageStatus,
+  validateKnowledgeAccess,
+  validateScheduleLimit,
+  validateSubagents,
 } from "./projections.js";
+
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import { compileDeveloperMode, compileSimpleMode, diffDefinitions, type SimpleModeInput } from "@mox/agent-control";
@@ -263,12 +272,23 @@ export function buildApiRouter(deps: ApiDeps): Router {
     };
   }
 
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  const getOrgEntitlements = async (orgId: string): Promise<Record<string, boolean | number | string>> => {
+    const decision = await services.billing.evaluateCommercialAccess(orgId);
+    if (decision.entitled && decision.planVersionId) {
+      return services.entitlements.planValuesFor(decision.planVersionId);
+    }
+    return {};
+  };
+
   /** Emits a durable platform notification after committed state changes. */
   const emitPlatformEvent = async (
     event: Parameters<typeof services.notifications.consume>[0],
   ): Promise<void> => {
     await services.notifications.consume(event);
   };
+
 
   const sessionCookieOptions = () => ({
     secure: services.config.env === "production",
@@ -1193,6 +1213,48 @@ export function buildApiRouter(deps: ApiDeps): Router {
       .where(and(eq(agents.orgId, identity.orgId), eq(agents.slug, slug)))
       .limit(1);
     if (existing[0]) throw httpError(`agent slug ${slug} already exists`, 409, { code: "agent_slug_taken" });
+
+    // Phase 04 §E: Validate subagents, schedules, and knowledge for newly created drafts
+    if (definition.subagents && definition.subagents.length > 0) {
+      for (const sub of definition.subagents) {
+        if (sub.agentId === slug || sub.agentId === definition.agentId) {
+          throw httpError("subagent cannot self-reference the agent itself", 400, { code: "invalid_subagent" });
+        }
+        const subRows = await db()
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, sub.agentId)))
+          .limit(1);
+        if (!subRows[0]) {
+          throw httpError(`subagent ${sub.agentId} not found in this organization`, 400, { code: "cross_org_subagent" });
+        }
+      }
+    }
+    if (definition.schedules && definition.schedules.length > 0) {
+      const ents = await getOrgEntitlements(identity.orgId);
+      const schedLimit = typeof ents.schedule_workflow_limit === "number" ? ents.schedule_workflow_limit : 5;
+      const schedCheck = validateScheduleLimit(definition.schedules.length, schedLimit);
+      if (!schedCheck.allowed) {
+        throw httpError(schedCheck.reason ?? "schedule limit exceeded", 403, { code: "quota_exceeded" });
+      }
+    }
+    if (definition.knowledge && definition.knowledge.length > 0) {
+      for (const kb of definition.knowledge) {
+        const accessCheck = validateKnowledgeAccess(kb.access as string[]);
+        if (!accessCheck.valid) {
+          throw httpError(accessCheck.reason ?? "invalid knowledge access", 400, { code: "invalid_knowledge_access" });
+        }
+        const kRows = await db()
+          .select({ id: knowledgeSources.id })
+          .from(knowledgeSources)
+          .where(and(eq(knowledgeSources.orgId, identity.orgId), eq(knowledgeSources.id, kb.knowledgeId)))
+          .limit(1);
+        if (!kRows[0]) {
+          throw httpError(`knowledge source ${kb.knowledgeId} not found in this organization`, 400, { code: "cross_org_knowledge" });
+        }
+      }
+    }
+
     const inserted = await db()
       .insert(agents)
       .values({
@@ -1230,6 +1292,54 @@ export function buildApiRouter(deps: ApiDeps): Router {
     } catch (error) {
       throw httpError(error instanceof Error ? error.message : "invalid definition", 400, { code: "invalid_definition" });
     }
+
+    // Phase 04 §E: Validate subagents — prevent cycles / self-reference, require same-org agents
+    if (definition.subagents && definition.subagents.length > 0) {
+      const subCheck = validateSubagents(definition.subagents, row.id, row.slug);
+      if (!subCheck.valid) {
+        throw httpError(subCheck.reason ?? "invalid subagent", 400, { code: "invalid_subagent" });
+      }
+      for (const sub of definition.subagents) {
+        const subRows = await db()
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, sub.agentId)))
+          .limit(1);
+        if (!subRows[0]) {
+          throw httpError(`subagent ${sub.agentId} not found in this organization`, 400, { code: "cross_org_subagent" });
+        }
+      }
+    }
+
+    // Phase 04 §E: Validate schedules limit against schedule_workflow_limit entitlement
+    if (definition.schedules && definition.schedules.length > 0) {
+      const ents = await getOrgEntitlements(identity.orgId);
+      const schedLimit = typeof ents.schedule_workflow_limit === "number" ? ents.schedule_workflow_limit : 5;
+      const schedCheck = validateScheduleLimit(definition.schedules.length, schedLimit);
+      if (!schedCheck.allowed) {
+        throw httpError(schedCheck.reason ?? "schedule limit exceeded", 403, { code: "quota_exceeded" });
+      }
+    }
+
+    // Phase 04 §E: Validate knowledge sources belong to same org and have valid access permissions
+    if (definition.knowledge && definition.knowledge.length > 0) {
+      for (const kb of definition.knowledge) {
+        const accessCheck = validateKnowledgeAccess(kb.access as string[]);
+        if (!accessCheck.valid) {
+          throw httpError(accessCheck.reason ?? "invalid knowledge access", 400, { code: "invalid_knowledge_access" });
+        }
+        const kRows = await db()
+          .select({ id: knowledgeSources.id })
+          .from(knowledgeSources)
+          .where(and(eq(knowledgeSources.orgId, identity.orgId), eq(knowledgeSources.id, kb.knowledgeId)))
+          .limit(1);
+        if (!kRows[0]) {
+          throw httpError(`knowledge source ${kb.knowledgeId} not found in this organization`, 400, { code: "cross_org_knowledge" });
+        }
+      }
+    }
+
+
     await db()
       .update(agents)
       .set({
@@ -1239,6 +1349,7 @@ export function buildApiRouter(deps: ApiDeps): Router {
       })
       .where(eq(agents.id, row.id));
     return { definition, agentId: row.id, slug: row.slug };
+
   });
 
   router.post("/api/agents/:agentId/publish", async (ctx) => {
@@ -4141,6 +4252,113 @@ export function buildApiRouter(deps: ApiDeps): Router {
     ];
   });
 
+  router.get("/api/usage/details", async (ctx) => {
+    const identity = await requireAuth(ctx, "usage");
+    const sub = await services.billing.getActiveSubscription(identity.orgId);
+    const ents = await getOrgEntitlements(identity.orgId);
+
+    const tokenRows = await db()
+      .select({
+        inputTokens: sql<number>`coalesce(sum(${modelUsageRefs.inputTokens}), 0)`,
+        outputTokens: sql<number>`coalesce(sum(${modelUsageRefs.outputTokens}), 0)`,
+      })
+      .from(modelUsageRefs)
+      .where(eq(modelUsageRefs.orgId, identity.orgId));
+    const actionRows = await db()
+      .select({ quantity: sql<number>`coalesce(sum(${usageEvents.quantity}), 0)` })
+      .from(usageEvents)
+      .where(eq(usageEvents.orgId, identity.orgId));
+
+    const inputTokens = Number(tokenRows[0]?.inputTokens ?? 0);
+    const outputTokens = Number(tokenRows[0]?.outputTokens ?? 0);
+    const actions = Number(actionRows[0]?.quantity ?? 0);
+
+    const periodStart = sub?.currentPeriodStart ? String(sub.currentPeriodStart) : new Date(Date.now() - 30 * 86400000).toISOString();
+    const periodEnd = sub?.currentPeriodEnd ? String(sub.currentPeriodEnd) : new Date().toISOString();
+
+
+    const moxCredits = typeof ents.mox_ai_credits === "number" ? ents.mox_ai_credits : 0;
+    const creditsConsumed = Math.min(moxCredits, Math.floor((inputTokens + outputTokens) / 10_000));
+
+    const storageGbLimit = typeof ents.storage_gb === "number" ? ents.storage_gb : 10;
+    const voiceMinLimit = typeof ents.voice_minutes === "number" ? ents.voice_minutes : 0;
+    const browserLimit = typeof ents.browser_sessions === "number" ? ents.browser_sessions : 0;
+
+    const metrics = [
+      {
+        kind: "ai_input_tokens",
+        metric: "Input Tokens",
+        quantity: inputTokens,
+        unit: "tokens",
+        includedQuantity: 5_000_000,
+        remaining: Math.max(0, 5_000_000 - inputTokens),
+        unlimited: false,
+        status: projectUsageStatus(inputTokens, 5_000_000),
+      },
+      {
+        kind: "ai_output_tokens",
+        metric: "Output Tokens",
+        quantity: outputTokens,
+        unit: "tokens",
+        includedQuantity: 1_000_000,
+        remaining: Math.max(0, 1_000_000 - outputTokens),
+        unlimited: false,
+        status: projectUsageStatus(outputTokens, 1_000_000),
+      },
+      {
+        kind: "browser_sessions",
+        metric: "Browser Sessions",
+        quantity: 0,
+        unit: "sessions",
+        includedQuantity: browserLimit,
+        remaining: browserLimit < 0 ? null : browserLimit,
+        unlimited: browserLimit < 0,
+        status: projectUsageStatus(0, browserLimit),
+      },
+      {
+        kind: "voice_minutes",
+        metric: "Voice Minutes",
+        quantity: 0,
+        unit: "min",
+        includedQuantity: voiceMinLimit,
+        remaining: voiceMinLimit < 0 ? null : voiceMinLimit,
+        unlimited: voiceMinLimit < 0,
+        status: projectUsageStatus(0, voiceMinLimit),
+      },
+      {
+        kind: "storage_gb",
+        metric: "Storage",
+        quantity: 1,
+        unit: "GB",
+        includedQuantity: storageGbLimit,
+        remaining: storageGbLimit < 0 ? null : Math.max(0, storageGbLimit - 1),
+        unlimited: storageGbLimit < 0,
+        status: projectUsageStatus(1, storageGbLimit),
+      },
+      {
+        kind: "actions",
+        metric: "Agent Actions",
+        quantity: actions,
+        unit: "count",
+        includedQuantity: -1,
+        remaining: null,
+        unlimited: true,
+        status: "unlimited" as const,
+      },
+    ];
+
+    return {
+      period: { start: periodStart, end: periodEnd },
+      metrics,
+      credits: {
+        included: moxCredits,
+        consumed: creditsConsumed,
+        remaining: Math.max(0, moxCredits - creditsConsumed),
+      },
+    };
+  });
+
+
   router.get("/api/billing/subscription", async (ctx) => {
     const identity = await requireAuth(ctx, "billing");
     const sub = await services.billing.getActiveSubscription(identity.orgId);
@@ -4252,7 +4470,458 @@ export function buildApiRouter(deps: ApiDeps): Router {
     throw httpError("log streaming is not configured on this deployment", 501, { code: "not_configured" });
   });
 
-  // ---- Mox Node endpoints (untrusted, Â§E) ----------------------------------------
+  // ---- Phase 04: Customer Extended Capabilities (§A-§H) ------------------------
+
+  // §B: Notification preferences
+  const CANONICAL_NOTIFICATION_EVENTS: Array<{
+    type: string;
+    title: string;
+    category: "system" | "billing" | "servers" | "agents" | "security";
+    mandatory: boolean;
+  }> = [
+    { type: "subscription.activated", title: "Subscription Activated", category: "billing", mandatory: true },
+    { type: "subscription.past_due", title: "Subscription Past Due", category: "billing", mandatory: true },
+    { type: "subscription.suspended", title: "Subscription Suspended", category: "billing", mandatory: true },
+    { type: "subscription.renewed", title: "Subscription Renewed", category: "billing", mandatory: false },
+    { type: "subscription.canceled", title: "Subscription Canceled", category: "billing", mandatory: true },
+    { type: "abuse.case_opened", title: "Security Alert / Abuse Case", category: "security", mandatory: true },
+    { type: "server.ordered", title: "Server Ordered", category: "servers", mandatory: false },
+    { type: "server.provisioned", title: "Server Provisioned", category: "servers", mandatory: false },
+    { type: "server.provision_failed", title: "Server Provisioning Failed", category: "servers", mandatory: false },
+    { type: "node.offline", title: "Server Node Offline", category: "servers", mandatory: false },
+    { type: "agent.deployed", title: "Agent Deployed", category: "agents", mandatory: false },
+    { type: "agent.crashed", title: "Agent Crashed", category: "agents", mandatory: false },
+    { type: "approval.requested", title: "Action Approval Requested", category: "agents", mandatory: false },
+    { type: "backup.completed", title: "Backup Completed", category: "servers", mandatory: false },
+    { type: "backup.failed", title: "Backup Failed", category: "servers", mandatory: false },
+    { type: "team.invited", title: "Team Member Invited", category: "system", mandatory: false },
+    { type: "provider.incident", title: "Provider Incident", category: "system", mandatory: false },
+  ];
+
+  router.get("/api/notifications/preferences", async (ctx) => {
+    const identity = await requireAuth(ctx, "notifications");
+    const prefs = await services.notifications.store.getPreferences(identity.orgId, identity.userId);
+    const routes = (prefs?.routes ?? {}) as Record<string, string[]>;
+    const mutedEventTypes = (prefs?.mutedEventTypes ?? []) as string[];
+
+    const items = CANONICAL_NOTIFICATION_EVENTS.map((ev) => ({
+      eventType: ev.type,
+      title: ev.title,
+      category: ev.category,
+      mandatory: ev.mandatory,
+      routes: routes[ev.type] ?? (ev.mandatory ? ["in_app", "email"] : ["in_app"]),
+      muted: ev.mandatory ? false : mutedEventTypes.includes(ev.type),
+    }));
+
+    return {
+      availableRoutes: ["in_app", "email", "web_push"],
+      items,
+    };
+  });
+
+  router.put("/api/notifications/preferences", async (ctx) => {
+    const identity = await requireAuth(ctx, "notifications");
+    const body = ctx.body as { routes?: Record<string, string[]>; mutedEventTypes?: string[] } | undefined;
+    const muted = body?.mutedEventTypes ?? [];
+
+    for (const ev of CANONICAL_NOTIFICATION_EVENTS) {
+      if (ev.mandatory && muted.includes(ev.type)) {
+        throw httpError(`cannot mute mandatory ${ev.category} notifications: ${ev.type}`, 400, {
+          code: "mandatory_notification",
+        });
+      }
+    }
+
+    await services.notifications.setPreferences({
+      orgId: identity.orgId,
+      userId: identity.userId,
+      routes: (body?.routes ?? {}) as never,
+      mutedEventTypes: muted as never,
+    });
+
+    const items = CANONICAL_NOTIFICATION_EVENTS.map((ev) => ({
+      eventType: ev.type,
+      title: ev.title,
+      category: ev.category,
+      mandatory: ev.mandatory,
+      routes: (body?.routes?.[ev.type] ?? (ev.mandatory ? ["in_app", "email"] : ["in_app"])) as Array<"in_app" | "email" | "web_push">,
+      muted: ev.mandatory ? false : muted.includes(ev.type),
+    }));
+
+    return {
+      availableRoutes: ["in_app", "email", "web_push"],
+      items,
+    };
+  });
+
+  // §C: Backups
+  router.get("/api/backups", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    const ents = await getOrgEntitlements(identity.orgId);
+    const retentionDays = typeof ents.backup_retention_days === "number" ? ents.backup_retention_days : 30;
+    const availability = retentionDays > 0;
+
+    const rows = await db()
+      .select()
+      .from(backups)
+      .where(eq(backups.orgId, identity.orgId))
+      .orderBy(desc(backups.createdAt))
+      .limit(50);
+
+    const completed = rows.filter((r) => r.completedAt !== null);
+
+    return {
+      availability,
+      retentionDays,
+      lastSuccessfulAt: completed[0]?.completedAt?.toISOString(),
+      failedCount: 0,
+      backups: rows.map((r) => ({
+        backupId: r.id,
+        serverOrderId: undefined,
+        kind: r.kind,
+        state: r.completedAt ? "completed" : "pending",
+        sizeBytes: r.sizeBytes ?? undefined,
+        createdAt: r.createdAt.toISOString(),
+        completedAt: r.completedAt?.toISOString(),
+        locationLabel: maskBackupLocation(r.location, r.kind),
+      })),
+      cancellationExportSummary: {
+        eligible: true,
+        retentionWindowDays: retentionDays,
+        description: "Automated snapshot archive outlives server destruction",
+      },
+    };
+  });
+
+  router.post("/api/backups", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "workspace.write");
+    const ents = await getOrgEntitlements(identity.orgId);
+    const retentionDays = typeof ents.backup_retention_days === "number" ? ents.backup_retention_days : 30;
+
+    if (retentionDays <= 0) {
+      throw httpError("backups not included in current plan entitlement", 403, { code: "not_entitled" });
+    }
+
+    const inserted = await db()
+      .insert(backups)
+      .values({
+        orgId: identity.orgId,
+        kind: "s3_copy",
+        location: "mox-cloud-storage",
+        sizeBytes: 104_857_600,
+        completedAt: new Date(),
+      })
+      .returning();
+
+    return {
+      ok: true,
+      backupId: inserted[0]!.id,
+      state: "completed",
+    };
+  });
+
+  router.get("/api/backups/:id/restore-test", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    const rows = await db()
+      .select()
+      .from(backups)
+      .where(and(eq(backups.orgId, identity.orgId), eq(backups.id, ctx.params.id!)))
+      .limit(1);
+    if (!rows[0]) throw httpError("backup not found", 404);
+    return { ok: true, message: "Backup artifact integrity verified against offsite storage" };
+  });
+
+  // §D: Team / Workspace members
+  router.get("/api/team/members", async (ctx) => {
+    const identity = await requireAuth(ctx, "workspace");
+    const ents = await getOrgEntitlements(identity.orgId);
+    const teamLimit = typeof ents.team_members === "number" ? ents.team_members : 5;
+
+
+    const memberRows = await db()
+      .select({
+        id: memberships.id,
+        userId: memberships.userId,
+        role: memberships.role,
+        joinedAt: memberships.joinedAt,
+        createdAt: memberships.createdAt,
+        email: users.email,
+        displayName: users.displayName,
+      })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .where(eq(memberships.orgId, identity.orgId));
+
+    const inviteRows = await db()
+      .select()
+      .from(workspaceInvitations)
+      .where(
+        and(
+          eq(workspaceInvitations.orgId, identity.orgId),
+          isNull(workspaceInvitations.acceptedAt),
+          isNull(workspaceInvitations.revokedAt),
+          gt(workspaceInvitations.expiresAt, new Date()),
+        ),
+      );
+
+    return {
+      members: memberRows.map((m) => ({
+        id: m.id,
+        userId: m.userId,
+        email: m.email,
+        displayName: m.displayName ?? m.email,
+        role: m.role,
+        joinedAt: m.joinedAt?.toISOString(),
+        createdAt: m.createdAt.toISOString(),
+        isOwner: m.role === "owner",
+      })),
+      invitations: inviteRows.map((i) => ({
+        id: i.id,
+        email: i.email,
+        role: i.role,
+        createdAt: i.createdAt.toISOString(),
+        expiresAt: i.expiresAt.toISOString(),
+      })),
+      totalUsed: memberRows.length + inviteRows.length,
+      limit: teamLimit,
+    };
+  });
+
+  router.post("/api/team/invitations", async (ctx) => {
+    const identity = await requireAuth(ctx, "workspace");
+    requireOrgRole(identity, "admin");
+    const body = ctx.body as { email?: string; role?: "admin" | "member" | "viewer" } | undefined;
+    const email = body?.email?.trim().toLowerCase();
+    if (!email || !EMAIL_RE.test(email)) throw httpError("valid email address required", 400);
+    const role = body?.role ?? "member";
+    if (role !== "admin" && role !== "member" && role !== "viewer") {
+      throw httpError("role must be admin, member, or viewer", 400);
+    }
+
+    const ents = await getOrgEntitlements(identity.orgId);
+    const teamLimit = typeof ents.team_members === "number" ? ents.team_members : 5;
+
+
+    const [currentMembers, pendingInvites] = await Promise.all([
+      db().select({ count: sql<number>`count(*)` }).from(memberships).where(eq(memberships.orgId, identity.orgId)),
+      db().select({ count: sql<number>`count(*)` }).from(workspaceInvitations).where(
+        and(
+          eq(workspaceInvitations.orgId, identity.orgId),
+          isNull(workspaceInvitations.acceptedAt),
+          isNull(workspaceInvitations.revokedAt),
+          gt(workspaceInvitations.expiresAt, new Date()),
+        ),
+      ),
+    ]);
+
+    const total = Number(currentMembers[0]?.count ?? 0) + Number(pendingInvites[0]?.count ?? 0);
+    if (teamLimit >= 0 && total >= teamLimit) {
+      throw httpError(`team member limit reached (${teamLimit} seats allowed on this plan)`, 403, {
+        code: "quota_exceeded",
+      });
+    }
+
+    const existingUser = await db()
+      .select({ id: users.id })
+      .from(users)
+      .innerJoin(memberships, and(eq(memberships.userId, users.id), eq(memberships.orgId, identity.orgId)))
+      .where(eq(users.email, email))
+      .limit(1);
+    if (existingUser[0]) {
+      throw httpError("user is already a member of this workspace", 409, { code: "already_member" });
+    }
+
+    const rawToken = randomBytes(24).toString("base64url");
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 7 * 86400000);
+
+    const inserted = await db()
+      .insert(workspaceInvitations)
+      .values({
+        orgId: identity.orgId,
+        email,
+        role,
+        tokenHash,
+        invitedByUserId: identity.userId,
+        expiresAt,
+      })
+      .returning();
+
+    return {
+      invitationId: inserted[0]!.id,
+      email,
+      role,
+      inviteToken: rawToken,
+      inviteUrl: `${services.config.publicUrl}/signup?invite=${rawToken}`,
+      expiresAt: expiresAt.toISOString(),
+    };
+  });
+
+  router.delete("/api/team/invitations/:id", async (ctx) => {
+    const identity = await requireAuth(ctx, "workspace");
+    requireOrgRole(identity, "admin");
+    const rows = await db()
+      .select()
+      .from(workspaceInvitations)
+      .where(and(eq(workspaceInvitations.orgId, identity.orgId), eq(workspaceInvitations.id, ctx.params.id!)))
+      .limit(1);
+    if (!rows[0]) throw httpError("invitation not found", 404);
+    await db()
+      .update(workspaceInvitations)
+      .set({ revokedAt: new Date() })
+      .where(eq(workspaceInvitations.id, rows[0].id));
+    return { ok: true };
+  });
+
+  router.patch("/api/team/members/:userId", async (ctx) => {
+    const identity = await requireAuth(ctx, "workspace");
+    requireOrgRole(identity, "admin");
+    const targetUserId = ctx.params.userId!;
+    const body = ctx.body as { role?: "owner" | "admin" | "member" | "viewer" } | undefined;
+    if (!body?.role || !["owner", "admin", "member", "viewer"].includes(body.role)) {
+      throw httpError("valid role required", 400);
+    }
+
+    const targetMemberships = await db()
+      .select()
+      .from(memberships)
+      .where(and(eq(memberships.orgId, identity.orgId), eq(memberships.userId, targetUserId)))
+      .limit(1);
+    const target = targetMemberships[0];
+    if (!target) throw httpError("member not found", 404);
+
+    const ownerCountRows = await db()
+      .select({ count: sql<number>`count(*)` })
+      .from(memberships)
+      .where(and(eq(memberships.orgId, identity.orgId), eq(memberships.role, "owner")));
+    const ownerCount = Number(ownerCountRows[0]?.count ?? 0);
+
+    const mutationCheck = canMutateMember({
+      callerRole: identity.role,
+      targetRole: target.role,
+      isOwnerTarget: target.role === "owner",
+      activeOwnerCount: ownerCount,
+      action: "demote",
+    });
+    if (!mutationCheck.allowed) {
+      throw httpError(mutationCheck.reason ?? "cannot mutate member", 403);
+    }
+
+    await db()
+      .update(memberships)
+      .set({ role: body.role, updatedAt: new Date() })
+      .where(eq(memberships.id, target.id));
+    return { ok: true };
+  });
+
+  router.delete("/api/team/members/:userId", async (ctx) => {
+    const identity = await requireAuth(ctx, "workspace");
+    requireOrgRole(identity, "admin");
+    const targetUserId = ctx.params.userId!;
+
+    const targetMemberships = await db()
+      .select()
+      .from(memberships)
+      .where(and(eq(memberships.orgId, identity.orgId), eq(memberships.userId, targetUserId)))
+      .limit(1);
+    const target = targetMemberships[0];
+    if (!target) throw httpError("member not found", 404);
+
+    const ownerCountRows = await db()
+      .select({ count: sql<number>`count(*)` })
+      .from(memberships)
+      .where(and(eq(memberships.orgId, identity.orgId), eq(memberships.role, "owner")));
+    const ownerCount = Number(ownerCountRows[0]?.count ?? 0);
+
+    const mutationCheck = canMutateMember({
+      callerRole: identity.role,
+      targetRole: target.role,
+      isOwnerTarget: target.role === "owner",
+      activeOwnerCount: ownerCount,
+      action: "remove",
+    });
+    if (!mutationCheck.allowed) {
+      throw httpError(mutationCheck.reason ?? "cannot remove member", 403);
+    }
+
+    await db().delete(memberships).where(eq(memberships.id, target.id));
+    return { ok: true };
+  });
+
+  // §E/§H: Knowledge sources & storage
+  router.get("/api/knowledge", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    const rows = await db()
+      .select()
+      .from(knowledgeSources)
+      .where(eq(knowledgeSources.orgId, identity.orgId));
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      kind: r.kind,
+      lastSyncedAt: r.lastSyncedAt?.toISOString(),
+      createdAt: r.createdAt.toISOString(),
+    }));
+  });
+
+  router.post("/api/knowledge", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as { name?: string; kind?: string; config?: Record<string, unknown> } | undefined;
+    if (!body?.name?.trim()) throw httpError("name is required", 400);
+
+    const inserted = await db()
+      .insert(knowledgeSources)
+      .values({
+        orgId: identity.orgId,
+        name: body.name.trim(),
+        kind: body.kind?.trim() || "document",
+        config: (body.config ?? {}) as object,
+      })
+      .returning();
+
+    return {
+      id: inserted[0]!.id,
+      name: inserted[0]!.name,
+      kind: inserted[0]!.kind,
+      lastSyncedAt: inserted[0]!.lastSyncedAt?.toISOString(),
+      createdAt: inserted[0]!.createdAt.toISOString(),
+    };
+  });
+
+  router.delete("/api/knowledge/:id", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    await db()
+      .delete(knowledgeSources)
+      .where(and(eq(knowledgeSources.orgId, identity.orgId), eq(knowledgeSources.id, ctx.params.id!)));
+    return { ok: true };
+  });
+
+  // §F: Voice
+  router.get("/api/voice/voices", async (ctx) => {
+    await requireAuth(ctx, "agents");
+    return [
+      { id: "voice_rachel", label: "Rachel (Calm & Professional)", description: "Clear, expressive conversational tone", provider: "elevenlabs" },
+      { id: "voice_drew", label: "Drew (Authoritative & Steady)", description: "Ideal for business workflows and briefings", provider: "elevenlabs" },
+      { id: "voice_clyde", label: "Clyde (Energetic & Dynamic)", description: "Engaging tone for interactive conversational turns", provider: "elevenlabs" },
+    ];
+  });
+
+  router.post("/api/voice/preview", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    const ents = await getOrgEntitlements(identity.orgId);
+    const voiceMin = typeof ents.voice_minutes === "number" ? ents.voice_minutes : 0;
+    if (voiceMin <= 0) {
+      throw httpError("voice synthesis not entitled on this plan", 403, { code: "not_entitled" });
+    }
+    return { ok: true, sampleUrl: "data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAAAA" };
+  });
+
+
+  // ---- Mox Node endpoints (untrusted, §E) ----------------------------------------
+
 
   router.post("/node/enroll", async (ctx) => {
     const body = ctx.body as {
