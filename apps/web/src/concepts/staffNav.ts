@@ -20,6 +20,13 @@ export type AdminTabKey =
   | "contracts"
   | "staff";
 
+export type SupportSectionKey =
+  | "lookup"
+  | "diagnostics"
+  | "notes"
+  | "activity"
+  | "escalation";
+
 /** One capability per admin tab. Staff & Access is reserved for `admin.staff.write`. */
 export const ADMIN_TAB_CAPABILITY: Record<AdminTabKey, string> = {
   dashboard: "admin.read",
@@ -49,6 +56,22 @@ export const ADMIN_TAB_LABEL: Record<AdminTabKey, string> = {
   staff: "Staff & Access",
 };
 
+export const SUPPORT_SECTION_CAPABILITY: Record<SupportSectionKey, string> = {
+  lookup: "support.customer.lookup",
+  diagnostics: "support.customer.lookup",
+  notes: "support.ticket.write",
+  activity: "support.customer.lookup",
+  escalation: "support.escalate",
+};
+
+export const SUPPORT_SECTION_LABEL: Record<SupportSectionKey, string> = {
+  lookup: "Lookup",
+  diagnostics: "Diagnostics",
+  notes: "Notes",
+  activity: "Activity",
+  escalation: "Escalation",
+};
+
 /** A capability list grants a capability when it contains it or the wildcard. */
 export function hasSurfaceCapability(capabilities: string[], capability: string): boolean {
   return capabilities.includes("*") || capabilities.includes(capability);
@@ -72,6 +95,12 @@ export function canSupportLookup(capabilities: string[]): boolean {
 
 export function canSupportNote(capabilities: string[]): boolean {
   return hasSurfaceCapability(capabilities, "support.ticket.write");
+}
+
+export function visibleSupportSections(capabilities: string[]): SupportSectionKey[] {
+  return (Object.keys(SUPPORT_SECTION_CAPABILITY) as SupportSectionKey[]).filter((key) =>
+    hasSurfaceCapability(capabilities, SUPPORT_SECTION_CAPABILITY[key]),
+  );
 }
 
 export const SUPPORT_ROLES = ["superadmin", "platform_admin", "support_manager", "support_agent"] as const;

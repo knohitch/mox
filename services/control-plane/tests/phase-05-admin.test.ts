@@ -47,11 +47,12 @@ describe("Phase 05: Admin Surface Parity (Control Plane & Engine)", () => {
     it("custom enterprise contracts override plan defaults when active and fall back when deactivated", async () => {
       const entStore = new InMemoryEntitlementStore();
       await entStore.upsertDefinition({
-        key: "agents_limit",
+        key: "max_agents",
         valueType: "integer",
+        description: "Maximum agents",
         defaultValue: 5,
       });
-      await entStore.setPlanValues("plan_v1", { agents_limit: 10 });
+      await entStore.setPlanValues("plan_v1", { max_agents: 10 });
 
       const entService = new EntitlementService(entStore);
       const enterpriseStore = new InMemoryEnterpriseStore();
@@ -61,7 +62,7 @@ describe("Phase 05: Admin Surface Parity (Control Plane & Engine)", () => {
       const now = new Date().toISOString();
 
       // Before contract: resolves plan version value
-      const initial = await entService.resolve(orgId, "agents_limit", "plan_v1", now);
+      const initial = await entService.resolve(orgId, "max_agents", "plan_v1", now);
       expect(initial.value).toBe(10);
       expect(initial.source).toBe("plan");
 
@@ -70,16 +71,19 @@ describe("Phase 05: Admin Surface Parity (Control Plane & Engine)", () => {
         config: {
           orgId,
           contractRef: "ACME-CORP-2026",
-          entitlementValues: { agents_limit: 100 },
+          entitlementValues: { max_agents: 100 },
           active: true,
           effectiveFrom: now,
           metadata: {
             includedNodes: 5,
+            customComputeClassCodes: [],
+            privateModelSlugs: [],
             dedicatedDatabase: true,
             dedicatedRuntime: true,
             customDomains: ["corp.acme.internal"],
             auditExportEnabled: true,
             ssoSamlReady: true,
+            privateNetworkingHooks: [],
             whiteLabel: true,
           },
         },
@@ -87,7 +91,7 @@ describe("Phase 05: Admin Surface Parity (Control Plane & Engine)", () => {
       });
 
       // After contract: resolves contract override
-      const contracted = await entService.resolve(orgId, "agents_limit", "plan_v1", now);
+      const contracted = await entService.resolve(orgId, "max_agents", "plan_v1", now);
       expect(contracted.value).toBe(100);
       expect(contracted.source).toBe("custom_contract");
 
@@ -95,7 +99,7 @@ describe("Phase 05: Admin Surface Parity (Control Plane & Engine)", () => {
       await enterpriseService.deactivate({ orgId, actor: "admin_user_1" });
 
       // After deactivation: falls back to plan value
-      const postDeactivation = await entService.resolve(orgId, "agents_limit", "plan_v1", now);
+      const postDeactivation = await entService.resolve(orgId, "max_agents", "plan_v1", now);
       expect(postDeactivation.value).toBe(10);
       expect(postDeactivation.source).toBe("plan");
     });

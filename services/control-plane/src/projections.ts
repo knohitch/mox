@@ -128,6 +128,122 @@ export function projectServerSummary(order: ServerOrderView): ServerSummaryView 
   };
 }
 
+export interface SupportServerOrderView {
+  id: string;
+  orgId: string;
+  computeClassCode: string;
+  state: ServerState;
+  providerName?: string | null;
+  regionCode?: string | null;
+  attemptCount?: number;
+  lastError?: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SupportServerProjection {
+  id: string;
+  orgId: string;
+  computeClassCode: string;
+  state: ServerState;
+  providerName: string | null;
+  regionCode: string | null;
+  lifecycle: {
+    state: ServerState;
+    attemptCount: number;
+    errorSummary: string | null;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export function supportSafeErrorSummary(message: string | null | undefined): string | null {
+  if (!message?.trim()) return null;
+  const lower = message.toLowerCase();
+  if (/\b(timeout|timed out|deadline)\b/.test(lower)) return "operation timed out";
+  if (/\b(quota|capacity|limit|insufficient)\b/.test(lower)) return "provider capacity or quota issue";
+  if (/\b(auth|permission|unauthorized|forbidden|credential)\b/.test(lower)) return "provider authorization issue";
+  if (/\b(rate|429|throttle)\b/.test(lower)) return "provider rate limit issue";
+  if (/\b(network|dns|connect|connection)\b/.test(lower)) return "network connectivity issue";
+  return "server lifecycle error recorded";
+}
+
+export function supportSafeSuspensionReason(reason: string | null | undefined): string | null {
+  if (!reason?.trim()) return null;
+  const lower = reason.toLowerCase();
+  if (/\b(payment|invoice|renewal|past[_ -]?due)\b/.test(lower)) return "payment issue";
+  if (/\b(refund|dispute|chargeback)\b/.test(lower)) return "payment reversal review";
+  if (/\b(fraud|abuse|risk)\b/.test(lower)) return "trust and safety review";
+  if (/\b(compliance|policy|legal)\b/.test(lower)) return "policy review";
+  if (/\b(admin|manual|platform)\b/.test(lower)) return "manual platform hold";
+  return "subscription hold";
+}
+
+export function projectSupportServerOrder(row: SupportServerOrderView): SupportServerProjection {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    computeClassCode: row.computeClassCode,
+    state: row.state,
+    providerName: row.providerName ?? null,
+    regionCode: row.regionCode ?? null,
+    lifecycle: {
+      state: row.state,
+      attemptCount: row.attemptCount ?? 0,
+      errorSummary: supportSafeErrorSummary(row.lastError),
+    },
+    createdAt: isoString(row.createdAt),
+    updatedAt: isoString(row.updatedAt),
+  };
+}
+
+export interface SupportNodeHealthView {
+  status?: string | null;
+  version?: string | null;
+  lastHeartbeatAt?: Date | string | null;
+}
+
+export function projectSupportNodeHealth(
+  node: SupportNodeHealthView | undefined,
+  now: Date = new Date(),
+): { status: string; version: string | null; lastSeenAt: string | null; health: "not_enrolled" | "active" | "stale" | "inactive" } {
+  if (!node) {
+    return { status: "not_enrolled", version: null, lastSeenAt: null, health: "not_enrolled" };
+  }
+  const status = node.status ?? "unknown";
+  const lastSeenAt = node.lastHeartbeatAt ? isoString(node.lastHeartbeatAt) : null;
+  const lastSeenMs = node.lastHeartbeatAt ? new Date(node.lastHeartbeatAt).getTime() : 0;
+  const stale = !lastSeenMs || now.getTime() - lastSeenMs > 15 * 60_000;
+  return {
+    status,
+    version: node.version ?? null,
+    lastSeenAt,
+    health: status === "active" ? (stale ? "stale" : "active") : "inactive",
+  };
+}
+
+export const SUPPORT_NOTE_MAX_LENGTH = 4000;
+
+export function validateSupportNoteText(raw: unknown): { ok: true; note: string } | { ok: false; reason: string } {
+  if (typeof raw !== "string") return { ok: false, reason: "note is required" };
+  const note = raw.trim();
+  if (!note) return { ok: false, reason: "note is required" };
+  if (note.length > SUPPORT_NOTE_MAX_LENGTH) {
+    return { ok: false, reason: `note must be ${SUPPORT_NOTE_MAX_LENGTH} characters or less` };
+  }
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(note)) {
+    return { ok: false, reason: "note contains unsupported control characters" };
+  }
+  if (/<\s*\/?\s*(script|iframe|object|embed|img|svg|math|style|link|meta|base)\b/i.test(note)) {
+    return { ok: false, reason: "note must not contain HTML or script content" };
+  }
+  return { ok: true, note };
+}
+
+function isoString(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : value;
+}
+
 // ---- Phase 04: Extended Capabilities Projections ----------------------------
 
 export type UsageStatus =
@@ -227,5 +343,3 @@ export function validateKnowledgeAccess(
   }
   return { valid: true };
 }
-
-

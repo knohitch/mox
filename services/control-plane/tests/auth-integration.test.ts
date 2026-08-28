@@ -2925,18 +2925,135 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     it("support agent can look up customers but the projection is support-safe (no costs/credentials/ips)", async () => {
       const owner = await signupUser(`sc-${randomUUID().slice(0, 8)}@mox.test`, "scpass-12345");
       // Give the org an agent so the projection has rows to inspect.
-      const { agents } = await import("@mox/database");
+      const {
+        agentDeployments,
+        agents,
+        channelConnections,
+        channelProviders,
+        computeClasses,
+        credentialRefs,
+        dispatchedMessages,
+        integrationConnections,
+        integrationProviders,
+        modelConnections,
+        modelProviders,
+        moxNodes,
+        serverOrders,
+      } = await import("@mox/database");
       const meBody = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
-      await server.services.db.insert(agents).values({
+      const catalog = await seedCommercialSubscription(meBody.orgId, { active_concurrent_agents: 1 });
+      await server.services.db.execute(sql`
+        UPDATE subscriptions
+        SET state = 'suspended',
+            failed_renewals = 2,
+            suspension_reason = 'manual admin hold contains customer@example.com and sk_live_secret',
+            reconciliation_required = true
+        WHERE org_id = ${meBody.orgId}
+      `);
+      const [agentRow] = await server.services.db.insert(agents).values({
         orgId: meBody.orgId,
         slug: "probe-agent",
         displayName: "Probe Agent",
         status: "active",
         definition: { rows: [], when: [] },
+      }).returning({ id: agents.id });
+      await server.services.db.insert(computeClasses).values({
+        code: "SUPPORTTEST",
+        displayName: "Support test",
+        minVcpu: 1,
+        minRamGb: 2,
+        skuMap: [],
+      }).onConflictDoNothing({ target: computeClasses.code });
+      const [order] = await server.services.db.insert(serverOrders).values({
+        orgId: meBody.orgId,
+        subscriptionItemId: null,
+        computeClassCode: "SUPPORTTEST",
+        state: "error",
+        providerName: "hetzner",
+        providerInstanceId: "provider-instance-secret",
+        providerSku: "cx-secret",
+        regionCode: "fsn1",
+        hostname: "private-hostname.internal",
+        idempotencyKey: `support-${randomUUID()}`,
+        attemptCount: 3,
+        lastError: "auth failed with token sk_live_secret on 10.0.0.8",
+      }).returning({ id: serverOrders.id });
+      await server.services.db.insert(moxNodes).values({
+        orgId: meBody.orgId,
+        orderId: order!.id,
+        nodeId: `node-secret-${randomUUID()}`,
+        enrollTokenHash: "hash",
+        agentTokenHash: "node-token-secret",
+        version: "1.0.0",
+        status: "active",
       });
+      await server.services.db.insert(agentDeployments).values({
+        orgId: meBody.orgId,
+        agentId: agentRow!.id,
+        kind: "customer_vps",
+        computeInstanceId: order!.id,
+        desiredRevision: 2,
+      });
+      const [cred] = await server.services.db.insert(credentialRefs).values({
+        orgId: meBody.orgId,
+        scope: "model",
+        externalId: `support:model:${randomUUID()}`,
+        label: "credential-label-secret",
+      }).returning({ id: credentialRefs.id });
+      const [modelProvider] = await server.services.db.insert(modelProviders).values({
+        orgId: meBody.orgId,
+        slug: `support-openai-${randomUUID().slice(0, 6)}`,
+        displayName: "Support OpenAI",
+        kind: "api",
+        capabilities: { authMethods: ["api_key"] },
+      }).returning({ id: modelProviders.id });
+      await server.services.db.insert(modelConnections).values({
+        orgId: meBody.orgId,
+        providerId: modelProvider!.id,
+        credentialRefId: cred!.id,
+        connectionStatus: "configured",
+      });
+      const [integrationProvider] = await server.services.db.insert(integrationProviders).values({
+        orgId: meBody.orgId,
+        slug: `support-notion-${randomUUID().slice(0, 6)}`,
+        displayName: "Support Notion",
+        kind: "mcp",
+        config: { configFields: [{ key: "apiKey", secret: true }] },
+      }).returning({ id: integrationProviders.id });
+      await server.services.db.insert(integrationConnections).values({
+        orgId: meBody.orgId,
+        providerId: integrationProvider!.id,
+        credentialRefId: cred!.id,
+        status: "active",
+      });
+      const [channelProvider] = await server.services.db.insert(channelProviders).values({
+        orgId: meBody.orgId,
+        slug: `support-web-${randomUUID().slice(0, 6)}`,
+        displayName: "Support Web",
+        kind: "web",
+      }).returning({ id: channelProviders.id });
+      await server.services.db.insert(channelConnections).values({
+        orgId: meBody.orgId,
+        providerId: channelProvider!.id,
+        agentId: agentRow!.id,
+        status: "active",
+      });
+      await server.services.db.insert(dispatchedMessages).values({
+        id: `msg_${randomUUID()}`,
+        orgId: meBody.orgId,
+        eventType: "subscription.past_due",
+        route: "email",
+        recipient: "customer@example.com",
+        title: "Payment failed",
+        body: "Payment failed",
+        deliveryState: "failed",
+        attempts: 2,
+        lastError: "SMTP timeout with password secret-password",
+      });
+      void catalog;
 
       const agent = await seedSupportAgent();
-      const list = await call("/api/support/customers", { headers: { cookie: agent.cookie } });
+      const list = await call(`/api/support/customers?q=${encodeURIComponent(meBody.orgId)}`, { headers: { cookie: agent.cookie } });
       expect(list.status).toBe(200);
       const body = list.body as { customers: Array<Record<string, unknown>> };
       const json = JSON.stringify(body);
@@ -2947,15 +3064,47 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       expect(json).not.toContain("revenue");
       expect(json).not.toContain("providerAccountId");
       expect(json).not.toContain("providerInstanceId");
+      expect(json).not.toContain("provider-instance-secret");
       expect(json).not.toContain("rootCredentialRefId");
-      expect(json).not.toMatch(/ipv4|ipv6|hostname|sshKeyId/);
+      expect(json).not.toContain("credential-label-secret");
+      expect(json).not.toContain("private-hostname.internal");
+      expect(json).not.toContain("sk_live_secret");
+      expect(json).not.toMatch(/ipv4|ipv6|hostname|sshKeyId|providerRef/);
+      expect(body.customers[0]).toMatchObject({
+        diagnostics: {
+          subscriptionsRequiringAttention: 1,
+          serversInError: 1,
+          connectionsConfigured: 3,
+          recentNotificationFailures: 1,
+        },
+      });
 
       // Detail endpoint also safe and shows the (empty) audited note list shape.
-      const found = body.customers[0]!.orgId as string;
+      const found = meBody.orgId;
       const detail = await call(`/api/support/customers/${found}`, { headers: { cookie: agent.cookie } });
       expect(detail.status).toBe(200);
       const dJson = JSON.stringify(detail.body);
       expect(dJson).not.toContain("costMargin");
+      expect(dJson).not.toContain("provider-instance-secret");
+      expect(dJson).not.toContain("private-hostname.internal");
+      expect(dJson).not.toContain("node-secret-");
+      expect(dJson).not.toContain("node-token-secret");
+      expect(dJson).not.toContain("secret-password");
+      const detailBody = detail.body as {
+        subscriptions: Array<{ suspensionReason: string | null; reconciliationRequired: boolean }>;
+        servers: Array<{ lifecycle: { errorSummary: string | null }; nodeHealth: { health: string } }>;
+        agents: Array<{ deploymentState: string; runtimeHealth: string }>;
+        connections: { models: unknown[]; integrations: unknown[]; channels: unknown[] };
+        notificationFailures: Array<{ errorSummary: string | null }>;
+      };
+      expect(detailBody.subscriptions[0]).toMatchObject({ suspensionReason: "manual platform hold", reconciliationRequired: true });
+      expect(detailBody.servers[0]?.lifecycle.errorSummary).toBe("provider authorization issue");
+      expect(detailBody.servers[0]?.nodeHealth.health).toBe("active");
+      expect(detailBody.agents[0]).toMatchObject({ deploymentState: "failed", runtimeHealth: "active" });
+      expect(detailBody.connections.models.length).toBeGreaterThanOrEqual(1);
+      expect(detailBody.connections.integrations.length).toBeGreaterThanOrEqual(1);
+      expect(detailBody.connections.channels.length).toBeGreaterThanOrEqual(1);
+      expect(detailBody.notificationFailures[0]?.errorSummary).toBe("operation timed out");
     });
 
     it("support note write is capturable + audited with support.ticket.write", async () => {
@@ -2982,6 +3131,40 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
         .where(eq(auditEvents.orgId, meBody.orgId));
       expect(rows.some((r) => r.action === "support.note")).toBe(true);
       expect(rows.some((r) => String(r.actorType).startsWith("support:"))).toBe(true);
+    });
+
+    it("support notes validate length/markup and remain org-targeted", async () => {
+      const ownerA = await signupUser(`sn-a-${randomUUID().slice(0, 8)}@mox.test`, "snpass-12345");
+      const ownerB = await signupUser(`sn-b-${randomUUID().slice(0, 8)}@mox.test`, "snpass-12345");
+      const orgA = (await (await call("/api/me", { headers: { cookie: ownerA.cookie } })).body) as { orgId: string };
+      const orgB = (await (await call("/api/me", { headers: { cookie: ownerB.cookie } })).body) as { orgId: string };
+      const agent = await seedSupportAgent();
+
+      const tooLong = await call(`/api/support/customers/${orgA.orgId}/notes`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: agent.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ note: "x".repeat(4001) }),
+      });
+      expect(tooLong.status).toBe(400);
+
+      const markup = await call(`/api/support/customers/${orgA.orgId}/notes`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: agent.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ note: "<script>alert(1)</script>" }),
+      });
+      expect(markup.status).toBe(400);
+
+      const ok = await call(`/api/support/customers/${orgA.orgId}/notes`, {
+        method: "POST",
+        headers: { ...CSRF, cookie: agent.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ note: "Only org A should show this support note" }),
+      });
+      expect(ok.status).toBe(200);
+
+      const detailA = await call(`/api/support/customers/${orgA.orgId}`, { headers: { cookie: agent.cookie } });
+      const detailB = await call(`/api/support/customers/${orgB.orgId}`, { headers: { cookie: agent.cookie } });
+      expect(JSON.stringify(detailA.body)).toContain("Only org A should show this support note");
+      expect(JSON.stringify(detailB.body)).not.toContain("Only org A should show this support note");
     });
 
     it("authorization matrix: customer and support staff can never reach admin staff routes", async () => {

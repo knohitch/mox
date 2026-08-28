@@ -657,6 +657,19 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   min-height: 74px;
   resize: vertical;
 }
+.support-note-form {
+  grid-template-columns: 1fr;
+}
+.support-note-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.admin-form-error {
+  color: var(--bad);
+  font-size: 12px;
+}
 .admin-check {
   display: flex;
   align-items: center;

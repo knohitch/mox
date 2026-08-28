@@ -28,6 +28,7 @@ import {
   credentialRefs,
   currencies,
   customContracts,
+  dispatchedMessages,
   entitlementDefinitions,
   featureFlags,
   incidents,
@@ -79,10 +80,15 @@ import {
   projectDeploymentTarget,
   projectModelAvailability,
   projectServerSummary,
+  projectSupportNodeHealth,
+  projectSupportServerOrder,
   projectUsageStatus,
+  supportSafeErrorSummary,
+  supportSafeSuspensionReason,
   validateKnowledgeAccess,
   validateScheduleLimit,
   validateSubagents,
+  validateSupportNoteText,
 } from "./projections.js";
 
 import type { ControlPlaneServices } from "./composition.js";
@@ -959,7 +965,23 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.get("/api/support/customers", async (ctx) => {
     await requireSupportCapability(ctx, "support.customer.lookup");
     const q = (ctx.query.get("q") as string | undefined)?.trim().toLowerCase() || "";
-    const [orgRows, memberRows, subRows, serverRows, agentRows, noteRows] = await Promise.all([
+    const [
+      orgRows,
+      memberRows,
+      subRows,
+      serverRows,
+      agentRows,
+      noteRows,
+      nodeRows,
+      deploymentRows,
+      modelProviderRows,
+      modelConnectionRows,
+      integrationProviderRows,
+      integrationConnectionRows,
+      channelProviderRows,
+      channelConnectionRows,
+      notificationFailureRows,
+    ] = await Promise.all([
       db().select().from(organizations).orderBy(desc(organizations.createdAt)).limit(300),
       db()
         .select({
@@ -979,8 +1001,17 @@ export function buildApiRouter(deps: ApiDeps): Router {
           id: subscriptions.id,
           orgId: subscriptions.orgId,
           state: subscriptions.state,
+          failedRenewals: subscriptions.failedRenewals,
+          currentPeriodStart: subscriptions.currentPeriodStart,
           currentPeriodEnd: subscriptions.currentPeriodEnd,
+          trialEndsAt: subscriptions.trialEndsAt,
+          graceEndsAt: subscriptions.graceEndsAt,
+          retentionUntil: subscriptions.retentionUntil,
+          cancelAtPeriodEnd: subscriptions.cancelAtPeriodEnd,
+          suspensionReason: subscriptions.suspensionReason,
+          reconciliationRequired: subscriptions.reconciliationRequired,
           plan: products.displayName,
+          tier: products.tier,
         })
         .from(subscriptions)
         .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
@@ -997,6 +1028,22 @@ export function buildApiRouter(deps: ApiDeps): Router {
         .where(eq(auditEvents.action, "support.note"))
         .orderBy(desc(auditEvents.at))
         .limit(500),
+      db()
+        .select({ orgId: moxNodes.orgId, orderId: moxNodes.orderId, status: moxNodes.status, lastHeartbeatAt: moxNodes.lastHeartbeatAt })
+        .from(moxNodes)
+        .limit(1500),
+      db().select({ orgId: agentDeployments.orgId, agentId: agentDeployments.agentId, computeInstanceId: agentDeployments.computeInstanceId }).from(agentDeployments).limit(1500),
+      db().select({ orgId: modelProviders.orgId, id: modelProviders.id }).from(modelProviders).limit(1500),
+      db().select({ orgId: modelConnections.orgId, providerId: modelConnections.providerId, credentialRefId: modelConnections.credentialRefId, connectionStatus: modelConnections.connectionStatus }).from(modelConnections).limit(1500),
+      db().select({ orgId: integrationProviders.orgId, id: integrationProviders.id }).from(integrationProviders).limit(1500),
+      db().select({ orgId: integrationConnections.orgId, providerId: integrationConnections.providerId, credentialRefId: integrationConnections.credentialRefId, status: integrationConnections.status }).from(integrationConnections).limit(1500),
+      db().select({ orgId: channelProviders.orgId, id: channelProviders.id }).from(channelProviders).limit(1500),
+      db().select({ orgId: channelConnections.orgId, providerId: channelConnections.providerId, credentialRefId: channelConnections.credentialRefId, status: channelConnections.status }).from(channelConnections).limit(1500),
+      db()
+        .select({ orgId: dispatchedMessages.orgId })
+        .from(dispatchedMessages)
+        .where(inArray(dispatchedMessages.deliveryState, ["failed", "uncertain"]))
+        .limit(1000),
     ]);
     const filtered = (q
       ? orgRows.filter(
@@ -1015,6 +1062,19 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return {
       customers: filtered.map((org) => {
         const members = memberRows.filter((m) => m.orgId === org.id);
+        const orgSubscriptions = subRows.filter((s) => s.orgId === org.id);
+        const orgServers = serverRows.filter((s) => s.orgId === org.id);
+        const orgAgents = agentRows.filter((a) => a.orgId === org.id);
+        const orgNodes = nodeRows.filter((n) => n.orgId === org.id);
+        const orgDeployments = deploymentRows.filter((d) => d.orgId === org.id);
+        const connectionTotal =
+          modelProviderRows.filter((r) => r.orgId === org.id).length +
+          integrationProviderRows.filter((r) => r.orgId === org.id).length +
+          channelProviderRows.filter((r) => r.orgId === org.id).length;
+        const connectionConfigured =
+          modelConnectionRows.filter((r) => r.orgId === org.id && r.credentialRefId && r.connectionStatus === "configured").length +
+          integrationConnectionRows.filter((r) => r.orgId === org.id && r.credentialRefId && r.status === "active").length +
+          channelConnectionRows.filter((r) => r.orgId === org.id && r.status === "active").length;
         return {
           orgId: org.id,
           slug: org.slug,
@@ -1029,14 +1089,54 @@ export function buildApiRouter(deps: ApiDeps): Router {
             role: m.role,
             disabledAt: m.disabledAt?.toISOString() ?? null,
           })),
-          subscriptions: subRows
-            .filter((s) => s.orgId === org.id)
-            .map((s) => ({ subscriptionId: s.id, state: s.state, plan: s.plan, currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null })),
-          servers: serverRows.filter((s) => s.orgId === org.id).map(projectServerOrderForSupport),
-          agents: agentRows
-            .filter((a) => a.orgId === org.id)
-            .map((a) => ({ agentId: a.id, slug: a.slug, displayName: a.displayName, status: a.status })),
+          subscriptions: orgSubscriptions
+            .map((s) => ({
+              subscriptionId: s.id,
+              state: s.state,
+              plan: s.plan,
+              tier: s.tier,
+              currentPeriodStart: s.currentPeriodStart?.toISOString() ?? null,
+              currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null,
+              trialEndsAt: s.trialEndsAt?.toISOString() ?? null,
+              graceEndsAt: s.graceEndsAt?.toISOString() ?? null,
+              retentionUntil: s.retentionUntil?.toISOString() ?? null,
+              failedRenewals: s.failedRenewals,
+              cancelAtPeriodEnd: s.cancelAtPeriodEnd,
+              suspensionReason: supportSafeSuspensionReason(s.suspensionReason),
+              reconciliationRequired: s.reconciliationRequired,
+            })),
+          servers: orgServers.map(projectSupportServerOrder),
+          agents: orgAgents.map((a) => {
+            const deployment = orgDeployments.find((d) => d.agentId === a.id);
+            const order = deployment?.computeInstanceId ? orgServers.find((s) => s.id === deployment.computeInstanceId) : undefined;
+            const node = order ? orgNodes.find((n) => n.orderId === order.id) : undefined;
+            return {
+              agentId: a.id,
+              slug: a.slug,
+              displayName: a.displayName,
+              status: a.status,
+              deploymentState: deployment ? projectDeploymentState(order?.state, node?.lastHeartbeatAt?.toISOString()) : "not_deployed",
+            };
+          }),
           supportNoteCount: noteRows.filter((n) => n.orgId === org.id).length,
+          diagnostics: {
+            subscriptionsRequiringAttention: orgSubscriptions.filter((s) => ["past_due", "grace_period", "suspended"].includes(s.state) || s.reconciliationRequired).length,
+            serversInError: orgServers.filter((s) => s.state === "error").length,
+            nodesStaleOrMissing: orgServers.filter((s) => {
+              const node = orgNodes.find((n) => n.orderId === s.id);
+              return projectSupportNodeHealth(node).health !== "active";
+            }).length,
+            agentsDegraded: orgAgents.filter((a) => {
+              const deployment = orgDeployments.find((d) => d.agentId === a.id);
+              if (!deployment) return false;
+              const order = deployment?.computeInstanceId ? orgServers.find((s) => s.id === deployment.computeInstanceId) : undefined;
+              const node = order ? orgNodes.find((n) => n.orderId === order.id) : undefined;
+              return projectDeploymentState(order?.state, node?.lastHeartbeatAt?.toISOString()) !== "running";
+            }).length,
+            connectionsConfigured: connectionConfigured,
+            connectionsTotal: connectionTotal,
+            recentNotificationFailures: notificationFailureRows.filter((n) => n.orgId === org.id).length,
+          },
         };
       }),
     };
@@ -1051,7 +1151,23 @@ export function buildApiRouter(deps: ApiDeps): Router {
       .limit(1);
     const org = orgRows[0];
     if (!org) throw httpError(`organization ${ctx.params.orgId} not found`, 404);
-    const [memberRows, subRows, serverRows, agentRows, noteRows, recentAudit] = await Promise.all([
+    const [
+      memberRows,
+      subRows,
+      serverRows,
+      agentRows,
+      noteRows,
+      recentAudit,
+      nodeRows,
+      deploymentRows,
+      modelProviderRows,
+      modelConnectionRows,
+      integrationProviderRows,
+      integrationConnectionRows,
+      channelProviderRows,
+      channelConnectionRows,
+      notificationFailureRows,
+    ] = await Promise.all([
       db()
         .select({
           userId: users.id,
@@ -1068,8 +1184,17 @@ export function buildApiRouter(deps: ApiDeps): Router {
         .select({
           id: subscriptions.id,
           state: subscriptions.state,
+          failedRenewals: subscriptions.failedRenewals,
+          currentPeriodStart: subscriptions.currentPeriodStart,
           currentPeriodEnd: subscriptions.currentPeriodEnd,
+          trialEndsAt: subscriptions.trialEndsAt,
+          graceEndsAt: subscriptions.graceEndsAt,
+          retentionUntil: subscriptions.retentionUntil,
+          cancelAtPeriodEnd: subscriptions.cancelAtPeriodEnd,
+          suspensionReason: subscriptions.suspensionReason,
+          reconciliationRequired: subscriptions.reconciliationRequired,
           plan: products.displayName,
+          tier: products.tier,
         })
         .from(subscriptions)
         .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
@@ -1089,7 +1214,60 @@ export function buildApiRouter(deps: ApiDeps): Router {
         .where(eq(auditEvents.orgId, ctx.params.orgId!))
         .orderBy(desc(auditEvents.at))
         .limit(50),
+      db()
+        .select({
+          orderId: moxNodes.orderId,
+          status: moxNodes.status,
+          version: moxNodes.version,
+          lastHeartbeatAt: moxNodes.lastHeartbeatAt,
+        })
+        .from(moxNodes)
+        .where(eq(moxNodes.orgId, ctx.params.orgId!)),
+      db().select().from(agentDeployments).where(eq(agentDeployments.orgId, ctx.params.orgId!)),
+      db()
+        .select({ id: modelProviders.id, slug: modelProviders.slug, displayName: modelProviders.displayName, kind: modelProviders.kind })
+        .from(modelProviders)
+        .where(eq(modelProviders.orgId, ctx.params.orgId!)),
+      db().select().from(modelConnections).where(eq(modelConnections.orgId, ctx.params.orgId!)),
+      db()
+        .select({ id: integrationProviders.id, slug: integrationProviders.slug, displayName: integrationProviders.displayName, kind: integrationProviders.kind })
+        .from(integrationProviders)
+        .where(eq(integrationProviders.orgId, ctx.params.orgId!)),
+      db().select().from(integrationConnections).where(eq(integrationConnections.orgId, ctx.params.orgId!)),
+      db()
+        .select({ id: channelProviders.id, slug: channelProviders.slug, displayName: channelProviders.displayName, kind: channelProviders.kind })
+        .from(channelProviders)
+        .where(eq(channelProviders.orgId, ctx.params.orgId!)),
+      db()
+        .select({
+          id: channelConnections.id,
+          providerId: channelConnections.providerId,
+          agentId: channelConnections.agentId,
+          credentialRefId: channelConnections.credentialRefId,
+          status: channelConnections.status,
+        })
+        .from(channelConnections)
+        .where(eq(channelConnections.orgId, ctx.params.orgId!)),
+      db()
+        .select({
+          id: dispatchedMessages.id,
+          eventType: dispatchedMessages.eventType,
+          route: dispatchedMessages.route,
+          deliveryState: dispatchedMessages.deliveryState,
+          attempts: dispatchedMessages.attempts,
+          lastError: dispatchedMessages.lastError,
+          at: dispatchedMessages.at,
+        })
+        .from(dispatchedMessages)
+        .where(and(eq(dispatchedMessages.orgId, ctx.params.orgId!), inArray(dispatchedMessages.deliveryState, ["failed", "uncertain"])))
+        .orderBy(desc(dispatchedMessages.at))
+        .limit(25),
     ]);
+    const serverById = new Map(serverRows.map((s) => [s.id, s]));
+    const nodeByOrderId = new Map(nodeRows.filter((n) => n.orderId).map((n) => [n.orderId!, n]));
+    const agentNameById = new Map(agentRows.map((a) => [a.id, a.displayName]));
+    const modelConnectionsByProvider = new Map(modelConnectionRows.map((c) => [c.providerId, c]));
+    const integrationConnectionsByProvider = new Map(integrationConnectionRows.map((c) => [c.providerId, c]));
     return {
       orgId: org.id,
       slug: org.slug,
@@ -1104,19 +1282,139 @@ export function buildApiRouter(deps: ApiDeps): Router {
         joinedAt: m.joinedAt?.toISOString() ?? null,
         disabledAt: m.disabledAt?.toISOString() ?? null,
       })),
-      subscriptions: subRows.map((s) => ({ subscriptionId: s.id, state: s.state, plan: s.plan, currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null })),
-      servers: serverRows.map(projectServerOrderForSupport),
-      agents: agentRows.map((a) => ({ agentId: a.id, slug: a.slug, displayName: a.displayName, status: a.status, currentVersion: a.currentVersion })),
+      subscriptions: subRows.map((s) => ({
+        subscriptionId: s.id,
+        state: s.state,
+        plan: s.plan,
+        tier: s.tier,
+        currentPeriodStart: s.currentPeriodStart?.toISOString() ?? null,
+        currentPeriodEnd: s.currentPeriodEnd?.toISOString() ?? null,
+        trialEndsAt: s.trialEndsAt?.toISOString() ?? null,
+        graceEndsAt: s.graceEndsAt?.toISOString() ?? null,
+        retentionUntil: s.retentionUntil?.toISOString() ?? null,
+        failedRenewals: s.failedRenewals,
+        cancelAtPeriodEnd: s.cancelAtPeriodEnd,
+        suspensionReason: supportSafeSuspensionReason(s.suspensionReason),
+        reconciliationRequired: s.reconciliationRequired,
+      })),
+      servers: serverRows.map((s) => ({
+        ...projectSupportServerOrder(s),
+        nodeHealth: projectSupportNodeHealth(nodeByOrderId.get(s.id)),
+      })),
+      agents: agentRows.map((a) => {
+        const deployment = deploymentRows.find((d) => d.agentId === a.id);
+        const order = deployment?.computeInstanceId ? serverById.get(deployment.computeInstanceId) : undefined;
+        const node = order ? nodeByOrderId.get(order.id) : undefined;
+        return {
+          agentId: a.id,
+          slug: a.slug,
+          displayName: a.displayName,
+          status: a.status,
+          currentVersion: a.currentVersion,
+          deploymentKind: deployment?.kind ?? "not_deployed",
+          deploymentState: deployment ? projectDeploymentState(order?.state, node?.lastHeartbeatAt?.toISOString()) : "not_deployed",
+          desiredRevision: deployment?.desiredRevision,
+          runtimeHealth: projectSupportNodeHealth(node).health,
+        };
+      }),
+      connections: {
+        models: modelProviderRows.map((p) => {
+          const conn = modelConnectionsByProvider.get(p.id);
+          const configured = Boolean(conn?.credentialRefId);
+          return {
+            providerId: p.slug,
+            displayName: p.displayName,
+            kind: p.kind,
+            status: conn?.connectionStatus ?? "not_configured",
+            credentialConfigured: configured,
+            connected: configured && conn?.connectionStatus === "configured",
+          };
+        }),
+        integrations: integrationProviderRows.map((p) => {
+          const conn = integrationConnectionsByProvider.get(p.id);
+          const configured = Boolean(conn?.credentialRefId);
+          return {
+            integrationId: p.slug,
+            displayName: p.displayName,
+            kind: p.kind,
+            status: conn?.status ?? "not_configured",
+            credentialConfigured: configured,
+            connected: configured && conn?.status === "active",
+          };
+        }),
+        channels: channelProviderRows.flatMap((p): Array<{
+          channelId: string;
+          displayName: string;
+          kind: string;
+          status: string;
+          credentialConfigured: boolean;
+          connected: boolean;
+          boundAgentId: string | null;
+          boundAgentName: string | null;
+        }> => {
+          const rows = channelConnectionRows.filter((c) => c.providerId === p.id);
+          if (rows.length === 0) {
+            return [{
+              channelId: p.slug,
+              displayName: p.displayName,
+              kind: p.kind,
+              status: "not_configured",
+              credentialConfigured: false,
+              connected: false,
+              boundAgentId: null,
+              boundAgentName: null,
+            }];
+          }
+          return rows.map((conn) => ({
+            channelId: p.slug,
+            displayName: p.displayName,
+            kind: p.kind,
+            status: conn.status,
+            credentialConfigured: Boolean(conn.credentialRefId),
+            connected: conn.status === "active" && (p.kind === "web" || Boolean(conn.credentialRefId)),
+            boundAgentId: conn.agentId,
+            boundAgentName: agentNameById.get(conn.agentId) ?? null,
+          }));
+        }),
+      },
+      notificationFailures: notificationFailureRows.map((row) => ({
+        id: row.id,
+        eventType: row.eventType,
+        route: row.route,
+        deliveryState: row.deliveryState,
+        attempts: row.attempts,
+        errorSummary: supportSafeErrorSummary(row.lastError),
+        at: row.at.toISOString(),
+      })),
       supportNotes: noteRows.map((n) => ({ id: n.id, actorId: n.actorId, note: (n.after as { note?: string } | null)?.note ?? "", at: n.at.toISOString() })),
       recentActivity: recentAudit.map((r) => ({ id: r.id, action: r.action, at: r.at.toISOString(), actorType: r.actorType, resourceType: r.resourceType })),
+      diagnostics: {
+        subscriptionsRequiringAttention: subRows.filter((s) => ["past_due", "grace_period", "suspended"].includes(s.state) || s.reconciliationRequired).length,
+        serversInError: serverRows.filter((s) => s.state === "error").length,
+        nodesStaleOrMissing: serverRows.filter((s) => projectSupportNodeHealth(nodeByOrderId.get(s.id)).health !== "active").length,
+        agentsDegraded: agentRows.filter((a) => {
+          const deployment = deploymentRows.find((d) => d.agentId === a.id);
+          if (!deployment) return false;
+          const order = deployment?.computeInstanceId ? serverById.get(deployment.computeInstanceId) : undefined;
+          const node = order ? nodeByOrderId.get(order.id) : undefined;
+          return projectDeploymentState(order?.state, node?.lastHeartbeatAt?.toISOString()) !== "running";
+        }).length,
+        connectionsConfigured:
+          modelConnectionRows.filter((r) => r.credentialRefId && r.connectionStatus === "configured").length +
+          integrationConnectionRows.filter((r) => r.credentialRefId && r.status === "active").length +
+          channelConnectionRows.filter((r) => r.status === "active").length,
+        connectionsTotal: modelProviderRows.length + integrationProviderRows.length + channelProviderRows.length,
+        recentNotificationFailures: notificationFailureRows.length,
+      },
     };
   });
 
   router.post("/api/support/customers/:orgId/notes", async (ctx) => {
     const support = await requireSupportCapability(ctx, "support.ticket.write");
     const body = ctx.body as { note?: string } | undefined;
-    if (!body?.note?.trim()) throw httpError("note is required", 400);
-    const note = body.note.trim().slice(0, 4000);
+    const valid = validateSupportNoteText(body?.note);
+    if (!valid.ok) throw httpError(valid.reason, 400);
+    const note = valid.note;
     const orgRows = await db().select().from(organizations).where(eq(organizations.id, ctx.params.orgId!)).limit(1);
     if (!orgRows[0]) throw httpError(`organization ${ctx.params.orgId} not found`, 404);
     await appendSupportAudit(support, {
@@ -3236,8 +3534,9 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.post("/api/admin/customers/:orgId/support-notes", async (ctx) => {
     const admin = await requireAdminCapability(ctx, "admin.support.write");
     const body = ctx.body as { note?: string } | undefined;
-    if (!body?.note?.trim()) throw httpError("note is required", 400);
-    const note = body.note.trim().slice(0, 4000);
+    const valid = validateSupportNoteText(body?.note);
+    if (!valid.ok) throw httpError(valid.reason, 400);
+    const note = valid.note;
     await appendAdminAudit(admin, {
       action: "support.note",
       resourceType: "organization",

@@ -510,6 +510,9 @@ importers:
       '@mox/compute-providers':
         specifier: workspace:*
         version: link:../../packages/compute-providers
+      '@mox/feature-flags':
+        specifier: workspace:*
+        version: link:../../packages/feature-flags
       typescript:
         specifier: ^5.9.2
         version: 5.9.3

@@ -7,7 +7,13 @@ import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
 import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./views/AuthPages.js";
 import { Badge, Card, EmptyState } from "./ui/primitives.js";
-import { canSupportLookup, canSupportNote } from "./concepts/staffNav.js";
+import {
+  SUPPORT_SECTION_LABEL,
+  canSupportLookup,
+  canSupportNote,
+  visibleSupportSections,
+  type SupportSectionKey,
+} from "./concepts/staffNav.js";
 import type { SupportCustomer, SupportCustomerDetail } from "./api/types.js";
 import {
   BackupsView,
@@ -212,19 +218,35 @@ function StaffShell({ surface, children }: { surface: "admin" | "support"; child
 }
 
 function SupportConsole() {
+  const NOTE_MAX_LENGTH = 4000;
+  const NOTE_HTML_RE = /<\s*\/?\s*(script|iframe|object|embed|img|svg|math|style|link|meta|base)\b/i;
   const { api, staffSession } = useMox();
   const capabilities = staffSession?.capabilities ?? [];
   const canLookup = canSupportLookup(capabilities);
   const canNote = canSupportNote(capabilities);
+  const sections = visibleSupportSections(capabilities);
   const [query, setQuery] = useState("");
   const [customers, setCustomers] = useState<SupportCustomer[]>([]);
   const [selected, setSelected] = useState<SupportCustomerDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [section, setSection] = useState<SupportSectionKey>("lookup");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (sections.length > 0 && !sections.includes(section)) setSection(sections[0]!);
+  }, [section, sections]);
+
   if (!staffSession) return <Connecting />;
+
+  const noteValidation = (() => {
+    const trimmed = note.trim();
+    if (!trimmed) return "Note is required.";
+    if (trimmed.length > NOTE_MAX_LENGTH) return `Note must be ${NOTE_MAX_LENGTH} characters or less.`;
+    if (NOTE_HTML_RE.test(trimmed)) return "Notes cannot contain HTML or script content.";
+    return null;
+  })();
 
   const search = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -253,7 +275,7 @@ function SupportConsole() {
 
   const addNote = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canNote || !selectedId || !note.trim()) return;
+    if (!canNote || !selectedId || noteValidation) return;
     setStatus(null);
     try {
       await api.supportAddNote(selectedId, note);
@@ -273,6 +295,13 @@ function SupportConsole() {
         </div>
         <span className="muted">Least-privilege customer lookup — support sees safe diagnostics only.</span>
       </header>
+      <nav className="admin-tabs" aria-label="Mox Support sections">
+        {sections.map((key) => (
+          <button key={key} type="button" className={section === key ? "active" : ""} onClick={() => setSection(key)}>
+            {SUPPORT_SECTION_LABEL[key]}
+          </button>
+        ))}
+      </nav>
       {!canLookup ? (
         <section className="admin-body">
           <div className="empty-state" role="status">
@@ -296,6 +325,7 @@ function SupportConsole() {
                   <button key={customer.orgId} type="button" className={`admin-list-item ${selectedId === customer.orgId ? "active" : ""}`} onClick={() => void openCustomer(customer.orgId)}>
                     <strong>{customer.displayName}</strong>
                     <span>{customer.memberCount} users · {customer.subscriptions.length} subscriptions · {customer.servers.length} servers · {customer.supportNoteCount} notes</span>
+                    <span>{customer.diagnostics.subscriptionsRequiringAttention} subscription alerts · {customer.diagnostics.agentsDegraded} agent alerts · {customer.diagnostics.recentNotificationFailures} notification failures</span>
                   </button>
                 ))
               )}
@@ -306,29 +336,77 @@ function SupportConsole() {
               ) : (
                 <>
                   <Card title={selected.displayName} actions={<Badge tone="accent">{selected.slug}</Badge>}>
-                    <DataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
+                    <DataTable
+                      columns={["orgId", "workspaceName", "createdAt"]}
+                      rows={[{ orgId: selected.orgId, workspaceName: selected.workspaceName, createdAt: selected.createdAt }]}
+                    />
+                    <div className="admin-metrics">
+                      <Metric label="Subscription alerts" value={selected.diagnostics.subscriptionsRequiringAttention} />
+                      <Metric label="Server errors" value={selected.diagnostics.serversInError} />
+                      <Metric label="Node stale/missing" value={selected.diagnostics.nodesStaleOrMissing} />
+                      <Metric label="Agent alerts" value={selected.diagnostics.agentsDegraded} />
+                      <Metric label="Connections" value={`${selected.diagnostics.connectionsConfigured}/${selected.diagnostics.connectionsTotal}`} />
+                      <Metric label="Notification failures" value={selected.diagnostics.recentNotificationFailures} />
+                    </div>
                   </Card>
-                  <Card title="Subscriptions (no billing details)">
-                    <DataTable columns={["subscriptionId", "state", "plan", "currentPeriodEnd"]} rows={selected.subscriptions} />
-                  </Card>
-                  <Card title="Servers (infrastructure state only)">
-                    <DataTable columns={["id", "computeClassCode", "state", "providerName", "regionCode", "createdAt"]} rows={selected.servers} />
-                  </Card>
-                  <Card title="Agents">
-                    <DataTable columns={["agentId", "displayName", "status", "currentVersion"]} rows={selected.agents} />
-                  </Card>
-                  <Card title="Recent activity (audited)">
-                    <DataTable columns={["at", "action", "actorType", "resourceType"]} rows={selected.recentActivity} />
-                  </Card>
-                  <Card title="Support notes">
-                    {canNote ? (
-                      <form className="admin-inline-form" onSubmit={(event) => void addNote(event)}>
-                        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add a support note (audited)" />
-                        <button type="submit">Add note</button>
-                      </form>
-                    ) : null}
-                    <DataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
-                  </Card>
+                  {section === "lookup" ? (
+                    <>
+                      <Card title="Users">
+                        <DataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
+                      </Card>
+                      <Card title="Subscriptions (lifecycle only)">
+                        <DataTable columns={["subscriptionId", "state", "plan", "tier", "currentPeriodEnd", "failedRenewals", "suspensionReason", "reconciliationRequired"]} rows={selected.subscriptions} />
+                      </Card>
+                    </>
+                  ) : null}
+                  {section === "diagnostics" ? (
+                    <>
+                      <Card title="Servers (safe lifecycle state)">
+                        <DataTable columns={["id", "computeClassCode", "state", "providerName", "regionCode", "lifecycle", "nodeHealth", "createdAt"]} rows={selected.servers} />
+                      </Card>
+                      <Card title="Agents and deployments">
+                        <DataTable columns={["agentId", "displayName", "status", "currentVersion", "deploymentKind", "deploymentState", "desiredRevision", "runtimeHealth"]} rows={selected.agents} />
+                      </Card>
+                      <Card title="Model connections">
+                        <DataTable columns={["providerId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.models} />
+                      </Card>
+                      <Card title="Integration connections">
+                        <DataTable columns={["integrationId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.integrations} />
+                      </Card>
+                      <Card title="Channel connections">
+                        <DataTable columns={["channelId", "displayName", "kind", "status", "credentialConfigured", "connected", "boundAgentName"]} rows={selected.connections.channels} />
+                      </Card>
+                      <Card title="Recent notification failures">
+                        <DataTable columns={["at", "eventType", "route", "deliveryState", "attempts", "errorSummary"]} rows={selected.notificationFailures} />
+                      </Card>
+                    </>
+                  ) : null}
+                  {section === "notes" ? (
+                    <Card title="Support notes">
+                      {canNote ? (
+                        <form className="admin-form support-note-form" onSubmit={(event) => void addNote(event)}>
+                          <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add a support note (audited)" rows={4} />
+                          <div className="support-note-meta">
+                            <span className={noteValidation && note.trim() ? "admin-form-error" : "muted"}>
+                              {note.trim().length}/{NOTE_MAX_LENGTH}{noteValidation && note.trim() ? ` · ${noteValidation}` : ""}
+                            </span>
+                            <button type="submit" disabled={Boolean(noteValidation)}>Add note</button>
+                          </div>
+                        </form>
+                      ) : null}
+                      <DataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
+                    </Card>
+                  ) : null}
+                  {section === "activity" ? (
+                    <Card title="Recent activity (safe audit metadata)">
+                      <DataTable columns={["at", "action", "actorType", "resourceType"]} rows={selected.recentActivity} />
+                    </Card>
+                  ) : null}
+                  {section === "escalation" ? (
+                    <Card title="Escalation">
+                      <EmptyState>Escalation capability is present. No audited escalation action is configured in this domain yet.</EmptyState>
+                    </Card>
+                  ) : null}
                 </>
               )}
             </section>
@@ -340,7 +418,16 @@ function SupportConsole() {
 }
 
 /** Minimal column/row table reused by the staff surfaces. */
-function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: Array<Record<string, unknown>>; empty?: string }) {
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="admin-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: object[]; empty?: string }) {
   const asString = (value: unknown): string => {
     if (value === null || value === undefined) return "";
     if (value instanceof Date) return value.toISOString();
@@ -354,8 +441,8 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
         <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={asString(row.id ?? row.orgId ?? row.subscriptionId ?? row.agentId ?? index)}>
-              {columns.map((column) => <td key={column}>{asString(row[column])}</td>)}
+            <tr key={asString((row as Record<string, unknown>).id ?? (row as Record<string, unknown>).orgId ?? (row as Record<string, unknown>).subscriptionId ?? (row as Record<string, unknown>).agentId ?? index)}>
+              {columns.map((column) => <td key={column}>{asString((row as Record<string, unknown>)[column])}</td>)}
             </tr>
           ))}
         </tbody>

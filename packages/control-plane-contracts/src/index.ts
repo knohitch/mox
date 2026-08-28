@@ -229,10 +229,11 @@ export interface SupportCustomerSummary {
   createdAt: string;
   memberCount: number;
   users: Array<{ userId: string; email: string; displayName: string; role: string; disabledAt: string | null }>;
-  subscriptions: Array<{ subscriptionId: string; state: string; plan: string; currentPeriodEnd: string | null }>;
-  servers: Array<{ id: string; orgId: string; computeClassCode: string; state: string; providerName: string; regionCode: string; createdAt: string; updatedAt: string }>;
-  agents: Array<{ agentId: string; slug: string; displayName: string; status: string; currentVersion?: number }>;
+  subscriptions: SupportSubscriptionLifecycle[];
+  servers: SupportServerDiagnostic[];
+  agents: SupportAgentDiagnostic[];
   supportNoteCount: number;
+  diagnostics: SupportDiagnosticSummary;
 }
 
 export interface SupportCustomerList {
@@ -242,10 +243,88 @@ export interface SupportCustomerList {
 export interface SupportCustomerDetail extends SupportCustomerSummary {
   supportNotes: Array<{ id: string; actorId: string | null; note: string; at: string }>;
   recentActivity: Array<{ id: string; action: string; at: string; actorType: string; resourceType: string | null }>;
+  connections: SupportConnectionDiagnostics;
+  notificationFailures: SupportNotificationFailure[];
 }
 
 export interface SupportNoteRequest {
   note: string;
+}
+
+export interface SupportDiagnosticSummary {
+  subscriptionsRequiringAttention: number;
+  serversInError: number;
+  nodesStaleOrMissing: number;
+  agentsDegraded: number;
+  connectionsConfigured: number;
+  connectionsTotal: number;
+  recentNotificationFailures: number;
+}
+
+export interface SupportSubscriptionLifecycle {
+  subscriptionId: string;
+  state: string;
+  plan: string;
+  tier: string;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  trialEndsAt: string | null;
+  graceEndsAt: string | null;
+  retentionUntil: string | null;
+  failedRenewals: number;
+  cancelAtPeriodEnd: boolean;
+  suspensionReason: string | null;
+  reconciliationRequired: boolean;
+}
+
+export interface SupportServerDiagnostic {
+  id: string;
+  orgId: string;
+  computeClassCode: string;
+  state: string;
+  providerName: string | null;
+  regionCode: string | null;
+  lifecycle: { state: string; attemptCount: number; errorSummary: string | null };
+  nodeHealth?: { status: string; version: string | null; lastSeenAt: string | null; health: string };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SupportAgentDiagnostic {
+  agentId: string;
+  slug: string;
+  displayName: string;
+  status: string;
+  currentVersion?: number;
+  deploymentKind?: string;
+  deploymentState?: string;
+  desiredRevision?: number;
+  runtimeHealth?: string;
+}
+
+export interface SupportConnectionDiagnostics {
+  models: Array<{ providerId: string; displayName: string; kind: string; status: string; credentialConfigured: boolean; connected: boolean }>;
+  integrations: Array<{ integrationId: string; displayName: string; kind: string; status: string; credentialConfigured: boolean; connected: boolean }>;
+  channels: Array<{
+    channelId: string;
+    displayName: string;
+    kind: string;
+    status: string;
+    credentialConfigured: boolean;
+    connected: boolean;
+    boundAgentId: string | null;
+    boundAgentName: string | null;
+  }>;
+}
+
+export interface SupportNotificationFailure {
+  id: string;
+  eventType: string;
+  route: string;
+  deliveryState: string;
+  attempts: number;
+  errorSummary: string | null;
+  at: string;
 }
 
 /**
