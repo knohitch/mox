@@ -1494,6 +1494,13 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (!body?.mode || !slug || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(slug)) {
       throw httpError("slug is required (2-41 lowercase alphanumeric/hyphen)", 400, { code: "invalid_slug" });
     }
+    const existing = await db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.slug, slug)))
+      .limit(1);
+    if (existing[0]) throw httpError(`agent slug ${slug} already exists`, 409, { code: "agent_slug_taken" });
+
     let definition;
     try {
       definition =
@@ -1506,12 +1513,6 @@ export function buildApiRouter(deps: ApiDeps): Router {
     if (definition.orgId !== identity.orgId) {
       throw httpError("definition orgId must match your organization", 403, { code: "org_mismatch" });
     }
-    const existing = await db()
-      .select({ id: agents.id })
-      .from(agents)
-      .where(and(eq(agents.orgId, identity.orgId), eq(agents.slug, slug)))
-      .limit(1);
-    if (existing[0]) throw httpError(`agent slug ${slug} already exists`, 409, { code: "agent_slug_taken" });
 
     // Phase 04 §E: Validate subagents, schedules, and knowledge for newly created drafts
     if (definition.subagents && definition.subagents.length > 0) {
@@ -1787,9 +1788,15 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.post("/api/threads", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
-    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
     const body = ctx.body as { agentId?: string; title?: string } | undefined;
     if (!body?.agentId) throw httpError("agentId is required", 400);
+    const rows = await db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, body.agentId)))
+      .limit(1);
+    if (!rows[0]) throw httpError("agent not found in this organization", 400, { code: "agent_not_found" });
+    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
     const record = await services.threads.create(identity, { agentId: body.agentId, title: body.title });
     return record;
   });
