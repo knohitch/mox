@@ -467,6 +467,9 @@ importers:
 
   services/control-plane:
     dependencies:
+      '@mox/agent-control':
+        specifier: workspace:*
+        version: link:../agent-control
       '@mox/agent-runtime':
         specifier: workspace:*
         version: link:../../runtime/agent-runtime

@@ -29,12 +29,61 @@ export interface ChatMessage {
 }
 
 export interface AgentSummary {
+  /**
+   * Server-authoritative agent identity (the control-plane agent row id).
+   * On the hosted path this is a real UUID returned by /api/agents — the
+   * SAME id authoring/versioning/thread routes address agents by
+   * (apps/web/src/api/http-api.ts). It must never be invented client-side.
+   */
+  agentId: string;
   definition: AgentDefinition;
   deploymentState?: AgentDeployment["state"];
   runtimeStatus?: string;
+  status?: string;
+  currentVersion?: number;
   hasUnread?: boolean;
   modelBadge?: string;
 }
+
+/** Simple-mode authoring inputs supported by the canonical builder (Phase 02 §B). */
+export interface SimpleAgentInput {
+  displayName: string;
+  avatarUrl?: string;
+  role?: string;
+  instructions: string;
+  /** Model selection as "providerSlug/modelSlug". */
+  model: string;
+  toolNames: string[];
+  knowledgeIds?: string[];
+  browserEnabled: boolean;
+  channelIds?: string[];
+  schedule?: { cron: string; timezone: string; prompt: string };
+  target: { kind: "sandbox" } | { kind: "mox-cloud"; region?: string } | { kind: "customer-vps"; vpsId: string };
+  voiceEnabled?: boolean;
+  voiceId?: string;
+  permissionsPreset: "safe" | "balanced" | "full";
+}
+
+export type CreateAgentDraftInput =
+  | { mode: "simple"; slug: string; input: SimpleAgentInput }
+  | { mode: "developer"; slug: string; raw: unknown };
+
+export interface AgentDraftResult {
+  agentId: string;
+  slug: string;
+  status: string;
+  currentVersion: number;
+  definition: AgentDefinition;
+}
+
+export interface AgentVersionRow {
+  revision: number;
+  changelog: string | null;
+  createdBy: string;
+  createdAt: string;
+  definition: AgentDefinition;
+}
+
 
 export interface ServerSummary {
   serverId: string;
@@ -306,10 +355,19 @@ export interface MoxApi {
   getAgent(agentId: string): Promise<AgentSummary | undefined>;
   updateModel(agentId: string, modelId: string): Promise<void>;
 
+  // Authoring & versioning (Phase 02 §B / §C) — server-authoritative definitions
+  createAgentDraft(input: CreateAgentDraftInput): Promise<AgentDraftResult>;
+  updateAgentDraft(agentId: string, input: CreateAgentDraftInput): Promise<AgentDraftResult>;
+  publishAgent(agentId: string, changelog?: string): Promise<{ agentId: string; revision: number; status: string }>;
+  listAgentVersions(agentId: string): Promise<AgentVersionRow[]>;
+  diffAgentVersions(agentId: string, from: number, to: number): Promise<{ from: number; to: number; changes: string[] }>;
+  rollbackAgent(agentId: string, toRevision: number): Promise<{ agentId: string; revision: number }>;
+
   // Threads & chat
   listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string }>>;
   createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }>;
   getMessages(threadId: string): Promise<ChatMessage[]>;
+  archiveThread(threadId: string): Promise<{ threadId: string; status: string }>;
   send(
     agentId: string,
     threadId: string,
@@ -332,6 +390,10 @@ export interface MoxApi {
   // Infrastructure surfaces
   listServers(): Promise<ServerSummary[]>;
   listDeployments(): Promise<AgentDeployment[]>;
+  serverAction(orderId: string, action: "restart" | "redeploy" | "resize" | "cancel" | "stop" | "start", computeClassCode?: string): Promise<{ ok: boolean }>;
+  deployAgent(input: { agentId: string; revision: number; target?: { kind?: string; vpsId?: string } }): Promise<{ ok: boolean; state: string }>;
+  redeployDeployment(deploymentId: string): Promise<{ ok: boolean; state: string }>;
+  deploymentRollback(deploymentId: string, toRevision: number): Promise<{ ok: boolean; state: string }>;
 
   // Models page
   listModels(): Promise<ModelOption[]>;

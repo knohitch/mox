@@ -6,7 +6,7 @@ import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, KpiCard, Load
 import { Markdown } from "../ui/markdown.js";
 import { Link } from "../router.js";
 import type { AgentDeployment, AgentRoom } from "@mox/contracts";
-import type { AgentSummary } from "../api/types.js";
+import type { AgentSummary, AgentVersionRow, ServerSummary } from "../api/types.js";
 import type { AgentStatus } from "../domain/roster.js";
 
 const statusTone = (s: string | undefined): "good" | "warn" | "bad" | "accent" | "neutral" => {
@@ -84,9 +84,9 @@ export function HomeView() {
           {agents.length === 0 ? (
             <EmptyState>No agents yet. Create your first agent to get started.</EmptyState>
           ) : agents.length > 6 ? (
-            <>{agents.slice(0, 6).map((a) => <AgentRow key={a.definition.agentId} agent={a} />)}<p className="muted">… and {agents.length - 6} more.</p></>
+            <>{agents.slice(0, 6).map((a) => <AgentRow key={a.agentId} agent={a} />)}<p className="muted">… and {agents.length - 6} more.</p></>
           ) : (
-            agents.map((a) => <AgentRow key={a.definition.agentId} agent={a} />)
+            agents.map((a) => <AgentRow key={a.agentId} agent={a} />)
           )}
           {agents.length ? (
             <div style={{ marginTop: 8 }}>
@@ -151,7 +151,7 @@ export function HomeView() {
 }
 
 function agentName(agents: AgentSummary[], agentId: string): string {
-  const a = agents.find((x) => x.definition.agentId === agentId);
+  const a = agents.find((x) => x.agentId === agentId);
   return a?.definition.identity.displayName ?? agentId;
 }
 
@@ -244,11 +244,11 @@ export function RoomsView() {
             <input value={newTitle} placeholder="Room title" onChange={(e) => setNewTitle(e.target.value)} aria-label="Room title" />
             <label>Members:</label>
             {mox.agents.map((a) => (
-              <label key={a.definition.agentId} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+              <label key={a.agentId} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
                 <input
                   type="checkbox"
-                  checked={memberIds.has(a.definition.agentId)}
-                  onChange={() => toggleMember(a.definition.agentId)}
+                  checked={memberIds.has(a.agentId)}
+                  onChange={() => toggleMember(a.agentId)}
                 />
                 {a.definition.identity.displayName}
               </label>
@@ -312,6 +312,9 @@ export function ServersView() {
   const [servers, setServers] = useState<Awaited<ReturnType<typeof mox.api.listServers>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const reload = useCallback(async () => {
+    setServers(await mox.api.listServers());
+  }, [mox.api]);
   useEffect(() => {
     void mox.api
       .listServers()
@@ -336,11 +339,68 @@ export function ServersView() {
             { key: "cpuPct", label: "CPU", render: (r) => telemetry(r.cpuPct as number | null, "%") },
             { key: "memPct", label: "Mem", render: (r) => telemetry(r.memPct as number | null, "%") },
             { key: "lastError", label: "Last error", render: (r) => String(r.lastError ?? "") },
+            { key: "orderId", label: "Actions", render: (r) => <ServerActionsCell server={r} onDone={reload} /> },
           ]}
           rows={servers}
           empty="No servers provisioned for this workspace yet."
         />
       </Panel>
+    </div>
+  );
+}
+
+/** Per-server lifecycle actions (§H). The orchestration layer is authoritative. */
+function ServerActionsCell({ server, onDone }: { server: ServerSummary; onDone: () => Promise<void> }) {
+  const mox = useMox();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [resizing, setResizing] = useState(false);
+  const [classCode, setClassCode] = useState("");
+  const running = server.state === "running";
+  const canceled = server.state === "canceled";
+
+  const act = async (action: "restart" | "cancel" | "stop" | "start" | "resize", computeClassCode?: string) => {
+    setError(null);
+    setBusy(true);
+    try {
+      await mox.api.serverAction(server.orderId, action, computeClassCode);
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      setResizing(false);
+    }
+  };
+
+  return (
+    <div className="row-actions" style={{ flexWrap: "wrap" }}>
+      <Button size="sm" disabled={busy || !running} onClick={() => void act("restart")}>Restart</Button>
+      {running ? (
+        <Button size="sm" disabled={busy} onClick={() => void act("stop")}>Stop</Button>
+      ) : canceled ? null : (
+        <Button size="sm" disabled={busy} onClick={() => void act("start")}>Start</Button>
+      )}
+      <Button size="sm" disabled={busy || canceled} onClick={() => setResizing((v) => !v)}>Resize</Button>
+      {resizing && (
+        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <input
+            value={classCode}
+            onChange={(e) => setClassCode(e.target.value)}
+            placeholder="compute class code"
+            aria-label="compute class code"
+          />
+          <Button size="sm" kind="primary" disabled={busy || !classCode.trim()} onClick={() => void act("resize", classCode.trim())}>
+            Confirm
+          </Button>
+        </span>
+      )}
+      {!canceled && (
+        <Button size="sm" kind="danger" disabled={busy} onClick={() => { if (window.confirm(`Cancel server order ${server.orderId}? This releases the infrastructure.`)) void act("cancel"); }}>
+          Cancel
+        </Button>
+      )}
+      {error ? <span className="muted" style={{ flexBasis: "100%", color: "var(--bad)" }}>{error}</span> : null}
     </div>
   );
 }
@@ -354,6 +414,10 @@ export function DeploymentsView() {
   const [deps, setDeps] = useState<AgentDeployment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showDeploy, setShowDeploy] = useState(false);
+  const reload = useCallback(async () => {
+    setDeps(await mox.api.listDeployments());
+  }, [mox.api]);
   useEffect(() => {
     void mox.api
       .listDeployments()
@@ -363,7 +427,11 @@ export function DeploymentsView() {
 
   return (
     <div>
-      <PageHeader title="Deployments" subtitle="Published versions of your agents across targets." />
+      <PageHeader
+        title="Deployments"
+        subtitle="Published versions of your agents across targets."
+        actions={<Button kind="primary" onClick={() => setShowDeploy(true)}>+ Deploy</Button>}
+      />
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       <Panel>
@@ -373,11 +441,173 @@ export function DeploymentsView() {
             { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
             { key: "versionId", label: "Version", render: (r) => String(r.versionId) },
             { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+            { key: "deploymentId", label: "Actions", render: (r) => <DeploymentActionsCell deployment={r} onDone={reload} /> },
           ]}
           rows={deps}
-          empty="No deployments yet."
+          empty="No deployments yet. Pin a published revision to a target."
         />
       </Panel>
+      {showDeploy && <DeployModal onClose={() => setShowDeploy(false)} onDone={reload} />}
+    </div>
+  );
+}
+
+function DeploymentActionsCell({ deployment, onDone }: { deployment: AgentDeployment; onDone: () => Promise<void> }) {
+  const mox = useMox();
+  const [versions, setVersions] = useState<AgentVersionRow[] | null>(null);
+  const [revision, setRevision] = useState<number | "">("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = () => {
+    if (versions === null) {
+      void mox.api.listAgentVersions(deployment.agentId).then(setVersions).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    } else {
+      setVersions(null);
+    }
+  };
+
+  const rollback = async () => {
+    if (typeof revision !== "number") return;
+    if (!window.confirm(`Roll back ${agentName(mox.agents, deployment.agentId)} to v${revision} on this target?`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mox.api.deploymentRollback(deployment.deploymentId, revision);
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+      setVersions(null);
+    }
+  };
+
+  return (
+    <div className="row-actions" style={{ flexWrap: "wrap" }}>
+      <Button size="sm" disabled={busy} onClick={() => void mox.api.redeployDeployment(deployment.deploymentId).then(onDone).catch((e) => setError(e instanceof Error ? e.message : String(e)))}>
+        Redeploy
+      </Button>
+      <Button size="sm" disabled={busy} onClick={toggle}>Rollback</Button>
+      {versions !== null && (
+        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <select value={revision} onChange={(e) => setRevision(e.target.value ? Number(e.target.value) : "")} aria-label="revision">
+            <option value="">v…</option>
+            {[...versions].reverse().filter((v) => v.revision !== (deployment as { desiredRevision?: number }).desiredRevision).map((v) => (
+              <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` · ${v.changelog}` : ""}</option>
+            ))}
+          </select>
+          <Button size="sm" kind="primary" disabled={busy || typeof revision !== "number"} onClick={() => void rollback()}>
+            Go
+          </Button>
+        </span>
+      )}
+      {error ? <span className="muted" style={{ flexBasis: "100%", color: "var(--bad)" }}>{error}</span> : null}
+    </div>
+  );
+}
+
+/** Deploy a published revision to a target (§I). */
+function DeployModal({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> }) {
+  const mox = useMox();
+  const [agentId, setAgentId] = useState("");
+  const [versions, setVersions] = useState<AgentVersionRow[] | null>(null);
+  const [revision, setRevision] = useState<number | "">("");
+  const [target, setTarget] = useState<"sandbox" | "mox-cloud" | "customer-vps">("sandbox");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const pickAgent = (id: string) => {
+    setAgentId(id);
+    setRevision("");
+    setVersions(null);
+    if (!id) return;
+    void mox.api
+      .listAgentVersions(id)
+      .then((vs) => { setVersions(vs); if (vs.length) setRevision(vs[vs.length - 1]!.revision); })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  };
+
+  const deploy = async () => {
+    if (typeof revision !== "number") return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mox.api.deployAgent({
+        agentId,
+        revision,
+        target:
+          target === "sandbox"
+            ? { kind: "sandbox" }
+            : target === "mox-cloud"
+              ? { kind: "mox-cloud", vpsId: "eu-central" }
+              : { kind: "customer-vps" },
+      });
+      onClose();
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publishedOnly = mox.agents.map((a) => a).filter((a) => a.currentVersion && a.currentVersion > 0);
+  return (
+    <div className="modal-backdrop" onClick={onClose} role="presentation">
+      <div className="modal" role="dialog" aria-modal="true" aria-label="Deploy agent" onClick={(e) => e.stopPropagation()}>
+        <header className="modal-head">
+          <h3>Deploy agent</h3>
+          <Button kind="ghost" size="sm" onClick={onClose}>✕</Button>
+        </header>
+        {publishedOnly.length === 0 ? (
+          <EmptyState>No published agents yet. Publish an agent from its Settings → Versions first.</EmptyState>
+        ) : (
+          <div className="form-grid">
+            <label className="form-field">
+              Agent
+              <select value={agentId} onChange={(e) => pickAgent(e.target.value)}>
+                <option value="">Select agent…</option>
+                {publishedOnly.map((a) => (
+                  <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName} (v{a.currentVersion})</option>
+                ))}
+              </select>
+            </label>
+            <label className="form-field">
+              Revision
+              <select disabled={versions === null} value={revision} onChange={(e) => setRevision(e.target.value ? Number(e.target.value) : "")}>
+                {versions === null ? (
+                  <option value="">—</option>
+                ) : versions.length === 0 ? (
+                  <option value="">no published revisions</option>
+                ) : (
+                  [...versions].reverse().map((v) => (
+                    <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` · ${v.changelog}` : ""}</option>
+                  ))
+                )}
+              </select>
+            </label>
+            <label className="form-field">
+              Target
+              <select value={target} onChange={(e) => setTarget(e.target.value as typeof target)}>
+                <option value="sandbox">Sandbox</option>
+                <option value="mox-cloud">Mox cloud</option>
+                <option value="customer-vps">Customer VPS</option>
+              </select>
+            </label>
+          </div>
+        )}
+        {error ? <ErrorState message={error} /> : null}
+        <footer className="modal-foot">
+          <span className="muted" style={{ fontSize: 12.5 }}>Deploying sets the desired state; the orchestrator reconciles it.</span>
+          <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+            <Button onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button kind="primary" disabled={busy || typeof revision !== "number" || !agentId} onClick={() => void deploy()}>
+              {busy ? "Deploying…" : "Deploy"}
+            </Button>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }

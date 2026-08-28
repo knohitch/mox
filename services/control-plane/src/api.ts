@@ -13,6 +13,7 @@ import { IdempotencyConflictError, QuotaExceededError } from "@mox/compute-orche
 import {
   agentDeployments,
   agentRooms,
+  agentVersions,
   agents,
   approvalRequests,
   abuseCases,
@@ -58,6 +59,8 @@ import {
   systemModelConnections,
   systemModelProviders,
   systemModels,
+  threads,
+  threadMessages,
   usageEvents,
   users,
   verifiedWebhookEvents,
@@ -72,6 +75,7 @@ import {
 } from "./projections.js";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
+import { compileDeveloperMode, compileSimpleMode, diffDefinitions, type SimpleModeInput } from "@mox/agent-control";
 import {
   authenticate,
   AuthError,
@@ -1151,6 +1155,216 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { ok: true };
   });
 
+  // ---- Agent authoring & versioning (Phase 02 §B / §C) -------------------------
+  // Simple and Developer modes compile to the SAME canonical AgentDefinition
+  // (builder.ts) — the stored `agents.definition` is always the engine contract,
+  // and version numbers are derived server-side from the durable agent_versions
+  // table (never client-invented).
+
+  router.post("/api/agents/drafts", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
+    const body = ctx.body as
+      | { mode: "simple"; slug: string; input?: SimpleModeInput }
+      | { mode: "developer"; slug: string; raw?: unknown }
+      | undefined;
+    const slug = body?.slug;
+    if (!body?.mode || !slug || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(slug)) {
+      throw httpError("slug is required (2-41 lowercase alphanumeric/hyphen)", 400, { code: "invalid_slug" });
+    }
+    let definition;
+    try {
+      definition =
+        body.mode === "developer"
+          ? compileDeveloperMode(body.raw)
+          : compileSimpleMode({ ...(body.input as SimpleModeInput), orgId: identity.orgId, slug });
+    } catch (error) {
+      throw httpError(error instanceof Error ? error.message : "invalid definition", 400, { code: "invalid_definition" });
+    }
+    if (definition.orgId !== identity.orgId) {
+      throw httpError("definition orgId must match your organization", 403, { code: "org_mismatch" });
+    }
+    const existing = await db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.slug, slug)))
+      .limit(1);
+    if (existing[0]) throw httpError(`agent slug ${slug} already exists`, 409, { code: "agent_slug_taken" });
+    const inserted = await db()
+      .insert(agents)
+      .values({
+        orgId: identity.orgId,
+        slug,
+        displayName: (definition.identity as { displayName?: string })?.displayName ?? slug,
+        status: "draft",
+        definition: definition as unknown as object,
+        currentVersion: 0,
+        createdByUserId: identity.userId,
+      })
+      .returning();
+    const agent = inserted[0];
+    if (!agent) throw httpError("agent insert failed", 500, { unavailable: true });
+    return { definition, status: agent.status, agentId: agent.id, slug: agent.slug, currentVersion: agent.currentVersion };
+  });
+
+  router.patch("/api/agents/:agentId/draft", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as { mode?: "simple" | "developer"; input?: SimpleModeInput; raw?: unknown } | undefined;
+    const rows = await db()
+      .select()
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, ctx.params.agentId!)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw httpError("agent not found", 404);
+    let definition;
+    try {
+      definition =
+        body?.mode === "developer"
+          ? compileDeveloperMode(body.raw)
+          : compileSimpleMode({ ...(body?.input as SimpleModeInput), orgId: identity.orgId, slug: row.slug });
+    } catch (error) {
+      throw httpError(error instanceof Error ? error.message : "invalid definition", 400, { code: "invalid_definition" });
+    }
+    await db()
+      .update(agents)
+      .set({
+        definition: definition as unknown as object,
+        displayName: (definition.identity as { displayName?: string })?.displayName ?? row.displayName,
+        updatedAt: new Date(),
+      })
+      .where(eq(agents.id, row.id));
+    return { definition, agentId: row.id, slug: row.slug };
+  });
+
+  router.post("/api/agents/:agentId/publish", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as { changelog?: string } | undefined;
+    const rows = await db()
+      .select()
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, ctx.params.agentId!)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw httpError("agent not found", 404);
+    const definition = row.definition as { authoring?: { mode?: string } };
+    if (definition.authoring?.mode === "developer") {
+      await requireCommercialMutation(identity, "developer_mode", {}, "member");
+    }
+    const versions = await db()
+      .select({ version: agentVersions.version })
+      .from(agentVersions)
+      .where(eq(agentVersions.agentId, row.id))
+      .orderBy(desc(agentVersions.version));
+    const nextRevision = versions.length ? Number(versions[0]!.version) + 1 : 1;
+    await db()
+      .insert(agentVersions)
+      .values({
+        orgId: identity.orgId,
+        agentId: row.id,
+        version: String(nextRevision),
+        definition: row.definition,
+        publishedByUserId: identity.userId,
+      })
+      .onConflictDoNothing({ target: [agentVersions.agentId, agentVersions.version] });
+    await db()
+      .update(agents)
+      .set({ status: "active", currentVersion: nextRevision, updatedAt: new Date() })
+      .where(eq(agents.id, row.id));
+    const depRows = await db()
+      .select({ id: agentDeployments.id })
+      .from(agentDeployments)
+      .where(and(eq(agentDeployments.orgId, identity.orgId), eq(agentDeployments.agentId, row.id)))
+      .limit(1);
+    if (depRows[0]) {
+      await db()
+        .update(agentDeployments)
+        .set({ desiredRevision: nextRevision, updatedAt: new Date() })
+        .where(eq(agentDeployments.id, depRows[0].id));
+    } else {
+      await db()
+        .insert(agentDeployments)
+        .values({ orgId: identity.orgId, agentId: row.id, desiredRevision: nextRevision });
+    }
+    return { agentId: row.id, revision: nextRevision, status: "active" };
+  });
+
+  router.get("/api/agents/:agentId/versions", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    const rows = await db()
+      .select()
+      .from(agentVersions)
+      .where(and(eq(agentVersions.orgId, identity.orgId), eq(agentVersions.agentId, ctx.params.agentId!)))
+      .orderBy(asc(agentVersions.version));
+    return rows.map((v) => ({
+      revision: Number(v.version),
+      changelog: null,
+      createdBy: v.publishedByUserId ?? "system",
+      createdAt: v.createdAt.toISOString(),
+      definition: v.definition,
+    }));
+  });
+
+  router.get("/api/agents/:agentId/versions/diff", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    const from = Number(ctx.query.get("from") ?? "0");
+    const to = Number(ctx.query.get("to") ?? "0");
+    const rows = await db()
+      .select()
+      .from(agentVersions)
+      .where(
+        and(
+          eq(agentVersions.orgId, identity.orgId),
+          eq(agentVersions.agentId, ctx.params.agentId!),
+          inArray(agentVersions.version, [String(from), String(to)]),
+        ),
+      );
+    const byRevision = new Map(rows.map((v) => [Number(v.version), v]));
+    const a = byRevision.get(from);
+    const b = byRevision.get(to);
+    if (!a || !b) throw httpError("both revisions must be published", 404);
+    return { from, to, changes: diffDefinitions(a.definition as never, b.definition as never) };
+  });
+
+  router.post("/api/agents/:agentId/rollback", async (ctx) => {
+    const identity = await requireAuth(ctx, "agents");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as { toRevision?: number } | undefined;
+    const toRevision = Number(body?.toRevision);
+    if (!Number.isInteger(toRevision) || toRevision < 1) throw httpError("toRevision is required", 400);
+    const rows = await db()
+      .select()
+      .from(agents)
+      .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, ctx.params.agentId!)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) throw httpError("agent not found", 404);
+    const versionRows = await db()
+      .select({ id: agentVersions.id })
+      .from(agentVersions)
+      .where(
+        and(
+          eq(agentVersions.orgId, identity.orgId),
+          eq(agentVersions.agentId, row.id),
+          eq(agentVersions.version, String(toRevision)),
+        ),
+      )
+      .limit(1);
+    if (!versionRows[0]) throw httpError(`revision ${toRevision} not found`, 404);
+    await db()
+      .update(agentDeployments)
+      .set({ desiredRevision: toRevision, updatedAt: new Date() })
+      .where(and(eq(agentDeployments.orgId, identity.orgId), eq(agentDeployments.agentId, row.id)));
+    await db()
+      .update(agents)
+      .set({ currentVersion: toRevision, updatedAt: new Date() })
+      .where(eq(agents.id, row.id));
+    return { agentId: row.id, revision: toRevision };
+  });
+
   // ---- Threads & messages -----------------------------------------------------
 
   router.get("/api/agents/:agentId/threads", async (ctx) => {
@@ -1231,6 +1445,21 @@ export function buildApiRouter(deps: ApiDeps): Router {
       },
       turn,
     };
+  });
+
+  /** Archive a thread owned by the caller's org (Phase 02 §D domain support). */
+  router.post("/api/threads/:threadId/archive", async (ctx) => {
+    const identity = await requireAuth(ctx, "threads");
+    // Verify ownership without trusting the raw id: re-check via the store's
+    // tenant-scoped get, then flip status.
+    const thread = await services.threads.get(identity, ctx.params.threadId!);
+    if (!thread) throw httpError(`thread ${ctx.params.threadId} not found`, 404);
+    const updated = await db()
+      .update(threads)
+      .set({ status: "archived", updatedAt: new Date() })
+      .where(and(eq(threads.id, ctx.params.threadId!), eq(threads.orgId, identity.orgId)))
+      .returning({ id: threads.id, status: threads.status });
+    return { threadId: updated[0]?.id ?? ctx.params.threadId, status: updated[0]?.status ?? "archived" };
   });
 
   // ---- Events (canonical) + realtime stream ------------------------------------
@@ -1545,6 +1774,68 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return result.order;
   });
 
+  // Customer server lifecycle actions (Phase 02 §H). Safe, provider-independent
+  // actions backed by the orchestrator/compute authority. The target order is
+  // tenant-scoped to the caller's org; provider/internal credentials are never
+  // exposed on this surface.
+  router.post("/api/servers/:orderId/:action", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "infrastructure.manage");
+    const action = ctx.params.action!;
+    if (!["restart", "redeploy", "resize", "cancel", "stop", "start"].includes(action)) {
+      throw httpError("unsupported server action", 400, { code: "unsupported_action" });
+    }
+    const order = (
+      await db()
+        .select()
+        .from(serverOrders)
+        .where(and(eq(serverOrders.id, ctx.params.orderId!), eq(serverOrders.orgId, identity.orgId)))
+        .limit(1)
+    )[0];
+    if (!order) throw httpError("server order not found or not owned by your org", 404);
+
+    if (action === "resize") {
+      const body = ctx.body as { computeClassCode?: string } | undefined;
+      if (!body?.computeClassCode) throw httpError("computeClassCode is required for resize", 400);
+      const allowed = await services.billing.requireCommercialEntitlement(
+        identity.orgId,
+        services.entitlements,
+        "included_compute_class",
+        { equals: body.computeClassCode },
+      );
+      if (!allowed.entitled && allowed.value !== "*" && allowed.value !== "all") {
+        throw httpError("target compute class is not included in the current plan", 402, {
+          code: "compute_class_not_entitled",
+        });
+      }
+      await services.orchestrator.requestResize(order.id, body.computeClassCode);
+      return { ok: true, orderId: order.id, action: "resize" };
+    }
+
+    if (action === "restart") {
+      await services.orchestrator.requestReboot(order.id);
+      return { ok: true, orderId: order.id, action: "restart" };
+    }
+
+    if (action === "cancel") {
+      await services.orchestrator.cancelOrder(order.id);
+      return { ok: true, orderId: order.id, action: "cancel" };
+    }
+
+    // redeploy / stop / start: no direct orchestrator method exists on this
+    // surface, so we durably queue a typed operation record (the same
+    // authority the admin console uses) rather than faking completion.
+    await db()
+      .insert(serverOperations)
+      .values({
+        orderId: order.id,
+        kind: action,
+        idempotencyKey: `customer:${identity.userId}:${action}:${Date.now()}`,
+        nextAttemptAt: new Date(),
+      });
+    return { ok: true, orderId: order.id, action };
+  });
+
   // ---- Deployments ------------------------------------------------------------
 
   router.get("/api/deployments", async (ctx) => {
@@ -1575,6 +1866,127 @@ export function buildApiRouter(deps: ApiDeps): Router {
         updatedAt: row.updatedAt.toISOString(),
       };
     });
+  });
+
+  // Deployment mutations (Phase 02 §I). Deploy/redeploy/rollback PIN a published
+  // revision on the durable agent_deployments row. The projected state stays
+  // honest (`desired` until the runtime engine actually reconciles it to
+  // running on a node) — the UI never reports a fake `running`.
+  const resolveDeploymentTarget = (target?: { kind?: string; vpsId?: string }) =>
+    target?.kind === "customer-vps"
+      ? (["customer_vps", target.vpsId] as const)
+      : target?.kind === "mox-cloud"
+        ? (["shared_host", undefined] as const)
+        : (["sandbox", undefined] as const);
+
+  const assertPublishedRevision = async (orgId: string, agentId: string, revision: number) => {
+    const rows = await db()
+      .select({ id: agentVersions.id })
+      .from(agentVersions)
+      .where(
+        and(
+          eq(agentVersions.orgId, orgId),
+          eq(agentVersions.agentId, agentId),
+          eq(agentVersions.version, String(revision)),
+        ),
+      )
+      .limit(1);
+    if (!rows[0]) throw httpError(`revision ${revision} is not published`, 404, { code: "revision_not_published" });
+  };
+
+  const assertTargetOwned = async (orgId: string, vpsId?: string) => {
+    if (!vpsId) return;
+    const order = (
+      await db().select({ orgId: serverOrders.orgId }).from(serverOrders).where(eq(serverOrders.id, vpsId)).limit(1)
+    )[0];
+    if (!order || order.orgId !== orgId) throw httpError("target VPS must be owned by your org", 403, { code: "org_mismatch" });
+  };
+
+  router.post("/api/deployments", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as
+      | { agentId?: string; revision?: number; target?: { kind?: string; vpsId?: string } }
+      | undefined;
+    if (!body?.agentId || !body?.revision) throw httpError("agentId and revision are required", 400);
+    const agent = (
+      await db()
+        .select()
+        .from(agents)
+        .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, body.agentId)))
+        .limit(1)
+    )[0];
+    if (!agent) throw httpError("agent not found", 404);
+    await assertPublishedRevision(identity.orgId, body.agentId, body.revision);
+    const [kind, computeInstanceId] = resolveDeploymentTarget(body.target);
+    await assertTargetOwned(identity.orgId, computeInstanceId);
+    const existing = (
+      await db()
+        .select()
+        .from(agentDeployments)
+        .where(and(eq(agentDeployments.orgId, identity.orgId), eq(agentDeployments.agentId, body.agentId)))
+        .limit(1)
+    )[0];
+    if (existing) {
+      await db()
+        .update(agentDeployments)
+        .set({ kind, computeInstanceId, desiredRevision: body.revision, updatedAt: new Date() })
+        .where(eq(agentDeployments.id, existing.id));
+    } else {
+      await db()
+        .insert(agentDeployments)
+        .values({ orgId: identity.orgId, agentId: body.agentId, kind, computeInstanceId, desiredRevision: body.revision });
+    }
+    await db()
+      .update(agents)
+      .set({ currentVersion: body.revision, updatedAt: new Date() })
+      .where(eq(agents.id, body.agentId));
+    return { ok: true, agentId: body.agentId, revision: body.revision, state: "desired" };
+  });
+
+  router.post("/api/deployments/:deploymentId/redeploy", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "workspace.write");
+    const dep = (
+      await db()
+        .select()
+        .from(agentDeployments)
+        .where(and(eq(agentDeployments.id, ctx.params.deploymentId!), eq(agentDeployments.orgId, identity.orgId)))
+        .limit(1)
+    )[0];
+    if (!dep) throw httpError("deployment not found or not owned by your org", 404);
+    await assertPublishedRevision(identity.orgId, dep.agentId, dep.desiredRevision);
+    await db()
+      .update(agentDeployments)
+      .set({ updatedAt: new Date() })
+      .where(eq(agentDeployments.id, dep.id));
+    return { ok: true, deploymentId: dep.id, revision: dep.desiredRevision, state: "desired" };
+  });
+
+  router.post("/api/deployments/:deploymentId/rollback", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "workspace.write");
+    const body = ctx.body as { toRevision?: number } | undefined;
+    const toRevision = Number(body?.toRevision);
+    if (!Number.isInteger(toRevision) || toRevision < 1) throw httpError("toRevision is required", 400);
+    const dep = (
+      await db()
+        .select()
+        .from(agentDeployments)
+        .where(and(eq(agentDeployments.id, ctx.params.deploymentId!), eq(agentDeployments.orgId, identity.orgId)))
+        .limit(1)
+    )[0];
+    if (!dep) throw httpError("deployment not found or not owned by your org", 404);
+    await assertPublishedRevision(identity.orgId, dep.agentId, toRevision);
+    await db()
+      .update(agentDeployments)
+      .set({ desiredRevision: toRevision, updatedAt: new Date() })
+      .where(eq(agentDeployments.id, dep.id));
+    await db()
+      .update(agents)
+      .set({ currentVersion: toRevision, updatedAt: new Date() })
+      .where(eq(agents.id, dep.agentId));
+    return { ok: true, deploymentId: dep.id, revision: toRevision, state: "desired" };
   });
 
   // ---- Models / connections ------------------------------------------------------

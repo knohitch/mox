@@ -3049,6 +3049,263 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       });
       expect(cross.status).toBe(400);
     });
+
+    it("Phase 02 §K: agent authoring — Simple/Developer compile to the canonical definition (discoverable New Agent)", async () => {
+      const owner = await signupUser(`auth-${randomUUID().slice(0, 8)}@mox.test`, "authpass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 5, developer_mode: true });
+
+      const slug = `agent-${randomUUID().slice(0, 8)}`;
+      const create = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug,
+          input: {
+            displayName: "Research Mate",
+            role: "Researcher",
+            instructions: "Summarize papers into bullets.",
+            model: "openai/gpt-5.2",
+            toolNames: ["web.search"],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "balanced",
+          },
+        }),
+      });
+      expect(create.status).toBe(200);
+      const created = create.body as { agentId: string; definition: { authoring: { mode: string }; orgId: string }; currentVersion: number };
+      expect(created.definition.authoring.mode).toBe("simple");
+      expect(created.definition.orgId).toBe(ownerMe.orgId);
+      expect(created.currentVersion).toBe(0);
+
+      // Developer mode also compiles to the same canonical schema.
+      const devSlug = `dev-${randomUUID().slice(0, 8)}`;
+      const dev = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({ mode: "developer", slug: devSlug, raw: { ...created.definition, slug: devSlug, authoring: { mode: "developer" } } }),
+      });
+      expect(dev.status).toBe(200);
+      expect((dev.body as { definition: { authoring: { mode: string } } }).definition.authoring.mode).toBe("developer");
+
+      // Duplicate slug rejected by the canonical uniqueness authority.
+      const dup = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({ mode: "simple", slug, input: created.definition }),
+      });
+      expect(dup.status).toBe(409);
+    });
+
+    it("Phase 02 §K: publish freezes immutable revisions; diff and rollback are server-authoritative (no client version numbers)", async () => {
+      const owner = await signupUser(`ver-${randomUUID().slice(0, 8)}@mox.test`, "verpass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 5, developer_mode: true });
+
+      const slug = `ver-${randomUUID().slice(0, 8)}`;
+      const create = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug,
+          input: {
+            displayName: "Versioned Agent",
+            instructions: "v1 instructions.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      const agentId = (create.body as { agentId: string }).agentId;
+
+      const pub1 = await call(`/api/agents/${agentId}/publish`, { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ changelog: "init" }) });
+      expect(pub1.status).toBe(200);
+      expect((pub1.body as { revision: number }).revision).toBe(1);
+
+      // Edit the draft instructions then republish → revision 2.
+      const patch = await call(`/api/agents/${agentId}/draft`, {
+        method: "PATCH",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          input: {
+            displayName: "Versioned Agent",
+            instructions: "v2 instructions with GDPR.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      expect(patch.status).toBe(200);
+      const pub2 = await call(`/api/agents/${agentId}/publish`, { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ changelog: "gdpr" }) });
+      expect((pub2.body as { revision: number }).revision).toBe(2);
+
+      const versions = await call(`/api/agents/${agentId}/versions`, { headers: { cookie: owner.cookie } });
+      expect(versions.status).toBe(200);
+      const revs = (versions.body as Array<{ revision: number }>).map((v) => v.revision);
+      expect(revs).toEqual([1, 2]);
+
+      const diff = await call(`/api/agents/${agentId}/versions/diff?from=1&to=2`, { headers: { cookie: owner.cookie } });
+      expect(diff.status).toBe(200);
+      expect((diff.body as { changes: string[] }).changes).toContain("instructions");
+
+      const roll = await call(`/api/agents/${agentId}/rollback`, { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ toRevision: 1 }) });
+      expect(roll.status).toBe(200);
+      expect((roll.body as { revision: number }).revision).toBe(1);
+    });
+
+    it("Phase 02 §K: deploy pins a published revision and reports an honest desired state", async () => {
+      const owner = await signupUser(`dep-${randomUUID().slice(0, 8)}@mox.test`, "deppass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 5, developer_mode: true });
+
+      const slug = `dep-${randomUUID().slice(0, 8)}`;
+      const create = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug,
+          input: {
+            displayName: "Deploy Agent",
+            instructions: "hello.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      const agentId = (create.body as { agentId: string }).agentId;
+      await call(`/api/agents/${agentId}/publish`, { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({}) });
+
+      // Deploy an unpublished revision → 404 (server-authoritative).
+      const bad = await call("/api/deployments", { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ agentId, revision: 99, target: { kind: "sandbox" } }) });
+      expect(bad.status).toBe(404);
+
+      const deploy = await call("/api/deployments", { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ agentId, revision: 1, target: { kind: "sandbox" } }) });
+      expect(deploy.status).toBe(200);
+      expect((deploy.body as { state: string }).state).toBe("desired");
+
+      const list = await call("/api/deployments", { headers: { cookie: owner.cookie } });
+      const dep = (list.body as Array<{ agentId: string; desiredRevision: number }>).find((d) => d.agentId === agentId);
+      expect(dep?.desiredRevision).toBe(1);
+    });
+
+    it("Phase 02 §K: create + archive a real thread (no synthetic authority); tenant isolation blocks cross-org access", async () => {
+      const owner = await signupUser(`thr-${randomUUID().slice(0, 8)}@mox.test`, "thrpass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 5, developer_mode: true });
+
+      const slug = `thr-${randomUUID().slice(0, 8)}`;
+      const create = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug,
+          input: {
+            displayName: "Thread Agent",
+            instructions: "x.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      const agentId = (create.body as { agentId: string }).agentId;
+
+      // The created thread must be a real UUID (never a synthetic `t_<agentId>`).
+      const t = await call("/api/threads", { method: "POST", headers: { cookie: owner.cookie, ...CSRF }, body: JSON.stringify({ agentId, title: "First" }) });
+      expect(t.status).toBe(200);
+      const threadId = (t.body as { threadId: string }).threadId;
+      expect(threadId).not.toMatch(/^t_/);
+
+      const list = await call(`/api/agents/${agentId}/threads`, { headers: { cookie: owner.cookie } });
+      expect((list.body as Array<{ threadId: string }>).some((x) => x.threadId === threadId)).toBe(true);
+
+      const archive = await call(`/api/threads/${threadId}/archive`, { method: "POST", headers: { cookie: owner.cookie, ...CSRF } });
+      expect(archive.status).toBe(200);
+
+      // Tenant isolation: another org cannot publish OR thread this agent.
+      const outsider = await signupUser(`iso-${randomUUID().slice(0, 8)}@mox.test`, "isopass-12345");
+      const pub = await call(`/api/agents/${agentId}/publish`, { method: "POST", headers: { cookie: outsider.cookie, ...CSRF }, body: JSON.stringify({}) });
+      expect(pub.status).toBe(404);
+      const thread = await call("/api/threads", { method: "POST", headers: { cookie: outsider.cookie, ...CSRF }, body: JSON.stringify({ agentId, title: "x" }) });
+      expect(thread.status).toBe(400);
+    });
+
+    it("Phase 02 §K: agent authoring mutations are gated by commercial entitlement and org role", async () => {
+      // No subscription → creation denied (commercial gate).
+      const unpaid = await signupUser(`gate-${randomUUID().slice(0, 8)}@mox.test`, "gatepass-12345");
+      const attempt = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: unpaid.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug: `gate-${randomUUID().slice(0, 8)}`,
+          input: {
+            displayName: "Gated",
+            instructions: "x.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      expect(attempt.status).toBe(402);
+
+      // A viewer role cannot author (workspace.write requires member+).
+      const owner = await signupUser(`visor-${randomUUID().slice(0, 8)}@mox.test`, "visorpass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { active_concurrent_agents: 5, developer_mode: true });
+
+      const viewer = await signupUser(`view-${randomUUID().slice(0, 8)}@mox.test`, "viewpass-12345");
+      await server.services.db.execute(
+        (await import("drizzle-orm")).sql`
+          INSERT INTO memberships (org_id, user_id, role)
+          VALUES (${ownerMe.orgId}, ${viewer.userId}, 'viewer')
+        `,
+      );
+      const switchRes = await call("/api/auth/orgs/select", {
+        method: "POST",
+        headers: { cookie: viewer.cookie, ...CSRF },
+        body: JSON.stringify({ orgId: ownerMe.orgId }),
+      });
+      expect(switchRes.status).toBe(200);
+      const denied = await call("/api/agents/drafts", {
+        method: "POST",
+        headers: { cookie: viewer.cookie, ...CSRF },
+        body: JSON.stringify({
+          mode: "simple",
+          slug: `view-${randomUUID().slice(0, 8)}`,
+          input: {
+            displayName: "Viewer",
+            instructions: "x.",
+            model: "openai/gpt-5.2",
+            toolNames: [],
+            browserEnabled: false,
+            target: { kind: "sandbox" },
+            permissionsPreset: "safe",
+          },
+        }),
+      });
+      expect(denied.status).toBe(403);
+    });
   });
 
 });

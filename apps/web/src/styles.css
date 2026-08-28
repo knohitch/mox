@@ -119,6 +119,25 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; }
 .drawer-backdrop {
   position: fixed; inset: 0; z-index: 890; background: rgba(0, 0, 0, 0.5);
 }
+/* Modal (New Agent / authoring) */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 900; background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px;
+  overflow-y: auto;
+}
+.modal {
+  width: min(620px, 100%); background: var(--bg-raise); border: 1px solid var(--line);
+  border-radius: 14px; padding: 18px 20px; box-shadow: var(--shadow-2);
+}
+.modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.modal-head h3 { margin: 0; }
+.modal-foot { display: flex; align-items: center; gap: 12px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.form-field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-dim); font-weight: 600; }
+.form-field-wide { grid-column: 1 / -1; }
+.form-field input, .form-field textarea, .form-field select { font-weight: 400; }
+.tool-grid { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.dev-editor { width: 100%; min-height: 280px; tab-size: 2; font-size: 12.5px; }
 .menu-toggle { display: none; }
 
 /* Shell body: topbar + main */

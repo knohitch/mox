@@ -41,10 +41,13 @@ import type {
   AdminPlans,
   AdminRuntimeAgent,
   AdminStaff,
+  AgentDraftResult,
+  AgentVersionRow,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
   CreatedStaffInvite,
+  CreateAgentDraftInput,
   CreateStaffInviteInput,
   Entitlements,
   InvoiceRow,
@@ -328,16 +331,23 @@ export class HttpMoxApi implements MoxApi {
   // ---- Roster / definitions ---------------------------------------------------
 
   async listAgents(): Promise<AgentSummary[]> {
-    const rows = await this.call<Array<{ agentId: string; definition: AgentSummary["definition"] }>>("/api/agents");
-    return rows.map((row) => ({ definition: row.definition }));
+    const rows = await this.call<Array<{ agentId: string; slug: string; status: string; definition: AgentSummary["definition"] }>>("/api/agents");
+    return rows.map((row) => ({
+      // The server row id is the ONLY id the mutating routes accept (threads,
+      // drafts, deployments, servers). The definition's own agentId is the
+      // engine-facing identifier and must not be used to address rows.
+      agentId: row.agentId,
+      status: row.status,
+      definition: row.definition,
+    }));
   }
 
   async getAgent(agentId: string): Promise<AgentSummary | undefined> {
     try {
-      const row = await this.call<{ definition: AgentSummary["definition"] }>(
+      const row = await this.call<{ agentId: string; status: string; definition: AgentSummary["definition"] }>(
         `/api/agents/${encodeURIComponent(agentId)}`,
       );
-      return { definition: row.definition };
+      return { agentId: row.agentId, status: row.status, definition: row.definition };
     } catch (error) {
       if (error instanceof ApiUnavailableError) throw error;
       return undefined; // honest 404 → unknown agent
@@ -348,6 +358,38 @@ export class HttpMoxApi implements MoxApi {
     await this.call(`/api/agents/${encodeURIComponent(agentId)}/model`, {
       method: "PATCH",
       body: JSON.stringify({ providerId: modelId.split("/")[0] ?? modelId, modelId }),
+    });
+  }
+
+  // ---- Authoring & versioning (Phase 02 §B / §C) -----------------------------
+
+  async createAgentDraft(input: CreateAgentDraftInput): Promise<AgentDraftResult> {
+    return this.call("/api/agents/drafts", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async updateAgentDraft(agentId: string, input: CreateAgentDraftInput): Promise<AgentDraftResult> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/draft`, { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  async publishAgent(agentId: string, changelog?: string): Promise<{ agentId: string; revision: number; status: string }> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/publish`, {
+      method: "POST",
+      body: JSON.stringify({ changelog }),
+    });
+  }
+
+  async listAgentVersions(agentId: string): Promise<AgentVersionRow[]> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/versions`);
+  }
+
+  async diffAgentVersions(agentId: string, from: number, to: number): Promise<{ from: number; to: number; changes: string[] }> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/versions/diff?from=${from}&to=${to}`);
+  }
+
+  async rollbackAgent(agentId: string, toRevision: number): Promise<{ agentId: string; revision: number }> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ toRevision }),
     });
   }
 
@@ -366,6 +408,10 @@ export class HttpMoxApi implements MoxApi {
 
   async getMessages(threadId: string): Promise<ChatMessage[]> {
     return this.call(`/api/threads/${encodeURIComponent(threadId)}/messages`);
+  }
+
+  async archiveThread(threadId: string): Promise<{ threadId: string; status: string }> {
+    return this.call(`/api/threads/${encodeURIComponent(threadId)}/archive`, { method: "POST" });
   }
 
   /**
@@ -466,6 +512,29 @@ export class HttpMoxApi implements MoxApi {
 
   async listDeployments(): Promise<AgentDeployment[]> {
     return this.call("/api/deployments");
+  }
+
+  async serverAction(
+    orderId: string,
+    action: "restart" | "redeploy" | "resize" | "cancel" | "stop" | "start",
+    computeClassCode?: string,
+  ): Promise<{ ok: boolean }> {
+    return this.call(`/api/servers/${encodeURIComponent(orderId)}/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ computeClassCode }),
+    });
+  }
+
+  async deployAgent(input: { agentId: string; revision: number; target?: { kind?: string; vpsId?: string } }): Promise<{ ok: boolean; state: string }> {
+    return this.call("/api/deployments", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async redeployDeployment(deploymentId: string): Promise<{ ok: boolean; state: string }> {
+    return this.call(`/api/deployments/${encodeURIComponent(deploymentId)}/redeploy`, { method: "POST" });
+  }
+
+  async deploymentRollback(deploymentId: string, toRevision: number): Promise<{ ok: boolean; state: string }> {
+    return this.call(`/api/deployments/${encodeURIComponent(deploymentId)}/rollback`, { method: "POST", body: JSON.stringify({ toRevision }) });
   }
 
   // ---- Models page -----------------------------------------------------------------

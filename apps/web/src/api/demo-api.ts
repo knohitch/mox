@@ -1,35 +1,34 @@
+import { AgentDefinition, AgentId, OrgId, ProviderId, ToolName } from "@mox/contracts";
+import type {
+  AgentDeployment,
+  AgentEvent,
+  AgentRoom,
+  ApprovalRequest,
+} from "@mox/contracts";
 import {
-  AgentId,
-  type AgentDefinition,
-  type AgentDeployment,
-  type AgentEvent,
-  type AgentRoom,
   ApprovalId,
-  type ApprovalRequest,
   EventId,
   MessageId,
   ModelId,
-  OrgId,
-  ProviderId,
   RoomId,
-  ToolName,
   TurnId,
   UserId,
 } from "@mox/contracts";
-
-/** Web-Crypto UUID: works in the browser bundle and Node >=19. */
-const randomUUID = (): string => crypto.randomUUID();
 import type {
+  AgentDraftResult,
   AgentSummary,
+  AgentVersionRow,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
+  CreateAgentDraftInput,
   Entitlements,
   InvoiceRow,
   ModelOption,
   MoxApi,
   SendRunHandle,
   ServerSummary,
+  SimpleAgentInput,
   UsageRow,
 } from "./types.js";
 
@@ -47,6 +46,9 @@ import type {
  * This is NOT a mock success story: it is an honest in-browser stand-in for
  * the control plane, clearly labeled in the UI ("demo data").
  */
+
+// Web-Crypto UUID: works in the browser bundle and Node >=19.
+const randomUUID = (): string => crypto.randomUUID();
 
 const now = (): string => new Date().toISOString();
 
@@ -96,6 +98,9 @@ function seedAgents(): AgentSummary[] {
     deploymentState: AgentDeployment["state"] = "running",
     runtimeStatus = "ready",
   ): AgentSummary => ({
+    // Demo summaries address agents by the same id as the canonical
+    // definition (there is no separate DB row in the in-memory stand-in).
+    agentId,
     definition: definition({
       agentId: AgentId.parse(agentId),
       slug,
@@ -126,6 +131,19 @@ interface StoreShape {
   approvals: Map<string, ApprovalRequest>;
   rooms: Map<string, AgentRoom>;
   computerSessions: Map<string, ComputerSnapshot>;
+  servers: ServerSummary[];
+  deployments: Map<string, AgentDeployment & { desiredRevision?: number }>;
+  versions: Map<string, AgentVersionRow[]>;
+  archivedThreads: Set<string>;
+}
+
+function seedServers(): ServerSummary[] {
+  const at = now();
+  return [
+    { serverId: "srv_1", orderId: "ord_1", displayName: "mox-cloud · eu-central-1", kind: "mox-cloud", region: "eu-central", state: "running", agentsRunning: 3, cpuPct: 41, memPct: 58, createdAt: at, updatedAt: at },
+    { serverId: "srv_2", orderId: "ord_2", displayName: "customer-vps · contabo #8841", kind: "customer-vps", region: "us-east", state: "running", agentsRunning: 1, cpuPct: 12, memPct: 34, createdAt: at, updatedAt: at },
+    { serverId: "srv_3", orderId: "ord_3", displayName: "customer-vps · hetzner #2210", kind: "customer-vps", region: "eu-west", state: "error", agentsRunning: 0, cpuPct: 96, memPct: 91, createdAt: at, updatedAt: at },
+  ];
 }
 
 export class DemoMoxApi implements MoxApi {
@@ -133,8 +151,8 @@ export class DemoMoxApi implements MoxApi {
 
   constructor() {
     const agents = seedAgents();
-    this.s = { agents: new Map(), threads: new Map(), messages: new Map(), events: new Map(), approvals: new Map(), rooms: new Map(), computerSessions: new Map() };
-    for (const a of agents) this.s.agents.set(a.definition.agentId, a);
+    this.s = { agents: new Map(), threads: new Map(), messages: new Map(), events: new Map(), approvals: new Map(), rooms: new Map(), computerSessions: new Map(), servers: seedServers(), deployments: new Map(), versions: new Map(), archivedThreads: new Set() };
+    for (const a of agents) this.s.agents.set(a.agentId, a);
 
     // Primary thread per agent.
     for (const id of ["a_browse", "a_code", "a_writer"]) {
@@ -176,6 +194,21 @@ export class DemoMoxApi implements MoxApi {
         capturedAt: now(),
       },
     );
+
+    // Seed deployments + empty version history for every roster agent.
+    const at = now();
+    for (const a of this.s.agents.values()) {
+      this.s.versions.set(a.agentId, []);
+      this.s.deployments.set(`d_${a.agentId}_3`, {
+        deploymentId: `d_${a.agentId}_3` as AgentDeployment["deploymentId"],
+        agentId: a.definition.agentId,
+        versionId: `v_${a.agentId}_3` as AgentDeployment["versionId"],
+        target: a.definition.deployment,
+        state: (a.deploymentState ?? "stopped") as AgentDeployment["state"],
+        createdAt: at,
+        updatedAt: at,
+      });
+    }
   }
 
   private adminUnavailable(): never {
@@ -225,21 +258,104 @@ export class DemoMoxApi implements MoxApi {
 
   async updateModel(agentId: string, modelId: string): Promise<void> {
     const a = this.requireAgent(agentId);
-    a.modelBadge = modelId;
+    const [provider, model] = modelId.split("/");
+    a.modelBadge = model ?? modelId;
     a.definition = {
       ...a.definition,
       model: {
-        providerId: ProviderId.parse("p_openai"),
-        modelId: ModelId.parse(modelId),
+        providerId: ProviderId.parse(provider && model ? provider : "p_openai"),
+        modelId: ModelId.parse(model ?? modelId),
       },
       updatedAt: now(),
     };
   }
 
+  // ---- Authoring & versioning (Phase 02 §B / §C) --------------------------
+
+  async createAgentDraft(input: CreateAgentDraftInput): Promise<AgentDraftResult> {
+    const slug = input.slug;
+    if ([...this.s.agents.values()].some((a) => a.definition.slug === slug)) {
+      throw new Error(`agent slug ${slug} already exists`);
+    }
+    const definition = compileDemoInput(slug, input);
+    const agentId = definition.agentId;
+    if (this.s.agents.has(agentId)) {
+      throw new Error(`agent slug ${slug} already exists`);
+    }
+    const summary: AgentSummary = {
+      agentId,
+      definition,
+      deploymentState: "stopped",
+      runtimeStatus: "draft",
+      status: "draft",
+      currentVersion: 0,
+      modelBadge: definition.model.modelId,
+    };
+    this.s.agents.set(agentId, summary);
+    this.s.versions.set(agentId, []);
+    return { agentId, slug, status: "draft", currentVersion: 0, definition };
+  }
+
+  async updateAgentDraft(agentId: string, input: CreateAgentDraftInput): Promise<AgentDraftResult> {
+    const a = this.requireAgent(agentId);
+    const definition = compileDemoInput(a.definition.slug, input);
+    a.definition = definition;
+    a.modelBadge = definition.model.modelId;
+    const currentVersion = this.latestRevision(agentId);
+    return { agentId, slug: a.definition.slug, status: currentVersion > 0 ? "active" : "draft", currentVersion, definition };
+  }
+
+  async publishAgent(agentId: string, changelog?: string): Promise<{ agentId: string; revision: number; status: string }> {
+    const a = this.requireAgent(agentId);
+    const list = this.s.versions.get(agentId) ?? [];
+    const revision = list.length ? list[list.length - 1]!.revision + 1 : 1;
+    list.push({
+      revision,
+      changelog: changelog ?? null,
+      createdBy: "u_demo",
+      createdAt: now(),
+      definition: { ...a.definition },
+    });
+    this.s.versions.set(agentId, list);
+    a.runtimeStatus = "active";
+    a.status = "active";
+    a.currentVersion = revision;
+    return { agentId, revision, status: "active" };
+  }
+
+  async listAgentVersions(agentId: string): Promise<AgentVersionRow[]> {
+    this.requireAgent(agentId);
+    return [...(this.s.versions.get(agentId) ?? [])];
+  }
+
+  async diffAgentVersions(agentId: string, from: number, to: number): Promise<{ from: number; to: number; changes: string[] }> {
+    const list = this.s.versions.get(agentId) ?? [];
+    const a = list.find((v) => v.revision === from);
+    const b = list.find((v) => v.revision === to);
+    if (!a || !b) throw new Error("both revisions must be published");
+    return { from, to, changes: diffDemoDefinitions(a.definition, b.definition) };
+  }
+
+  async rollbackAgent(agentId: string, toRevision: number): Promise<{ agentId: string; revision: number }> {
+    const a = this.requireAgent(agentId);
+    const list = this.s.versions.get(agentId) ?? [];
+    const target = list.find((v) => v.revision === toRevision);
+    if (!target) throw new Error(`revision ${toRevision} not found`);
+    a.definition = target.definition;
+    a.currentVersion = toRevision;
+    return { agentId, revision: toRevision };
+  }
+
   // ---- Threads & chat ----
 
   async listThreads(subjectId: string): Promise<Array<{ threadId: string; title?: string }>> {
-    return this.s.threads.get(subjectId) ?? [];
+    return (this.s.threads.get(subjectId) ?? []).filter((t) => !this.s.archivedThreads.has(t.threadId));
+  }
+
+  async archiveThread(threadId: string): Promise<{ threadId: string; status: string }> {
+    if (!this.s.messages.has(threadId)) throw new Error(`thread ${threadId} not found`);
+    this.s.archivedThreads.add(threadId);
+    return { threadId, status: "archived" };
   }
 
   async createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }> {
@@ -340,29 +456,103 @@ export class DemoMoxApi implements MoxApi {
   // ---- Infrastructure ----
 
   async listServers(): Promise<ServerSummary[]> {
-    const at = now();
-    return [
-      { serverId: "srv_1", orderId: "ord_1", displayName: "mox-cloud · eu-central-1", kind: "mox-cloud", region: "eu-central", state: "running", agentsRunning: 3, cpuPct: 41, memPct: 58, createdAt: at, updatedAt: at },
-      { serverId: "srv_2", orderId: "ord_2", displayName: "customer-vps · contabo #8841", kind: "customer-vps", region: "us-east", state: "running", agentsRunning: 1, cpuPct: 12, memPct: 34, createdAt: at, updatedAt: at },
-      { serverId: "srv_3", orderId: "ord_3", displayName: "customer-vps · hetzner #2210", kind: "customer-vps", region: "eu-west", state: "error", agentsRunning: 0, cpuPct: 96, memPct: 91, createdAt: at, updatedAt: at },
-    ];
+    return this.s.servers.map((s) => ({ ...s }));
+  }
+
+  async serverAction(
+    orderId: string,
+    action: "restart" | "redeploy" | "resize" | "cancel" | "stop" | "start",
+    computeClassCode?: string,
+  ): Promise<{ ok: boolean }> {
+    const srv = this.s.servers.find((x) => x.orderId === orderId);
+    if (!srv) throw new Error("server order not found or not owned by your org");
+    switch (action) {
+      case "resize":
+        if (!computeClassCode) throw new Error("computeClassCode is required for resize");
+        srv.computeClass = computeClassCode;
+        srv.state = "resizing";
+        break;
+      case "stop":
+        srv.state = "stopped";
+        break;
+      case "start":
+        srv.state = "running";
+        break;
+      case "cancel":
+        srv.state = "canceled";
+        break;
+      case "restart":
+      case "redeploy":
+        // Reboot/redeploy is in flight; the state stays authoritative until
+        // orchestration reports a transition (no fake success state).
+        break;
+    }
+    srv.updatedAt = now();
+    return { ok: true };
   }
 
   async listDeployments(): Promise<AgentDeployment[]> {
-    const at = now();
-    const rows: AgentDeployment[] = [];
-    for (const a of this.s.agents.values()) {
-      rows.push({
-        deploymentId: `d_${a.definition.agentId}` as AgentDeployment["deploymentId"],
-        agentId: a.definition.agentId,
-        versionId: `v_${a.definition.agentId}_3` as AgentDeployment["versionId"],
-        target: a.definition.deployment,
-        state: (a.deploymentState ?? "stopped") as AgentDeployment["state"],
-        createdAt: at,
-        updatedAt: at,
-      });
+    return [...this.s.deployments.values()].map((d) => ({ ...d }));
+  }
+
+  async deployAgent(input: { agentId: string; revision: number; target?: { kind?: string; vpsId?: string } }): Promise<{ ok: boolean; state: string }> {
+    const a = this.requireAgent(input.agentId);
+    const versions = this.s.versions.get(input.agentId) ?? [];
+    if (!versions.some((v) => v.revision === input.revision)) {
+      throw new Error(`revision ${input.revision} is not published`);
     }
-    return rows;
+    const kind =
+      input.target?.kind === "customer-vps"
+        ? ({ kind: "customer-vps", vpsId: input.target.vpsId ?? "srv_demo" } as const)
+        : input.target?.kind === "mox-cloud"
+          ? ({ kind: "mox-cloud", region: input.target.vpsId } as const)
+          : ({ kind: "sandbox" } as const);
+    const nowIso = now();
+    const existing = [...this.s.deployments.values()].find((d) => d.agentId === input.agentId);
+    if (existing) {
+      const updated: AgentDeployment & { desiredRevision?: number } = {
+        ...existing,
+        target: kind,
+        desiredRevision: input.revision,
+        updatedAt: nowIso,
+      };
+      this.s.deployments.set(existing.deploymentId, updated);
+    } else {
+      const dep: AgentDeployment & { desiredRevision?: number } = {
+        deploymentId: `d_${a.agentId}_${input.revision}` as AgentDeployment["deploymentId"],
+        agentId: a.definition.agentId,
+        versionId: `v_${a.agentId}_${input.revision}` as AgentDeployment["versionId"],
+        target: kind,
+        state: "desired",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        desiredRevision: input.revision,
+      };
+      this.s.deployments.set(dep.deploymentId, dep);
+    }
+    a.currentVersion = input.revision;
+    return { ok: true, state: "desired" };
+  }
+
+  async redeployDeployment(deploymentId: string): Promise<{ ok: boolean; state: string }> {
+    const dep = this.s.deployments.get(deploymentId);
+    if (!dep) throw new Error("deployment not found or not owned by your org");
+    dep.updatedAt = now();
+    return { ok: true, state: "desired" };
+  }
+
+  async deploymentRollback(deploymentId: string, toRevision: number): Promise<{ ok: boolean; state: string }> {
+    const dep = this.s.deployments.get(deploymentId);
+    if (!dep) throw new Error("deployment not found or not owned by your org");
+    const a = this.requireAgent(dep.agentId);
+    const versions = this.s.versions.get(dep.agentId) ?? [];
+    if (!versions.some((v) => v.revision === toRevision)) {
+      throw new Error(`revision ${toRevision} is not published`);
+    }
+    dep.desiredRevision = toRevision;
+    dep.updatedAt = now();
+    a.currentVersion = toRevision;
+    return { ok: true, state: "desired" };
   }
 
   // ---- Models ----
@@ -522,6 +712,11 @@ export class DemoMoxApi implements MoxApi {
     const a = this.s.agents.get(agentId);
     if (!a) throw new Error(`unknown agent: ${agentId}`);
     return a;
+  }
+
+  private latestRevision(agentId: string): number {
+    const list = this.s.versions.get(agentId) ?? [];
+    return list.length ? list[list.length - 1]!.revision : 0;
   }
 
   private requireSession(agentId: string): ComputerSnapshot {
@@ -694,4 +889,106 @@ function finishTurn(
 function guessUrl(text: string): string {
   const m = /https?:\/\/[^\s]+/i.exec(text);
   return m?.[0] ?? "https://example.com/quarterly-report";
+}
+
+// ---------------------------------------------------------------------------
+// Demo authoring mirror (Phase 02 §B): Simple/Developer modes compile to the
+// SAME canonical AgentDefinition the hosted control plane stores. This is a
+// dev-only stand-in for `services/agent-control` builder logic — the shipped
+// product compiles server-side at `POST /api/agents/drafts`.
+// ---------------------------------------------------------------------------
+
+const DEMO_PERMISSION_PRESETS: Record<
+  SimpleAgentInput["permissionsPreset"],
+  { toolPolicy: "default" | "allow-all" | "custom"; requireApprovalFor: NonNullable<AgentDefinition["permissions"]["requireApprovalFor"]> }
+> = {
+  safe: { toolPolicy: "default", requireApprovalFor: ["computer", "spend", "external-send", "deployment"] },
+  balanced: { toolPolicy: "default", requireApprovalFor: ["spend", "external-send"] },
+  full: { toolPolicy: "allow-all", requireApprovalFor: [] },
+};
+
+function parseModelSelection(model: string): { providerId: string; modelId: string } {
+  const [providerId, modelId] = model.split("/");
+  if (!providerId || !modelId) throw new Error(`model must be "provider/model": ${model}`);
+  return { providerId, modelId };
+}
+
+function compileDemoInput(slug: string, input: CreateAgentDraftInput): AgentDefinition {
+  if (input.mode === "developer") {
+    const raw = AgentDefinition.parse(input.raw);
+    if (raw.orgId !== OrgId.parse("org_demo")) {
+      throw new Error("definition orgId must match your organization");
+    }
+    return {
+      ...raw,
+      slug,
+      agentId: AgentId.parse(`agent_${slug}`),
+      authoring: { ...raw.authoring, mode: "developer" },
+    };
+  }
+  const p: SimpleAgentInput = input.input;
+  const preset = DEMO_PERMISSION_PRESETS[p.permissionsPreset];
+  const model = parseModelSelection(p.model);
+  const at = now();
+  return AgentDefinition.parse({
+    schemaVersion: 1,
+    agentId: AgentId.parse(`agent_${slug}`),
+    slug,
+    orgId: OrgId.parse("org_demo"),
+    identity: { displayName: p.displayName, role: p.role, avatarUrl: p.avatarUrl },
+    instructions: { text: p.instructions },
+    model: { providerId: ProviderId.parse(model.providerId), modelId: ModelId.parse(model.modelId) },
+    tools: { toolNames: p.toolNames.map((t) => ToolName.parse(t)), integrations: [] },
+    skills: [],
+    knowledge: (p.knowledgeIds ?? []).map((id) => ({ knowledgeId: id, access: ["read", "search"] as const })),
+    computer: {
+      enabled: p.browserEnabled,
+      allowBrowser: p.browserEnabled,
+      sandbox: p.browserEnabled ? "container" : "none",
+    },
+    voice: { enabled: Boolean(p.voiceEnabled), voiceId: p.voiceId },
+    channels: (p.channelIds ?? []).map((id) => ({ channelId: id })),
+    deployment: p.target as AgentDefinition["deployment"],
+    permissions: { toolPolicy: preset.toolPolicy, requireApprovalFor: preset.requireApprovalFor },
+    memory: { enabled: true, scope: "org" },
+    schedules: p.schedule ? [{ scheduleId: `sched_demo_${slug}`, ...p.schedule, enabled: true }] : [],
+    workflows: [],
+    subagents: [],
+    authoring: { mode: "simple" },
+    metadata: {},
+    createdAt: at,
+    updatedAt: at,
+  });
+}
+
+function valueKey(label: string, changed: boolean): string | null {
+  return changed ? label : null;
+}
+
+function diffDemoDefinitions(a: AgentDefinition, b: AgentDefinition): string[] {
+  const changes: string[] = [];
+  for (const k of [
+    valueKey("identity", a.identity.displayName !== b.identity.displayName || a.identity.role !== b.identity.role),
+    valueKey("instructions", a.instructions.text !== b.instructions.text),
+    valueKey("model", a.model.providerId !== b.model.providerId || a.model.modelId !== b.model.modelId),
+    valueKey("tools", JSON.stringify(a.tools) !== JSON.stringify(b.tools)),
+    valueKey("knowledge", JSON.stringify(a.knowledge) !== JSON.stringify(b.knowledge)),
+    valueKey("skills", JSON.stringify(a.skills) !== JSON.stringify(b.skills)),
+    valueKey("computer", JSON.stringify(a.computer) !== JSON.stringify(b.computer)),
+    valueKey("voice", JSON.stringify(a.voice) !== JSON.stringify(b.voice)),
+    valueKey("channels", JSON.stringify(a.channels) !== JSON.stringify(b.channels)),
+    valueKey("deployment", JSON.stringify(a.deployment) !== JSON.stringify(b.deployment)),
+    valueKey(
+      "permissions",
+      a.permissions.toolPolicy !== b.permissions.toolPolicy ||
+        JSON.stringify(a.permissions.requireApprovalFor) !== JSON.stringify(b.permissions.requireApprovalFor),
+    ),
+    valueKey("memory", JSON.stringify(a.memory) !== JSON.stringify(b.memory)),
+    valueKey("schedules", JSON.stringify(a.schedules) !== JSON.stringify(b.schedules)),
+    valueKey("workflows", JSON.stringify(a.workflows) !== JSON.stringify(b.workflows)),
+    valueKey("subagents", JSON.stringify(a.subagents) !== JSON.stringify(b.subagents)),
+  ]) {
+    if (k) changes.push(k);
+  }
+  return changes;
 }

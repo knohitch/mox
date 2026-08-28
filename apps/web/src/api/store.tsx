@@ -55,6 +55,8 @@ interface MoxStore {
   forgotPassword(email: string): Promise<ForgotPasswordResponse>;
   resetPassword(input: ResetPasswordRequest): Promise<void>;
   agents: AgentSummary[];
+  /** Re-pull the roster from the API (used after authoring/publishing). */
+  refreshAgents(): Promise<void>;
   entitlements: Entitlements | undefined;
   approvals: ApprovalRequest[];
   messages(threadId: string): ChatMessage[];
@@ -95,8 +97,15 @@ function failingApi(message: string): MoxApi {
     listAgents: fail,
     getAgent: fail,
     updateModel: fail,
+    createAgentDraft: fail,
+    updateAgentDraft: fail,
+    publishAgent: fail,
+    listAgentVersions: fail,
+    diffAgentVersions: fail,
+    rollbackAgent: fail,
     listThreads: fail,
     createThread: fail,
+    archiveThread: fail,
     getMessages: fail,
     send: () => Promise.reject(new Error(message)),
     openApprovals: fail,
@@ -105,7 +114,11 @@ function failingApi(message: string): MoxApi {
     listRooms: fail,
     createRoom: fail,
     listServers: fail,
+    serverAction: fail,
     listDeployments: fail,
+    deployAgent: fail,
+    redeployDeployment: fail,
+    deploymentRollback: fail,
     listModels: fail,
     testProviderConnection: () => Promise.resolve({ ok: false, reason: message }),
     listCliEngines: fail,
@@ -536,6 +549,7 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     forgotPassword,
     resetPassword,
     agents,
+    refreshAgents: async () => setAgents(await api.listAgents()),
     entitlements,
     approvals,
     messages: (threadId) => messagesByThread.get(threadId) ?? [],
