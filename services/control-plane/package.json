@@ -24,6 +24,7 @@
     "@mox/compute-orchestrator": "workspace:*",
     "@mox/contracts": "workspace:*",
     "@mox/control-plane-contracts": "workspace:*",
+    "@mox/credentials": "workspace:*",
     "@mox/database": "workspace:*",
     "@mox/entitlements": "workspace:*",
     "@mox/notification-service": "workspace:*",

@@ -18,17 +18,25 @@ import type {
   AgentDraftResult,
   AgentSummary,
   AgentVersionRow,
+  ApiTokenRow,
+  BillingProviderOption,
+  ChannelCatalogRow,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
   CreateAgentDraftInput,
   Entitlements,
+  IntegrationCatalogRow,
   InvoiceRow,
+  ModelConnectionRow,
   ModelOption,
   MoxApi,
+  PlanOption,
   SendRunHandle,
   ServerSummary,
   SimpleAgentInput,
+  SubscriptionView,
+  ToolGrantRow,
   UsageRow,
 } from "./types.js";
 
@@ -135,6 +143,17 @@ interface StoreShape {
   deployments: Map<string, AgentDeployment & { desiredRevision?: number }>;
   versions: Map<string, AgentVersionRow[]>;
   archivedThreads: Set<string>;
+  // Phase 03 — commerce/connections (in-memory stand-in for the DB + vault)
+  plans: PlanOption[];
+  subscription: SubscriptionView | null;
+  billingProviders: BillingProviderOption[];
+  apiTokens: ApiTokenRow[];
+  modelConnections: ModelConnectionRow[];
+  /** Demo "vault" — secrets accepted once, never echoed by any reader. */
+  connectionSecrets: Map<string, Record<string, string>>;
+  integrations: IntegrationCatalogRow[];
+  integrationGrants: Map<string, ToolGrantRow[]>;
+  channels: ChannelCatalogRow[];
 }
 
 function seedServers(): ServerSummary[] {
@@ -146,12 +165,172 @@ function seedServers(): ServerSummary[] {
   ];
 }
 
+// Phase 03 — demo commerce/connection state. Amounts are integer minor units.
+// The hosted path resolves ALL of this from the control plane (§A–§D); this
+// stand-in only keeps view behavior exercisable without a backend.
+
+function seedPlans(): PlanOption[] {
+  const features = (maxAgents: number, modelConnections: number, browser: number, cli: number, teams: number, dev: boolean, credits: number) => ({
+    max_agents: maxAgents,
+    model_connections: modelConnections,
+    browser_sessions: browser,
+    cli_sessions: cli,
+    team_members: teams,
+    developer_mode: dev,
+    mox_ai_credits: credits,
+  });
+  return [
+    {
+      planVersionId: "pv_plus",
+      tier: "plus",
+      name: "Plus",
+      available: true,
+      features: features(3, 1, 1, 0, 1, false, 0),
+      pricingRegions: [
+        { pricingRegionCode: "GLOBAL", displayName: "Global", available: true, currency: "USD", amountMinor: 2_500 },
+        { pricingRegionCode: "EUR", displayName: "Eurozone", available: true, currency: "EUR", amountMinor: 2_300 },
+      ],
+    },
+    {
+      planVersionId: "pv_pro",
+      tier: "pro",
+      name: "Pro",
+      available: true,
+      features: features(10, 2, 1, 1, 3, true, 25_000),
+      pricingRegions: [
+        { pricingRegionCode: "GLOBAL", displayName: "Global", available: true, currency: "USD", amountMinor: 8_900 },
+        { pricingRegionCode: "EUR", displayName: "Eurozone", available: true, currency: "EUR", amountMinor: 8_200 },
+      ],
+    },
+    {
+      planVersionId: "pv_max",
+      tier: "max",
+      name: "Max",
+      available: true,
+      features: features(25, 5, 2, 2, 10, true, 100_000),
+      pricingRegions: [
+        { pricingRegionCode: "GLOBAL", displayName: "Global", available: true, currency: "USD", amountMinor: 24_000 },
+        { pricingRegionCode: "EUR", displayName: "Eurozone", available: true, currency: "EUR", amountMinor: 22_000 },
+      ],
+    },
+    {
+      planVersionId: "pv_enterprise",
+      tier: "enterprise",
+      name: "Enterprise",
+      available: false,
+      features: features(0, 0, 0, 0, 0, true, 0),
+      pricingRegions: [
+        { pricingRegionCode: "GLOBAL", displayName: "Global", available: false, currency: "USD", amountMinor: null },
+      ],
+    },
+  ];
+}
+
+function seedSubscription(): SubscriptionView {
+  return {
+    id: "sub_demo",
+    planVersionId: "pv_pro",
+    state: "active",
+    providerName: "stripe",
+    providerEnvironment: "test",
+    currentPeriodStart: "2026-08-01T00:00:00.000Z",
+    currentPeriodEnd: "2026-08-31T23:59:59.999Z",
+    cancelAtPeriodEnd: false,
+    reconciliationRequired: false,
+    plan: { planVersionId: "pv_pro", version: 3, tier: "pro", name: "Pro" },
+    commercialAccess: { entitled: true },
+    cancellation: null,
+  };
+}
+
+function seedBillingProviders(): BillingProviderOption[] {
+  return [
+    { providerName: "stripe", displayName: "Stripe", environment: "test", enabled: true, supportedCurrencies: ["USD", "EUR", "GBP"], available: true },
+    { providerName: "paypal", displayName: "PayPal", environment: "test", enabled: true, supportedCurrencies: ["USD", "EUR"], available: true },
+    { providerName: "paystack", displayName: "Paystack", environment: "test", enabled: false, supportedCurrencies: ["NGN"], available: false },
+  ];
+}
+
+function seedModelConnections(): ModelConnectionRow[] {
+  return [
+    { providerId: "openai", displayName: "OpenAI", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: false, baseUrl: null, modelCount: 2 },
+    { providerId: "anthropic", displayName: "Anthropic", kind: "api", status: "configured", connected: true, credentialConfigured: true, authMethods: ["api_key"], baseUrlSupported: false, baseUrl: null, modelCount: 2 },
+    { providerId: "xai", displayName: "xAI", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: false, baseUrl: null, modelCount: 1 },
+    { providerId: "deepseek", displayName: "DeepSeek", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: false, baseUrl: null, modelCount: 1 },
+    { providerId: "gemini", displayName: "Google Gemini", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: true, baseUrl: null, modelCount: 1 },
+    { providerId: "openrouter", displayName: "OpenRouter", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: true, baseUrl: null, modelCount: 1 },
+    { providerId: "openai-compatible", displayName: "OpenAI-compatible endpoint", kind: "api", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["api_key"], baseUrlSupported: true, baseUrl: null, modelCount: 0 },
+    { providerId: "mox", displayName: "Mox · Included", kind: "local", status: "unconfigured", connected: false, credentialConfigured: false, authMethods: ["none"], baseUrlSupported: false, baseUrl: null, modelCount: 1 },
+  ];
+}
+
+function seedIntegrations(): IntegrationCatalogRow[] {
+  return [
+    { integrationId: "github", displayName: "GitHub", kind: "git", connectionId: "ic_github", status: "active", credentialConfigured: true, connected: true, requiresRuntimeSession: false, dangerous: false, tools: ["github.issues.read", "github.issues.write", "github.repos.read"], configFields: [{ key: "apiKey", label: "Personal access token", secret: true, optional: false }] },
+    { integrationId: "notion", displayName: "Notion", kind: "doc", connectionId: null, status: "not_configured", credentialConfigured: false, connected: false, requiresRuntimeSession: false, dangerous: false, tools: ["notion.read", "notion.write"], configFields: [{ key: "integrationToken", label: "Integration token", secret: true, optional: false }] },
+    { integrationId: "slack", displayName: "Slack", kind: "messaging", connectionId: null, status: "not_configured", credentialConfigured: false, connected: false, requiresRuntimeSession: true, dangerous: false, tools: ["slack.post", "slack.read"], configFields: [{ key: "botToken", label: "Bot token", secret: true, optional: false }] },
+    { integrationId: "composio", displayName: "Composio", kind: "mcp", connectionId: null, status: "not_configured", credentialConfigured: false, connected: false, requiresRuntimeSession: true, dangerous: true, tools: ["composio.exec"], configFields: [{ key: "composioApiKey", label: "Composio API key", secret: true, optional: false }] },
+    { integrationId: "n8n", displayName: "n8n", kind: "webhook", connectionId: "ic_n8n", status: "active", credentialConfigured: true, connected: true, requiresRuntimeSession: true, dangerous: false, tools: ["n8n.trigger"], configFields: [{ key: "webhookToken", label: "Webhook secret token", secret: true, optional: true }] },
+    { integrationId: "make", displayName: "Make", kind: "oauth", connectionId: null, status: "not_configured", credentialConfigured: false, connected: false, requiresRuntimeSession: true, dangerous: false, tools: ["make.scenario"], configFields: [{ key: "oauthClientSecret", label: "OAuth client secret", secret: true, optional: true }] },
+    { integrationId: "generic-webhook", displayName: "Generic webhook", kind: "webhook", connectionId: null, status: "not_configured", credentialConfigured: false, connected: false, requiresRuntimeSession: false, dangerous: false, tools: ["webhook.deliver"], configFields: [{ key: "webhookToken", label: "Webhook secret token", secret: true, optional: true }] },
+  ];
+}
+
+function seedChannels(): ChannelCatalogRow[] {
+  const base = (channelId: string, displayName: string, kind: string, setupInstructions: string, prerequisites: string | null, secretKeys: string[]) => ({
+    channelId,
+    displayName,
+    kind,
+    setupInstructions,
+    prerequisites,
+    secretKeys,
+  });
+  const notConfigured = {
+    connectionId: null,
+    status: "not_configured",
+    credentialConfigured: false,
+    connected: false,
+    boundAgentId: null,
+    boundAgentName: null,
+  };
+  return [
+    { ...base("web", "Web chat", "web", "Embed the web chat surface in your site; no external credential is required.", "None", []), ...notConfigured },
+    { ...base("whatsapp", "WhatsApp", "whatsapp", "Store a WhatsApp Business Cloud API credential against this agent.", "WhatsApp Business API access", ["accessToken", "phoneNumberId"]), ...notConfigured },
+    { ...base("telegram", "Telegram", "telegram", "Create a bot with @BotFather and store its bot token.", "Telegram bot token", ["botToken"]), ...notConfigured },
+    { ...base("slack", "Slack", "slack", "Install the app into your workspace and store the bot token and signing secret.", "Slack app with bot scope", ["botToken", "signingSecret"]), ...notConfigured },
+    { ...base("discord", "Discord", "discord", "Create a bot application and store its bot token.", "Discord bot token", ["botToken"]), ...notConfigured },
+    { ...base("teams", "Microsoft Teams", "teams", "Register an Entra app and store its bot credential.", "Microsoft Entra bot credential", ["appId", "appSecret"]), ...notConfigured },
+    { ...base("generic-webhook", "Generic webhook", "webhook", "Webhook ingress is not wired on this deployment; secret-based delivery needs a runtime gateway.", "Runtime gateway (not wired)", []), ...notConfigured },
+  ];
+}
+
 export class DemoMoxApi implements MoxApi {
   private readonly s: StoreShape;
 
   constructor() {
     const agents = seedAgents();
-    this.s = { agents: new Map(), threads: new Map(), messages: new Map(), events: new Map(), approvals: new Map(), rooms: new Map(), computerSessions: new Map(), servers: seedServers(), deployments: new Map(), versions: new Map(), archivedThreads: new Set() };
+    this.s = {
+      agents: new Map(),
+      threads: new Map(),
+      messages: new Map(),
+      events: new Map(),
+      approvals: new Map(),
+      rooms: new Map(),
+      computerSessions: new Map(),
+      servers: seedServers(),
+      deployments: new Map(),
+      versions: new Map(),
+      archivedThreads: new Set(),
+      plans: seedPlans(),
+      subscription: seedSubscription(),
+      billingProviders: seedBillingProviders(),
+      apiTokens: [],
+      modelConnections: seedModelConnections(),
+      connectionSecrets: new Map(),
+      integrations: seedIntegrations(),
+      integrationGrants: new Map(),
+      channels: seedChannels(),
+    };
     for (const a of agents) this.s.agents.set(a.agentId, a);
 
     // Primary thread per agent.
@@ -208,6 +387,22 @@ export class DemoMoxApi implements MoxApi {
         createdAt: at,
         updatedAt: at,
       });
+    }
+
+    // Demo "vault" rows for the already-connected surfaces (never echoed back).
+    this.s.connectionSecrets.set("model:anthropic", { apiKey: "sk-demo-anthropic" });
+    this.s.connectionSecrets.set("integration:github", { apiKey: "ghp_demo_github" });
+    this.s.connectionSecrets.set("integration:n8n", { webhookToken: "whsec_demo_n8n" });
+    this.s.connectionSecrets.set("channel:web:a_browse", {});
+    // The web channel ships bound to a demo agent (no credential required).
+    const webChannel = this.s.channels.find((c) => c.channelId === "web");
+    if (webChannel) {
+      webChannel.connectionId = "cn_web_a_browse";
+      webChannel.status = "active";
+      webChannel.credentialConfigured = true;
+      webChannel.connected = true;
+      webChannel.boundAgentId = "a_browse";
+      webChannel.boundAgentName = "Browsy";
     }
   }
 
@@ -558,18 +753,30 @@ export class DemoMoxApi implements MoxApi {
   // ---- Models ----
 
   async listModels(): Promise<ModelOption[]> {
-    return [
-      { modelId: "gpt-4.1", providerId: "p_openai", displayName: "OpenAI · GPT-4.1", byok: false, available: true },
-      { modelId: "claude-sonnet-4", providerId: "p_anthropic", displayName: "Anthropic · Claude Sonnet 4", byok: true, available: true },
-      { modelId: "grok-4", providerId: "p_xai", displayName: "xAI · Grok 4", byok: true, available: true },
-      { modelId: "deepseek-v4", providerId: "p_deepseek", displayName: "DeepSeek · V4", byok: true, available: true },
-      { modelId: "mox-agent", providerId: "p_mox", displayName: "Mox · mox-agent", byok: false, available: false },
+    const connections = new Map(this.s.modelConnections.map((c) => [c.providerId, c]));
+    const catalog: Array<{ modelId: string; providerId: string; displayName: string }> = [
+      { modelId: "gpt-4.1", providerId: "openai", displayName: "OpenAI · GPT-4.1" },
+      { modelId: "gpt-4o-mini", providerId: "openai", displayName: "OpenAI · GPT-4o mini" },
+      { modelId: "claude-sonnet-4", providerId: "anthropic", displayName: "Anthropic · Claude Sonnet 4" },
+      { modelId: "claude-haiku-3.5", providerId: "anthropic", displayName: "Anthropic · Claude Haiku 3.5" },
+      { modelId: "grok-4", providerId: "xai", displayName: "xAI · Grok 4" },
+      { modelId: "deepseek-v4", providerId: "deepseek", displayName: "DeepSeek · V4" },
+      { modelId: "gemini-2.5-pro", providerId: "gemini", displayName: "Google · Gemini 2.5 Pro" },
+      { modelId: "openrouter-auto", providerId: "openrouter", displayName: "OpenRouter · auto" },
+      { modelId: "mox-agent", providerId: "mox", displayName: "Mox · mox-agent" },
     ];
+    return catalog.map((m) => {
+      const conn = connections.get(m.providerId);
+      const hasCreds = Boolean(conn?.credentialConfigured);
+      const ready = hasCreds && conn?.status === "configured";
+      return { modelId: m.modelId, providerId: m.providerId, displayName: m.displayName, byok: hasCreds, available: ready };
+    });
   }
 
   async testProviderConnection(providerId: string): Promise<{ ok: boolean; reason?: string }> {
-    if (providerId === "p_mox") {
-      return { ok: false, reason: "not-configured: no Mox-included inference backend connected yet" };
+    const conn = this.s.modelConnections.find((c) => c.providerId === providerId);
+    if (!conn?.credentialConfigured) {
+      return { ok: false, reason: "not-configured: connect a credential for this provider first" };
     }
     await new Promise((r) => setTimeout(r, 150));
     return { ok: true };
@@ -592,29 +799,172 @@ export class DemoMoxApi implements MoxApi {
     ];
   }
 
-  // ---- Integrations & channels ----
+  // ---- BYOK / model connections (Phase 03 §B/§G) ----
 
-  async listIntegrations(): Promise<Array<{ integrationId: string; displayName: string; connected: boolean }>> {
-    return [
-      { integrationId: "i_github", displayName: "GitHub", connected: true },
-      { integrationId: "i_notion", displayName: "Notion", connected: false },
-      { integrationId: "i_composio", displayName: "Composio", connected: false },
-      { integrationId: "i_n8n", displayName: "n8n", connected: true },
-    ];
+  async listModelConnections(): Promise<ModelConnectionRow[]> {
+    return this.s.modelConnections.map((c) => ({ ...c }));
   }
 
-  async toggleIntegration(integrationId: string, connected: boolean): Promise<void> {
-    void integrationId;
-    void connected;
+  async connectModelConnection(providerId: string, input: { apiKey?: string; baseUrl?: string; models?: string[] }): Promise<ModelConnectionRow> {
+    const row = this.s.modelConnections.find((c) => c.providerId === providerId);
+    if (!row) throw new Error(`provider ${providerId} not found`);
+    if (row.authMethods.includes("api_key")) {
+      if (!input.apiKey?.trim()) throw new Error(`${row.displayName} requires an API key`);
+      // Secrets land in the demo vault and are never echoed on read.
+      this.s.connectionSecrets.set(`model:${providerId}`, { apiKey: input.apiKey.trim() });
+    }
+    row.status = "configured";
+    row.credentialConfigured = true;
+    row.connected = true;
+    row.baseUrl = input.baseUrl ?? row.baseUrl;
+    if (Array.isArray(input.models) && input.models.length > 0) {
+      row.modelCount += input.models.length;
+    }
+    return { ...row };
   }
 
-  async listChannels(): Promise<Array<{ channelId: string; displayName: string; kind: string; connected: boolean }>> {
-    return [
-      { channelId: "ch_web", displayName: "Web chat", kind: "web", connected: true },
-      { channelId: "ch_whatsapp", displayName: "WhatsApp", kind: "whatsapp", connected: true },
-      { channelId: "ch_slack", displayName: "Slack", kind: "slack", connected: false },
-      { channelId: "ch_telegram", displayName: "Telegram", kind: "telegram", connected: false },
-    ];
+  async rotateModelConnection(providerId: string, input: { apiKey: string }): Promise<ModelConnectionRow> {
+    const row = this.s.modelConnections.find((c) => c.providerId === providerId);
+    if (!row) throw new Error(`provider ${providerId} not found`);
+    if (!row.credentialConfigured) throw new Error("provider has no secret to rotate; connect it first");
+    if (!input.apiKey?.trim()) throw new Error("a new API key is required");
+    this.s.connectionSecrets.set(`model:${providerId}`, { apiKey: input.apiKey.trim() });
+    return { ...row };
+  }
+
+  async disconnectModelConnection(providerId: string): Promise<{ ok: boolean; providerId: string }> {
+    const row = this.s.modelConnections.find((c) => c.providerId === providerId);
+    if (!row) throw new Error(`provider ${providerId} not found`);
+    const wasConfigured = row.credentialConfigured;
+    row.status = "unconfigured";
+    row.credentialConfigured = false;
+    row.connected = false;
+    row.baseUrl = null;
+    if (wasConfigured) this.s.connectionSecrets.delete(`model:${providerId}`);
+    return { ok: true, providerId };
+  }
+
+  // ---- Integrations & channels (Phase 03 §C/§D) ----
+
+  async listIntegrations(): Promise<IntegrationCatalogRow[]> {
+    return this.s.integrations.map((i) => ({ ...i, configFields: i.configFields.map((f) => ({ ...f })) }));
+  }
+
+  async connectIntegration(integrationId: string, input: { secrets?: Record<string, string>; config?: Record<string, unknown> }): Promise<{ ok: boolean; integrationId: string; connected: boolean }> {
+    const row = this.s.integrations.find((i) => i.integrationId === integrationId);
+    if (!row) throw new Error(`integration ${integrationId} not found`);
+    const missing = row.configFields.filter((f) => f.secret && !f.optional && !((input.secrets?.[f.key] ?? "").trim()));
+    const firstMissing = missing[0];
+    if (missing.length > 0 && firstMissing) throw new Error(`${firstMissing.label} is required to connect ${row.displayName}`);
+    const secrets: Record<string, string> = {};
+    for (const f of row.configFields) {
+      const value = (input.secrets?.[f.key] ?? "").trim();
+      if (f.secret && value) secrets[f.key] = value;
+    }
+    this.s.connectionSecrets.set(`integration:${integrationId}`, secrets);
+    row.connectionId = `ic_${integrationId}`;
+    row.status = "active";
+    row.credentialConfigured = true;
+    row.connected = true;
+    return { ok: true, integrationId, connected: true };
+  }
+
+  async disconnectIntegration(integrationId: string): Promise<{ ok: boolean; integrationId: string; connected: boolean }> {
+    const row = this.s.integrations.find((i) => i.integrationId === integrationId);
+    if (!row) throw new Error(`integration ${integrationId} not found`);
+    row.status = "not_configured";
+    row.connectionId = null;
+    row.credentialConfigured = false;
+    row.connected = false;
+    this.s.connectionSecrets.delete(`integration:${integrationId}`);
+    this.s.integrationGrants.delete(integrationId);
+    return { ok: true, integrationId, connected: false };
+  }
+
+  async listIntegrationGrants(integrationId: string): Promise<ToolGrantRow[]> {
+    const grants = this.s.integrationGrants.get(integrationId) ?? [];
+    const agents = this.s.agents;
+    return grants.map((g) => ({ ...g, agentName: agents.get(g.agentId)?.definition.identity.displayName }));
+  }
+
+  async grantIntegrationTool(integrationId: string, input: { agentId: string; toolPattern?: string }): Promise<{ ok: boolean; grantId: string }> {
+    const row = this.s.integrations.find((i) => i.integrationId === integrationId);
+    if (!row) throw new Error(`integration ${integrationId} not found`);
+    if (!row.credentialConfigured || row.status !== "active") throw new Error("connect the integration before granting tools");
+    if (!this.s.agents.has(input.agentId)) throw new Error("agent not found or not owned by your org");
+    const toolPattern = input.toolPattern?.trim() || "*";
+    const grants = this.s.integrationGrants.get(integrationId) ?? [];
+    const existing = grants.find((g) => g.agentId === input.agentId && g.toolPattern === toolPattern);
+    if (existing) return { ok: true, grantId: existing.grantId };
+    const grantId = `tg_${randomUUID()}`;
+    grants.push({ grantId, agentId: input.agentId, toolPattern });
+    this.s.integrationGrants.set(integrationId, grants);
+    return { ok: true, grantId };
+  }
+
+  async revokeIntegrationGrant(integrationId: string, grantId: string): Promise<{ ok: boolean; grantId: string }> {
+    const grants = this.s.integrationGrants.get(integrationId) ?? [];
+    const next = grants.filter((g) => g.grantId !== grantId);
+    if (next.length === grants.length) throw new Error("grant not found");
+    this.s.integrationGrants.set(integrationId, next);
+    return { ok: true, grantId };
+  }
+
+  async listChannels(): Promise<ChannelCatalogRow[]> {
+    return this.s.channels.map((c) => ({ ...c }));
+  }
+
+  async connectChannel(channelId: string, input: { agentId: string; secrets?: Record<string, string> }): Promise<{ ok: boolean; channelId: string; agentId: string; connected: boolean }> {
+    const row = this.s.channels.find((c) => c.channelId === channelId);
+    if (!row) throw new Error(`channel ${channelId} not found`);
+    if (!this.s.agents.has(input.agentId)) throw new Error("agent not found or not owned by your org");
+    if (row.kind !== "web" && (!input.secrets || Object.values(input.secrets).every((v) => !v?.trim()))) {
+      throw new Error(`${row.displayName} requires credentials to connect`);
+    }
+    const secrets: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.secrets ?? {})) if (v?.trim()) secrets[k] = v.trim();
+    if (row.kind !== "web") this.s.connectionSecrets.set(`channel:${channelId}:${input.agentId}`, secrets);
+    const agent = this.s.agents.get(input.agentId);
+    row.connectionId = `cn_${channelId}_${input.agentId}`;
+    row.status = "active";
+    row.credentialConfigured = true;
+    row.connected = true;
+    row.boundAgentId = input.agentId;
+    row.boundAgentName = agent?.definition.identity.displayName ?? null;
+    return { ok: true, channelId, agentId: input.agentId, connected: true };
+  }
+
+  async reconnectChannel(connectionId: string, input: { secrets?: Record<string, string> }): Promise<{ ok: boolean; connectionId: string; connected: boolean; boundAgentId: string }> {
+    const row = this.s.channels.find((c) => c.connectionId === connectionId);
+    if (!row || !row.boundAgentId) throw new Error("connection not found or not owned by your org");
+    if (row.kind !== "web" && (!input.secrets || Object.values(input.secrets).every((v) => !v?.trim()))) {
+      throw new Error("credentials are required to reconnect");
+    }
+    const secrets: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input.secrets ?? {})) if (v?.trim()) secrets[k] = v.trim();
+    if (row.kind !== "web") this.s.connectionSecrets.set(`channel:${row.channelId}:${row.boundAgentId}`, secrets);
+    row.status = "active";
+    row.connected = true;
+    return { ok: true, connectionId, connected: true, boundAgentId: row.boundAgentId };
+  }
+
+  async disconnectChannel(connectionId: string): Promise<{ ok: boolean; connectionId: string; connected: boolean }> {
+    const row = this.s.channels.find((c) => c.connectionId === connectionId);
+    if (!row) throw new Error("connection not found or not owned by your org");
+    if (row.kind !== "web") this.s.connectionSecrets.delete(`channel:${row.channelId}:${row.boundAgentId}`);
+    row.status = "disconnected";
+    row.connected = false;
+    row.boundAgentId = null;
+    row.boundAgentName = null;
+    row.connectionId = null;
+    return { ok: true, connectionId, connected: false };
+  }
+
+  async testChannel(connectionId: string): Promise<{ ok: boolean; reason?: string }> {
+    const row = this.s.channels.find((c) => c.connectionId === connectionId);
+    if (!row) throw new Error("connection not found or not owned by your org");
+    if (row.kind === "web") return { ok: true };
+    return { ok: false, reason: "not-configured: channel health probes require a runtime gateway that is not configured on this deployment" };
   }
 
   // ---- Usage/billing/settings ----
@@ -651,6 +1001,69 @@ export class DemoMoxApi implements MoxApi {
         developer_mode: true,
       },
     };
+  }
+
+  // ---- Phase 03: billing self-service (§A) ----
+
+  async listPlans(): Promise<PlanOption[]> {
+    return this.s.plans.map((p) => ({ ...p, features: { ...p.features }, pricingRegions: p.pricingRegions.map((r) => ({ ...r })) }));
+  }
+
+  async getSubscription(): Promise<SubscriptionView | null> {
+    return this.s.subscription ? { ...this.s.subscription, plan: this.s.subscription.plan ? { ...this.s.subscription.plan } : null } : null;
+  }
+
+  async listBillingProviders(): Promise<BillingProviderOption[]> {
+    return this.s.billingProviders.map((p) => ({ ...p }));
+  }
+
+  async startCheckout(input: { planVersionId: string; pricingRegionCode?: string; providerName: string; successUrl: string; cancelUrl: string }): Promise<{ sessionId: string; providerRef: string; redirectUrl: string; state: string }> {
+    const plan = this.s.plans.find((p) => p.planVersionId === input.planVersionId);
+    if (!plan) throw new Error(`plan version ${input.planVersionId} not found`);
+    const region = this.s.plans.flatMap((p) => p.pricingRegions).find((r) => r.pricingRegionCode === (input.pricingRegionCode ?? "GLOBAL"));
+    if (!region) throw new Error("no price book for the requested region");
+    if (input.providerName !== "stripe" && input.providerName !== "paypal") {
+      throw new Error(`checkout provider ${input.providerName} is not enabled`);
+    }
+    const sessionId = `cs_${randomUUID()}`;
+    return { sessionId, providerRef: `cs_demo_${sessionId}`, redirectUrl: `https://checkout-demo.example.com/${sessionId}`, state: "created" };
+  }
+
+  async cancelSubscription(): Promise<{ ok: boolean; subscriptionId: string }> {
+    if (!this.s.subscription) throw new Error("no active subscription for this organization");
+    this.s.subscription = {
+      ...this.s.subscription,
+      cancelAtPeriodEnd: true,
+      cancellation: { state: "pending", attempts: 0, nextAttemptAt: null },
+    };
+    return { ok: true, subscriptionId: this.s.subscription.id };
+  }
+
+  async reconcileCheckout(input: { sessionId?: string }): Promise<Record<string, unknown>> {
+    if (!input.sessionId) throw new Error("sessionId is required");
+    return { sessionId: input.sessionId, state: "resolved", reconciled: true, matched: true };
+  }
+
+  // ---- Phase 03: personal API tokens (§E) ----
+
+  async createApiToken(input: { name: string; scopes?: string[] }): Promise<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }> {
+    const token = `mox_demo_${randomUUID().replace(/-/g, "")}`;
+    const tokenId = `tok_${randomUUID()}`;
+    const scopes = input.scopes ?? ["agents:read"];
+    const expiresAt = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+    this.s.apiTokens.push({ tokenId, name: input.name, scopes, createdAt: now(), expiresAt, revoked: false });
+    // Plaintext appears exactly once, mirroring the hosted contract.
+    return { token, tokenId, scopes, expiresAt };
+  }
+
+  async listApiTokens(): Promise<ApiTokenRow[]> {
+    return this.s.apiTokens.map((t) => ({ ...t }));
+  }
+
+  async revokeApiToken(tokenId: string): Promise<void> {
+    const token = this.s.apiTokens.find((t) => t.tokenId === tokenId);
+    if (!token) throw new Error("token not found");
+    token.revoked = true;
   }
 
   // ---- Computer (gateway contract) ----

@@ -67,6 +67,8 @@ interface MoxStore {
   resolveApproval(approvalId: string, outcome: "approved" | "denied"): Promise<void>;
   eventsVersion: number;
   invalidateEvents(): void;
+  /** Re-pull the entitlement surface (used after billing changes, Phase 03 §A). */
+  refreshEntitlements(): Promise<void>;
 }
 
 const Ctx = createContext<MoxStore | null>(null);
@@ -122,12 +124,33 @@ function failingApi(message: string): MoxApi {
     listModels: fail,
     testProviderConnection: () => Promise.resolve({ ok: false, reason: message }),
     listCliEngines: fail,
+    listModelConnections: fail,
+    connectModelConnection: fail,
+    rotateModelConnection: fail,
+    disconnectModelConnection: fail,
     listIntegrations: fail,
-    toggleIntegration: fail,
+    connectIntegration: fail,
+    disconnectIntegration: fail,
+    listIntegrationGrants: fail,
+    grantIntegrationTool: fail,
+    revokeIntegrationGrant: fail,
     listChannels: fail,
+    connectChannel: fail,
+    reconnectChannel: fail,
+    disconnectChannel: fail,
+    testChannel: () => Promise.resolve({ ok: false, reason: message }),
     getUsage: fail,
     listInvoices: fail,
     getEntitlements: fail,
+    listPlans: fail,
+    getSubscription: fail,
+    listBillingProviders: fail,
+    startCheckout: fail,
+    cancelSubscription: fail,
+    reconcileCheckout: fail,
+    createApiToken: fail,
+    listApiTokens: fail,
+    revokeApiToken: fail,
     adminOverview: fail,
     adminCustomers: fail,
     adminCustomerAction: fail,
@@ -550,6 +573,7 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     resetPassword,
     agents,
     refreshAgents: async () => setAgents(await api.listAgents()),
+    refreshEntitlements: async () => setEntitlements(await api.getEntitlements()),
     entitlements,
     approvals,
     messages: (threadId) => messagesByThread.get(threadId) ?? [],

@@ -142,6 +142,13 @@ export interface ControlPlaneConfig {
    * to browsers, never used as a login path, and never logged.
    */
   setupToken?: string;
+  /**
+   * Customer credential vault master key (Phase 03 §B/§C/§D). Encrypts
+   * customer BYOK/integration/channel secrets via @mox/credentials at rest.
+   * Optional: deployments without it expose an honest 501 for secret-bearing
+   * connect flows instead of storing plaintext anywhere.
+   */
+  customerCredentialsKey?: string;
   sessionTtlMs: number;
   /** Optional CORS allowlist for API origins (credentials excluded). */
   corsOrigins: string[];
@@ -311,6 +318,9 @@ export function loadControlPlaneConfig(
     // Server-side only; absent setupToken means setup cannot run until an
     // operator configures it — accounts are created via signup or setup.
     setupToken: env["MOX_SETUP_TOKEN"] || undefined,
+    // Phase 03: optional customer credential vault master key. Prefer the
+    // dedicated variable; MOX_CREDENTIALS_KEY remains a compatible fallback.
+    customerCredentialsKey: env["MOX_CUSTOMER_CREDENTIALS_KEY"] || env["MOX_CREDENTIALS_KEY"] || undefined,
     sessionTtlMs: Number(env["MOX_SESSION_TTL_MS"] ?? 12 * 3600_000),
     corsOrigins: (env["MOX_CORS_ORIGINS"] ?? "")
       .split(",")

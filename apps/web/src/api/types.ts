@@ -146,6 +146,140 @@ export interface CliEngineRow {
   reason?: string;
 }
 
+// ---- Phase 03: billing self-service (§A) ------------------------------------
+
+export interface BillingProviderOption {
+  providerName: string;
+  displayName: string;
+  environment: string;
+  enabled: boolean;
+  supportedCurrencies: string[];
+  available: boolean;
+}
+
+export interface PlanPricingRegion {
+  pricingRegionCode: string;
+  displayName: string;
+  available: boolean;
+  currency: string;
+  amountMinor: number | null;
+}
+
+export interface PlanOption {
+  planVersionId: string;
+  tier: "plus" | "pro" | "max" | "enterprise";
+  name: string;
+  /** Effective entitlement values for the plan version (customer-safe). */
+  features: Record<string, boolean | number | string | null>;
+  pricingRegions: PlanPricingRegion[];
+  available: boolean;
+}
+
+export interface SubscriptionView {
+  id: string;
+  planVersionId: string;
+  state: string;
+  providerName?: string;
+  providerEnvironment?: string;
+  currentPeriodStart?: string;
+  currentPeriodEnd?: string;
+  trialEndsAt?: string;
+  graceEndsAt?: string;
+  cancelAtPeriodEnd: boolean;
+  suspensionReason?: string;
+  reconciliationRequired: boolean;
+  plan: { planVersionId: string; version: number; tier: string; name: string } | null;
+  commercialAccess: { entitled: boolean; denialReason?: string };
+  cancellation: {
+    state: string;
+    attempts: number;
+    lastError?: string;
+    nextAttemptAt?: string | null;
+  } | null;
+}
+
+// ---- Phase 03: personal API tokens (§E) -------------------------------------
+
+export interface ApiTokenRow {
+  tokenId: string;
+  name: string;
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string;
+  revoked: boolean;
+  lastUsedAt?: string;
+}
+
+export interface CreatedApiTokenView {
+  token: string;
+  tokenId: string;
+  scopes: string[];
+  expiresAt: string;
+}
+
+// ---- Phase 03: BYOK / model connections (§B/§G) -----------------------------
+
+export interface ModelConnectionRow {
+  providerId: string;
+  displayName: string;
+  kind: string;
+  status: string;
+  connected: boolean;
+  credentialConfigured: boolean;
+  authMethods: string[];
+  baseUrlSupported: boolean;
+  baseUrl: string | null;
+  modelCount: number;
+}
+
+// ---- Phase 03: integrations + tool grants (§C) ------------------------------
+
+export interface IntegrationConfigField {
+  key: string;
+  label: string;
+  secret: boolean;
+  optional: boolean;
+}
+
+export interface IntegrationCatalogRow {
+  integrationId: string;
+  displayName: string;
+  kind: string;
+  connectionId: string | null;
+  status: string;
+  credentialConfigured: boolean;
+  connected: boolean;
+  requiresRuntimeSession: boolean;
+  dangerous: boolean;
+  tools: string[];
+  configFields: IntegrationConfigField[];
+}
+
+export interface ToolGrantRow {
+  grantId: string;
+  agentId: string;
+  toolPattern: string;
+  agentName?: string;
+}
+
+// ---- Phase 03: channels (§D) ------------------------------------------------
+
+export interface ChannelCatalogRow {
+  channelId: string;
+  displayName: string;
+  kind: string;
+  setupInstructions: string;
+  prerequisites: string | null;
+  /** Expected secret field names for this channel (never values). */
+  secretKeys: string[];
+  connectionId: string | null;
+  status: string;
+  credentialConfigured: boolean;
+  connected: boolean;
+  boundAgentId: string | null;
+  boundAgentName: string | null;
+}
+
 export interface AdminOverview {
   metrics: {
     customers: number;
@@ -400,15 +534,46 @@ export interface MoxApi {
   testProviderConnection(providerId: string): Promise<{ ok: boolean; reason?: string }>;
   listCliEngines(): Promise<CliEngineRow[]>;
 
-  // Integrations/Apps + Channels
-  listIntegrations(): Promise<Array<{ integrationId: string; displayName: string; connected: boolean }>>;
-  toggleIntegration(integrationId: string, connected: boolean): Promise<void>;
-  listChannels(): Promise<Array<{ channelId: string; displayName: string; kind: string; connected: boolean }>>;
+  // BYOK / model connections (Phase 03 §B/§G)
+  listModelConnections(): Promise<ModelConnectionRow[]>;
+  connectModelConnection(providerId: string, input: { apiKey?: string; baseUrl?: string; models?: string[] }): Promise<ModelConnectionRow>;
+  rotateModelConnection(providerId: string, input: { apiKey: string }): Promise<ModelConnectionRow>;
+  disconnectModelConnection(providerId: string): Promise<{ ok: boolean; providerId: string }>;
+
+  // Integrations/Apps + Channels (Phase 03 §C/§D)
+  listIntegrations(): Promise<IntegrationCatalogRow[]>;
+  connectIntegration(integrationId: string, input: { secrets?: Record<string, string>; config?: Record<string, unknown> }): Promise<{ ok: boolean; integrationId: string; connected: boolean }>;
+  disconnectIntegration(integrationId: string): Promise<{ ok: boolean; integrationId: string; connected: boolean }>;
+  listIntegrationGrants(integrationId: string): Promise<ToolGrantRow[]>;
+  grantIntegrationTool(integrationId: string, input: { agentId: string; toolPattern?: string }): Promise<{ ok: boolean; grantId: string }>;
+  revokeIntegrationGrant(integrationId: string, grantId: string): Promise<{ ok: boolean; grantId: string }>;
+  listChannels(): Promise<ChannelCatalogRow[]>;
+  connectChannel(channelId: string, input: { agentId: string; secrets?: Record<string, string> }): Promise<{ ok: boolean; channelId: string; agentId: string; connected: boolean }>;
+  reconnectChannel(connectionId: string, input: { secrets?: Record<string, string> }): Promise<{ ok: boolean; connectionId: string; connected: boolean; boundAgentId: string }>;
+  disconnectChannel(connectionId: string): Promise<{ ok: boolean; connectionId: string; connected: boolean }>;
+  testChannel(connectionId: string): Promise<{ ok: boolean; reason?: string }>;
 
   // Usage/billing/settings
   getUsage(): Promise<UsageRow[]>;
   listInvoices(): Promise<InvoiceRow[]>;
   getEntitlements(): Promise<Entitlements>;
+  listPlans(): Promise<PlanOption[]>;
+  getSubscription(): Promise<SubscriptionView | null>;
+  listBillingProviders(): Promise<BillingProviderOption[]>;
+  startCheckout(input: {
+    planVersionId: string;
+    pricingRegionCode?: string;
+    providerName: string;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<{ sessionId: string; providerRef: string; redirectUrl: string; state: string }>;
+  cancelSubscription(): Promise<{ ok: boolean; subscriptionId: string }>;
+  reconcileCheckout(input: { sessionId?: string }): Promise<Record<string, unknown>>;
+
+  // Personal access tokens (Phase 03 §E)
+  createApiToken(input: { name: string; scopes?: string[] }): Promise<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }>;
+  listApiTokens(): Promise<ApiTokenRow[]>;
+  revokeApiToken(tokenId: string): Promise<void>;
 
   // Protected Mox Admin
   adminOverview(): Promise<AdminOverview>;

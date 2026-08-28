@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
 import { InMemoryTokenStore, type ApiClient } from "../src/api.js";
 import { main, type CliIo } from "../src/main.js";
 
@@ -37,7 +38,7 @@ const TOKEN = "test-token-1234567890";
 describe("mox cli", () => {
   it("sends bearer tokens on API calls and prints responses", async () => {
     const { api, requests } = fakeApi({
-      "GET /v1/whoami": () => ({ userId: "u-1", email: "dev@example.test" }),
+      "GET /api/me": () => ({ userId: "u-1", email: "dev@example.test" }),
     });
     // Wrap to assert auth header behavior via token store presence.
     const tokens = new InMemoryTokenStore();
@@ -60,56 +61,123 @@ describe("mox cli", () => {
     expect(await tokens.get()).toBeUndefined();
   });
 
-  it("servers list/get hit the right endpoints", async () => {
+  it("whoami/agents/models/channels/integrations hit /api routes", async () => {
+    const { api, requests } = fakeApi();
+    const tokens = new InMemoryTokenStore();
+    const cases: Array<{ argv: string[]; path: string }> = [
+      { argv: ["whoami"], path: "/api/me" },
+      { argv: ["agents", "list"], path: "/api/agents" },
+      { argv: ["agents", "get", "a-1"], path: "/api/agents/a-1" },
+      { argv: ["models", "connections"], path: "/api/model-connections" },
+      { argv: ["channels", "list"], path: "/api/channels" },
+      { argv: ["integrations", "list"], path: "/api/integrations" },
+    ];
+    for (const c of cases) {
+      const ctx = captureIo();
+      const code = await main({ argv: c.argv, api, tokens, io: ctx.io });
+      expect(code).toBe(0);
+    }
+    expect(requests.map((r) => r.path)).toEqual(cases.map((c) => c.path));
+  });
+
+  it("servers list hits /api/servers; get is honestly unsupported", async () => {
     const { api, requests } = fakeApi({
-      "GET /v1/servers": () => [{ id: "srv-1", state: "running" }],
-      "GET /v1/servers/srv-1": () => ({ id: "srv-1", ipv4: "203.0.113.9" }),
+      "GET /api/servers": () => [{ id: "srv-1", state: "running" }],
     });
     const tokens = new InMemoryTokenStore();
     const list = captureIo();
     await main({ argv: ["servers", "list"], api, tokens, io: list.io });
-    expect(requests[0]?.path).toBe("/v1/servers");
+    expect(requests[0]?.path).toBe("/api/servers");
 
+    const before = requests.length;
     const get = captureIo();
-    await main({ argv: ["servers", "get", "srv-1"], api, tokens, io: get.io });
-    expect(requests[1]?.path).toBe("/v1/servers/srv-1");
-    expect(JSON.parse(get.out[0]!).ipv4).toBe("203.0.113.9");
+    const code = await main({ argv: ["servers", "get", "srv-1"], api, tokens, io: get.io });
+    expect(code).toBe(1);
+    expect(requests.length).toBe(before);
+    expect(get.errors[0]).toContain("unsupported");
   });
 
-  it("deploy requires a slug and forwards revision flag", async () => {
+  it("orgs and per-id deployment status are honestly unsupported", async () => {
+    const { api, requests } = fakeApi();
+    const tokens = new InMemoryTokenStore();
+    const orgs = captureIo();
+    const orgsCode = await main({ argv: ["orgs", "list"], api, tokens, io: orgs.io });
+    expect(orgsCode).toBe(1);
+    expect(orgs.errors[0]).toContain("unsupported");
+
+    const status = captureIo();
+    const statusCode = await main({ argv: ["deployment", "status", "d-1"], api, tokens, io: status.io });
+    expect(statusCode).toBe(1);
+    expect(status.errors[0]).toContain("unsupported");
+
+    const list = captureIo();
+    await main({ argv: ["deployment", "list"], api, tokens, io: list.io });
+    expect(requests[0]?.path).toBe("/api/deployments");
+  });
+
+  it("deploy requires an agent id and forwards the revision flag", async () => {
     const { api, requests } = fakeApi();
     const tokens = new InMemoryTokenStore();
     const ctx = captureIo();
-    await main({ argv: ["deploy", "sales-helper", "--revision", "3"], api, tokens, io: ctx.io });
+    await main({ argv: ["deploy", "a-39c0f2", "--revision", "3"], api, tokens, io: ctx.io });
     expect(requests[0]).toEqual({
       method: "POST",
-      path: "/v1/agents/sales-helper/deployments",
-      body: { revision: 3 },
+      path: "/api/deployments",
+      body: { agentId: "a-39c0f2", revision: 3 },
     });
 
     const missing = captureIo();
     const code = await main({ argv: ["deploy"], api, tokens, io: missing.io });
     expect(code).toBe(1);
-    expect(missing.errors[0]).toContain("agent-slug");
+    expect(missing.errors[0]).toContain("agent-id");
   });
 
-  it("terminal asks the server, which enforces entitlements server-side", async () => {
-    let terminalCalls = 0;
+  it("logs and terminal target per-agent /api routes", async () => {
+    const { api, requests } = fakeApi();
+    const tokens = new InMemoryTokenStore();
+    const logs = captureIo();
+    await main({ argv: ["logs", "a-1"], api, tokens, io: logs.io });
+    expect(requests[0]?.path).toBe("/api/agents/a-1/logs");
+
+    const term = captureIo();
+    await main({ argv: ["terminal", "a-1"], api, tokens, io: term.io });
+    expect(requests[1]).toEqual({
+      method: "POST",
+      path: "/api/agents/a-1/terminal",
+      body: {},
+    });
+  });
+
+  it("terminal surfaces server-side enforcement errors honestly", async () => {
     const { api, requests } = fakeApi({
-      "POST /v1/servers": () => {
-        terminalCalls += 1;
+      "POST /api/agents": () => {
         // Server-side gate denies unentitled plans.
-        throw new Error("API POST /v1/servers/srv-1/terminal failed (403): cli_sessions not enabled");
+        throw new Error("API POST /api/agents/ag-2/terminal failed (403): cli_sessions not enabled");
       },
     });
     const tokens = new InMemoryTokenStore();
     const ctx = captureIo();
-    const code = await main({ argv: ["terminal", "srv-1"], api, tokens, io: ctx.io });
-    void terminalCalls;
+    const code = await main({ argv: ["terminal", "ag-2"], api, tokens, io: ctx.io });
     expect(code).toBe(1);
     expect(ctx.errors[0]).toContain("403");
     expect(ctx.errors[0]).toContain("not enabled");
     expect(requests[0]?.method).toBe("POST");
+  });
+
+  it("agents create/update forward the JSON body to draft routes", async () => {
+    const { api, requests } = fakeApi();
+    const tokens = new InMemoryTokenStore();
+    const bodyFile = fileURLToPath(new URL("./fixtures/agent-body.json", import.meta.url));
+    const create = captureIo();
+    await main({ argv: ["agents", "create", bodyFile], api, tokens, io: create.io });
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.path).toBe("/api/agents/drafts");
+    expect((requests[0]?.body as { slug?: string })?.slug).toBe("sales-helper");
+
+    const update = captureIo();
+    await main({ argv: ["agents", "update", "a-1", bodyFile], api, tokens, io: update.io });
+    expect(requests[1]?.method).toBe("PATCH");
+    expect(requests[1]?.path).toBe("/api/agents/a-1/draft");
   });
 
   it("help lists all required commands", async () => {

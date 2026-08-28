@@ -1,6 +1,12 @@
 /**
  * CLI command implementations. Each command receives its dependencies so
  * tests can drive the full surface against a fake API client.
+ *
+ * Phase 03 §F: every command targets a real public `/api` route on the Mox
+ * control plane. There is deliberately no `/v1` surface, no slug-based
+ * addressing (row ids only), and no fabricated endpoints — where the public
+ * API genuinely lacks a route, the command says so honestly instead of
+ * guessing at a URL.
  */
 
 import type { ApiClient, CliIo } from "./api.js";
@@ -26,6 +32,16 @@ function requireArg(args: string[], index: number, label: string): string {
   const value = args[index];
   if (!value) throw new Error(`missing <${label}> argument`);
   return value;
+}
+
+async function readJsonFile(file: string): Promise<unknown> {
+  const fs = await import("node:fs/promises");
+  const text = await fs.readFile(file, "utf8");
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`file ${file} is not valid JSON`);
+  }
 }
 
 export const commands: Command[] = [
@@ -54,60 +70,59 @@ export const commands: Command[] = [
     summary: "Show the authenticated identity",
     usage: "mox whoami",
     async run({ api, io }) {
-      io.print(formatJson(await api.request("GET", "/v1/whoami")));
+      io.print(formatJson(await api.request("GET", "/api/me")));
     },
   },
   {
     name: "orgs",
-    summary: "List organizations",
+    summary: "Organization commands (public API exposes no listing — switch in the web app)",
     usage: "mox orgs list",
-    async run({ api, args, io }) {
-      if (args[0] !== "list") throw new Error("usage: mox orgs list");
-      io.print(formatJson(await api.request("GET", "/v1/orgs")));
+    async run({ io }) {
+      throw new Error(
+        "unsupported: the public API does not expose an organization listing; " +
+          "switch organizations in the web app, then re-login with a token for that org",
+      );
     },
   },
   {
     name: "servers",
-    summary: "List or get servers",
-    usage: "mox servers list | mox servers get <id>",
+    summary: "List servers (ordered server detail is not a public route)",
+    usage: "mox servers list",
     async run({ api, args, io }) {
       if (args[0] === "list") {
-        io.print(formatJson(await api.request("GET", "/v1/servers")));
+        io.print(formatJson(await api.request("GET", "/api/servers")));
         return;
       }
       if (args[0] === "get") {
-        const id = requireArg(args, 1, "server-id");
-        io.print(formatJson(await api.request("GET", `/v1/servers/${encodeURIComponent(id)}`)));
-        return;
+        throw new Error(
+          "unsupported: server detail is not exposed as a public route; " +
+            "use `mox servers list` for the current state",
+        );
       }
-      throw new Error("usage: mox servers list | mox servers get <id>");
+      throw new Error("usage: mox servers list");
     },
   },
   {
     name: "agents",
-    summary: "Agent CRUD",
-    usage: "mox agents list|get <slug>|create <json-file>|update <slug> <json-file>",
+    summary: "Agent CRUD by row id",
+    usage: "mox agents list|get <id>|create <body.json>|update <id> <body.json>",
     async run({ api, args, io }) {
       switch (args[0]) {
         case "list":
-          io.print(formatJson(await api.request("GET", "/v1/agents")));
+          io.print(formatJson(await api.request("GET", "/api/agents")));
           return;
-        case "get": {
-          const slug = requireArg(args, 1, "agent-slug");
-          io.print(formatJson(await api.request("GET", `/v1/agents/${encodeURIComponent(slug)}`)));
+        case "get":
+          io.print(formatJson(await api.request("GET", `/api/agents/${encodeURIComponent(requireArg(args, 1, "agent-id"))}`)));
           return;
-        }
         case "create": {
-          const file = requireArg(args, 1, "definition.json");
-          const body = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(file, "utf8")));
-          io.print(formatJson(await api.request("POST", "/v1/agents", body)));
+          const body = await readJsonFile(requireArg(args, 1, "body.json"));
+          io.print(formatJson(await api.request("POST", "/api/agents/drafts", body)));
           return;
         }
         case "update": {
-          const slug = requireArg(args, 1, "agent-slug");
-          const file = requireArg(args, 2, "definition.json");
-          const body = JSON.parse(await import("node:fs/promises").then((fs) => fs.readFile(file, "utf8")));
-          io.print(formatJson(await api.request("PATCH", `/v1/agents/${encodeURIComponent(slug)}`, body)));
+          const id = requireArg(args, 1, "agent-id");
+          const body = await readJsonFile(requireArg(args, 2, "body.json"));
+          io.print(formatJson(await api.request("PATCH", `/api/agents/${encodeURIComponent(id)}/draft`, body)));
           return;
         }
         default:
@@ -118,34 +133,42 @@ export const commands: Command[] = [
   {
     name: "deploy",
     summary: "Deploy a published agent revision",
-    usage: "mox deploy <slug> --revision <n>",
+    usage: "mox deploy <agent-id> --revision <n>",
     async run({ api, args, flags, io }) {
-      const slug = requireArg(args, 0, "agent-slug");
+      const agentId = requireArg(args, 0, "agent-id");
       const revision = Number(flags.revision ?? "latest");
       io.print(
         formatJson(
-          await api.request("POST", `/v1/agents/${encodeURIComponent(slug)}/deployments`, { revision }),
+          await api.request("POST", "/api/deployments", { agentId, revision }),
         ),
       );
     },
   },
   {
     name: "deployment",
-    summary: "Deployment status",
-    usage: "mox deployment status <deployment-id>",
+    summary: "Deployment status (list is public; per-id detail is not a public route)",
+    usage: "mox deployment list",
     async run({ api, args, io }) {
-      if (args[0] !== "status") throw new Error("usage: mox deployment status <id>");
-      const id = requireArg(args, 1, "deployment-id");
-      io.print(formatJson(await api.request("GET", `/v1/deployments/${encodeURIComponent(id)}`)));
+      if (args[0] === "list") {
+        io.print(formatJson(await api.request("GET", "/api/deployments")));
+        return;
+      }
+      if (args[0] === "status") {
+        throw new Error(
+          "unsupported: per-deployment detail is not exposed as a public route; " +
+            "use `mox deployment list` for the current state",
+        );
+      }
+      throw new Error("usage: mox deployment list");
     },
   },
   {
     name: "logs",
-    summary: "Stream or fetch agent logs",
-    usage: "mox logs <deployment-id>",
+    summary: "Fetch agent logs (honest 501 when log streaming is not configured)",
+    usage: "mox logs <agent-id>",
     async run({ api, args, io }) {
-      const id = requireArg(args, 0, "deployment-id");
-      io.print(formatJson(await api.request("GET", `/v1/deployments/${encodeURIComponent(id)}/logs`)));
+      const id = requireArg(args, 0, "agent-id");
+      io.print(formatJson(await api.request("GET", `/api/agents/${encodeURIComponent(id)}/logs`)));
     },
   },
   {
@@ -154,7 +177,7 @@ export const commands: Command[] = [
     usage: "mox models connections",
     async run({ api, args, io }) {
       if (args[0] !== "connections") throw new Error("usage: mox models connections");
-      io.print(formatJson(await api.request("GET", "/v1/models/connections")));
+      io.print(formatJson(await api.request("GET", "/api/model-connections")));
     },
   },
   {
@@ -163,7 +186,7 @@ export const commands: Command[] = [
     usage: "mox channels list",
     async run({ api, args, io }) {
       if (args[0] !== "list") throw new Error("usage: mox channels list");
-      io.print(formatJson(await api.request("GET", "/v1/channels")));
+      io.print(formatJson(await api.request("GET", "/api/channels")));
     },
   },
   {
@@ -172,17 +195,18 @@ export const commands: Command[] = [
     usage: "mox integrations list",
     async run({ api, args, io }) {
       if (args[0] !== "list") throw new Error("usage: mox integrations list");
-      io.print(formatJson(await api.request("GET", "/v1/integrations")));
+      io.print(formatJson(await api.request("GET", "/api/integrations")));
     },
   },
   {
     name: "terminal",
-    summary: "Open a browser terminal session to an owned server (entitlement-gated server-side)",
-    usage: "mox terminal <server-id>",
+    summary: "Open a terminal session to an owned agent (entitlement-gated server-side)",
+    usage: "mox terminal <agent-id>",
     async run({ api, args, io }) {
-      const id = requireArg(args, 0, "server-id");
-      // The SERVER validates entitlements and ownership; the CLI only asks.
-      io.print(formatJson(await api.request("POST", `/v1/servers/${encodeURIComponent(id)}/terminal`, {})));
+      const id = requireArg(args, 0, "agent-id");
+      // The SERVER validates entitlements and ownership (and answers honestly
+      // when no runtime terminal is configured — 501); the CLI only asks.
+      io.print(formatJson(await api.request("POST", `/api/agents/${encodeURIComponent(id)}/terminal`, {})));
     },
   },
 ];

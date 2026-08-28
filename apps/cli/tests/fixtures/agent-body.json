@@ -1,0 +1,9 @@
+{
+  "mode": "simple",
+  "slug": "sales-helper",
+  "input": {
+    "displayName": "Sales Helper",
+    "role": "research assistant for the sales team",
+    "model": "mox/agent"
+  }
+}

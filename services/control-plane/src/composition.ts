@@ -25,6 +25,7 @@ import {
   approvalRequests,
   billingProviderConfigs,
   PgBillingStore,
+  PgCustomerCredentialStore,
   PgEntitlementStore,
   PgMemoryStore,
   PgMessageStore,
@@ -43,6 +44,7 @@ import {
   StripeProvider,
 } from "@mox/billing";
 import { ComputeOrchestrator } from "@mox/compute-orchestrator";
+import { CustomerCredentialService } from "@mox/credentials";
 import { EntitlementService } from "@mox/entitlements";
 import { NotificationService } from "@mox/notification-service";
 import { AgentRuntime, assertMoxRuntimeMode, verifyFullMoxRuntime, type SessionEventStoreLike } from "@mox/agent-runtime";
@@ -63,6 +65,12 @@ export interface ControlPlaneServices {
   events: PgSessionEventStore;
   memory: PgMemoryStore;
   runtime?: AgentRuntime;
+  /**
+   * Customer credential vault (Phase 03 §B/§C/§D). Absent when the
+   * deployment has no customer credential master key — secret-bearing
+   * connect flows then answer 501 honestly instead of storing plaintext.
+   */
+  customerCredentials?: CustomerCredentialService;
 }
 
 export async function composeControlPlane(config: ControlPlaneConfig): Promise<ControlPlaneServices> {
@@ -72,6 +80,9 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
   await pool.query("SELECT 1");
 
   const billing = new BillingService(new PgBillingStore(db));
+  const customerCredentials = config.customerCredentialsKey
+    ? new CustomerCredentialService(config.customerCredentialsKey, new PgCustomerCredentialStore(db))
+    : undefined;
   // §F: the public URL is validated deployment configuration passed to node
   // bootstraps; https is enforced by the config validator in production.
   // Non-production deployments may bind plain-http endpoints for tests.
@@ -166,6 +177,7 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     events,
     memory: new PgMemoryStore(db),
     runtime,
+    customerCredentials,
   };
 }
 

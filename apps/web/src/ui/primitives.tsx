@@ -135,7 +135,7 @@ export function DataTable<T extends object>({
   rows,
   empty = "No records.",
 }: {
-  head: { key: keyof T; label: string; render?: (row: T) => ReactNode }[];
+  head: { key: string; label: string; render?: (row: T) => ReactNode }[];
   rows: T[];
   empty?: ReactNode;
 }) {
@@ -146,7 +146,7 @@ export function DataTable<T extends object>({
         <thead>
           <tr>
             {head.map((h) => (
-              <th key={String(h.key)}>{h.label}</th>
+              <th key={h.key}>{h.label}</th>
             ))}
           </tr>
         </thead>
@@ -154,7 +154,7 @@ export function DataTable<T extends object>({
           {rows.map((row, i) => (
             <tr key={i}>
               {head.map((h) => (
-                <td key={String(h.key)}>{h.render ? h.render(row) : asText(row[h.key])}</td>
+                <td key={h.key}>{h.render ? h.render(row) : asText((row as Record<string, unknown>)[h.key])}</td>
               ))}
             </tr>
           ))}

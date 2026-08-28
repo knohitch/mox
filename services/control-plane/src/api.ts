@@ -25,6 +25,7 @@ import {
   channelProviders,
   computeClasses,
   costLedgerEntries,
+  credentialRefs,
   currencies,
   entitlementDefinitions,
   featureFlags,
@@ -61,6 +62,7 @@ import {
   systemModels,
   threads,
   threadMessages,
+  toolGrants,
   usageEvents,
   users,
   verifiedWebhookEvents,
@@ -1990,9 +1992,298 @@ export function buildApiRouter(deps: ApiDeps): Router {
   });
 
   // ---- Models / connections ------------------------------------------------------
+  // Phase 03 §B/§G: the customer BYOK surface. Provider catalogs are seeded
+  // idempotently on first read (never in migrations); credential material is
+  // either absent (honest 501), or stored in the customer credential vault
+  // (optional master key in config) — never in the control-plane database.
+
+  const CUSTOMER_MODEL_CATALOG = [
+    {
+      slug: "openai",
+      displayName: "OpenAI",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: false,
+      models: [
+        { slug: "gpt-4.1", displayName: "OpenAI · GPT-4.1", contextWindow: 200000 },
+        { slug: "gpt-4o-mini", displayName: "OpenAI · GPT-4o mini", contextWindow: 128000 },
+      ],
+    },
+    {
+      slug: "anthropic",
+      displayName: "Anthropic",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: false,
+      models: [
+        { slug: "claude-sonnet-4", displayName: "Anthropic · Claude Sonnet 4", contextWindow: 200000 },
+        { slug: "claude-haiku-3.5", displayName: "Anthropic · Claude Haiku 3.5", contextWindow: 200000 },
+      ],
+    },
+    {
+      slug: "xai",
+      displayName: "xAI",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: false,
+      models: [{ slug: "grok-4", displayName: "xAI · Grok 4", contextWindow: 131072 }],
+    },
+    {
+      slug: "deepseek",
+      displayName: "DeepSeek",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: false,
+      models: [{ slug: "deepseek-v4", displayName: "DeepSeek · V4", contextWindow: 128000 }],
+    },
+    {
+      slug: "gemini",
+      displayName: "Google Gemini",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: true,
+      models: [{ slug: "gemini-2.5-pro", displayName: "Google · Gemini 2.5 Pro", contextWindow: 1000000 }],
+    },
+    {
+      slug: "openrouter",
+      displayName: "OpenRouter",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: true,
+      models: [{ slug: "openrouter-auto", displayName: "OpenRouter · auto", contextWindow: 128000 }],
+    },
+    {
+      slug: "openai-compatible",
+      displayName: "OpenAI-compatible endpoint",
+      kind: "api" as const,
+      authMethods: ["api_key"],
+      baseUrlSupported: true,
+      models: [],
+    },
+    {
+      slug: "mox",
+      displayName: "Mox · Included",
+      kind: "local" as const,
+      authMethods: ["none"],
+      baseUrlSupported: false,
+      models: [{ slug: "mox-agent", displayName: "Mox · mox-agent", contextWindow: null }],
+    },
+  ];
+
+  const CUSTOMER_INTEGRATION_CATALOG = [
+    {
+      slug: "github",
+      displayName: "GitHub",
+      kind: "git",
+      authMethods: ["api_key", "oauth"],
+      requiresRuntimeSession: false,
+      dangerous: false,
+      configFields: [{ key: "apiKey", label: "Personal access token", secret: true, optional: false }],
+      tools: ["github.issues.read", "github.issues.write", "github.repos.read"],
+    },
+    {
+      slug: "notion",
+      displayName: "Notion",
+      kind: "doc",
+      authMethods: ["api_key"],
+      requiresRuntimeSession: false,
+      dangerous: false,
+      configFields: [{ key: "integrationToken", label: "Integration token", secret: true, optional: false }],
+      tools: ["notion.read", "notion.write"],
+    },
+    {
+      slug: "slack",
+      displayName: "Slack",
+      kind: "messaging",
+      authMethods: ["api_key"],
+      requiresRuntimeSession: true,
+      dangerous: false,
+      configFields: [{ key: "botToken", label: "Bot token", secret: true, optional: false }],
+      tools: ["slack.post", "slack.read"],
+    },
+    {
+      slug: "composio",
+      displayName: "Composio",
+      kind: "mcp",
+      authMethods: ["api_key"],
+      requiresRuntimeSession: true,
+      dangerous: true,
+      configFields: [{ key: "composioApiKey", label: "Composio API key", secret: true, optional: false }],
+      tools: ["composio.exec"],
+    },
+    {
+      slug: "n8n",
+      displayName: "n8n",
+      kind: "webhook",
+      authMethods: ["webhook_token"],
+      requiresRuntimeSession: true,
+      dangerous: false,
+      configFields: [{ key: "webhookToken", label: "Webhook secret token", secret: true, optional: true }],
+      tools: ["n8n.trigger"],
+    },
+    {
+      slug: "make",
+      displayName: "Make",
+      kind: "oauth",
+      authMethods: ["oauth"],
+      requiresRuntimeSession: true,
+      dangerous: false,
+      configFields: [{ key: "oauthClientSecret", label: "OAuth client secret", secret: true, optional: true }],
+      tools: ["make.scenario"],
+    },
+    {
+      slug: "generic-webhook",
+      displayName: "Generic webhook",
+      kind: "webhook",
+      authMethods: ["webhook_token"],
+      requiresRuntimeSession: false,
+      dangerous: false,
+      configFields: [{ key: "webhookToken", label: "Webhook secret token", secret: true, optional: true }],
+      tools: ["webhook.deliver"],
+    },
+  ];
+
+  const CUSTOMER_CHANNEL_CATALOG = [
+    { slug: "web", kind: "web", displayName: "Web chat", setupInstructions: "Embed the web chat surface in your site; no external credential is required.", prerequisites: "None" },
+    { slug: "whatsapp", kind: "whatsapp", displayName: "WhatsApp", setupInstructions: "Store a WhatsApp Business Cloud API credential against this agent.", prerequisites: "WhatsApp Business API access" },
+    { slug: "telegram", kind: "telegram", displayName: "Telegram", setupInstructions: "Create a bot with @BotFather and store its bot token.", prerequisites: "Telegram bot token" },
+    { slug: "slack", kind: "slack", displayName: "Slack", setupInstructions: "Install the app into your workspace and store the bot token and signing secret.", prerequisites: "Slack app with bot scope" },
+    { slug: "discord", kind: "discord", displayName: "Discord", setupInstructions: "Create a bot application and store its bot token.", prerequisites: "Discord bot token" },
+    { slug: "teams", kind: "teams", displayName: "Microsoft Teams", setupInstructions: "Register an Entra app and store its bot credential.", prerequisites: "Microsoft Entra bot credential" },
+    { slug: "generic-webhook", kind: "webhook", displayName: "Generic webhook", setupInstructions: "Webhook ingress is not wired on this deployment; secret-based delivery needs a runtime gateway.", prerequisites: "Runtime gateway (not wired)" },
+  ];
+
+  const SECRET_LIKE_KEY = /secret|token|api[-_]?key|password|authorization|credential|private[-_]?key|session|webhook/i;
+
+  /** Seed default per-org provider catalogs lazily and idempotently on read. */
+  const ensureCustomerCatalogs = async (orgId: string) => {
+    for (const prov of CUSTOMER_MODEL_CATALOG) {
+      const rows = await db()
+        .select({ id: modelProviders.id })
+        .from(modelProviders)
+        .where(and(eq(modelProviders.orgId, orgId), eq(modelProviders.slug, prov.slug)))
+        .limit(1);
+      if (rows[0]) continue;
+      const inserted = await db()
+        .insert(modelProviders)
+        .values({
+          orgId,
+          slug: prov.slug,
+          displayName: prov.displayName,
+          kind: prov.kind,
+          capabilities: { authMethods: prov.authMethods, baseUrlSupported: prov.baseUrlSupported },
+        })
+        .onConflictDoNothing({ target: [modelProviders.orgId, modelProviders.slug] })
+        .returning({ id: modelProviders.id, slug: modelProviders.slug });
+      const providerId = inserted[0]?.id;
+      if (!providerId) continue;
+      for (const m of prov.models) {
+        await db()
+          .insert(models)
+          .values({ orgId, providerId, slug: m.slug, displayName: m.displayName, contextWindow: m.contextWindow })
+          .onConflictDoNothing({ target: [models.providerId, models.slug] });
+      }
+    }
+    for (const prov of CUSTOMER_INTEGRATION_CATALOG) {
+      await db()
+        .insert(integrationProviders)
+        .values({
+          orgId,
+          slug: prov.slug,
+          displayName: prov.displayName,
+          kind: prov.kind,
+          config: {
+            authMethods: prov.authMethods,
+            configFields: prov.configFields,
+            tools: prov.tools,
+            dangerous: prov.dangerous,
+            requiresRuntimeSession: prov.requiresRuntimeSession,
+          },
+        })
+        .onConflictDoNothing({ target: [integrationProviders.orgId, integrationProviders.slug] });
+    }
+    for (const prov of CUSTOMER_CHANNEL_CATALOG) {
+      await db()
+        .insert(channelProviders)
+        .values({ orgId, slug: prov.slug, displayName: prov.displayName, kind: prov.kind })
+        .onConflictDoNothing({ target: [channelProviders.orgId, channelProviders.slug] });
+    }
+  };
+
+  const PUBLIC_INTEGRATION_KEYS = new Set(["authMethods", "configFields", "tools", "dangerous", "requiresRuntimeSession"]);
+  const publicIntegrationConfig = (raw: unknown): Record<string, unknown> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!PUBLIC_INTEGRATION_KEYS.has(key) || SECRET_LIKE_KEY.test(key)) continue;
+      out[key] = value;
+    }
+    return out;
+  };
+
+  const customerCredentialVault = () => {
+    const vault = services.customerCredentials;
+    if (!vault) {
+      throw httpError("customer credential vault is not configured on this deployment", 501, { code: "not_configured" });
+    }
+    return vault;
+  };
+
+  const ensureCredentialRef = async (orgId: string, args: { scope: string; externalId: string }): Promise<string> => {
+    const existing = await db()
+      .select({ id: credentialRefs.id })
+      .from(credentialRefs)
+      .where(and(eq(credentialRefs.orgId, orgId), eq(credentialRefs.externalId, args.externalId)))
+      .limit(1);
+    if (existing[0]) return existing[0].id;
+    const inserted = await db()
+      .insert(credentialRefs)
+      .values({ orgId, scope: args.scope, externalId: args.externalId })
+      .onConflictDoNothing({ target: [credentialRefs.orgId, credentialRefs.externalId] })
+      .returning({ id: credentialRefs.id });
+    if (inserted[0]) return inserted[0].id;
+    const again = await db()
+      .select({ id: credentialRefs.id })
+      .from(credentialRefs)
+      .where(and(eq(credentialRefs.orgId, orgId), eq(credentialRefs.externalId, args.externalId)))
+      .limit(1);
+    return again[0]!.id;
+  };
+
+  const dropCredentialRef = async (orgId: string, externalId: string) => {
+    await db().delete(credentialRefs).where(and(eq(credentialRefs.orgId, orgId), eq(credentialRefs.externalId, externalId)));
+  };
+
+  const projectModelConnection = (
+    provider: { slug: string; displayName: string; kind: string; capabilities: unknown },
+    connection?: { connectionStatus?: string; credentialRefId?: string | null; baseUrl?: string | null; modelCount?: number },
+  ) => {
+    const capsObject =
+      provider.capabilities && typeof provider.capabilities === "object"
+        ? (provider.capabilities as Record<string, unknown>)
+        : {};
+    const status = connection?.connectionStatus ?? "unconfigured";
+    const hasCredentials = Boolean(connection && connection.credentialRefId);
+    return {
+      providerId: provider.slug,
+      displayName: provider.displayName,
+      kind: provider.kind,
+      status,
+      connected: hasCredentials && status === "configured",
+      credentialConfigured: hasCredentials,
+      authMethods: Array.isArray(capsObject.authMethods) ? (capsObject.authMethods as string[]) : [],
+      baseUrlSupported: Boolean(capsObject.baseUrlSupported),
+      baseUrl: connection?.baseUrl ?? null,
+      modelCount: connection?.modelCount ?? 0,
+    };
+  };
+
+  // Lowercase "provider/slug" — the model select in the agent editor uses
+  // this projection for availability; unchanged from Phase 01 but seeded.
 
   router.get("/api/models", async (ctx) => {
     const identity = await requireAuth(ctx, "models");
+    await ensureCustomerCatalogs(identity.orgId);
     const providers = await db().select().from(modelProviders).where(eq(modelProviders.orgId, identity.orgId));
     const allModels = await db().select().from(models).where(eq(models.orgId, identity.orgId));
     const connections = await db().select().from(modelConnections).where(eq(modelConnections.orgId, identity.orgId));
@@ -2016,6 +2307,119 @@ export function buildApiRouter(deps: ApiDeps): Router {
     });
   });
 
+  router.get("/api/model-connections", async (ctx) => {
+    const identity = await requireAuth(ctx, "models");
+    await ensureCustomerCatalogs(identity.orgId);
+    const [providers, conns, orgModels] = await Promise.all([
+      db().select().from(modelProviders).where(eq(modelProviders.orgId, identity.orgId)),
+      db().select().from(modelConnections).where(eq(modelConnections.orgId, identity.orgId)),
+      db().select({ providerId: models.providerId }).from(models).where(eq(models.orgId, identity.orgId)),
+    ]);
+    const counts = new Map<string, number>();
+    for (const row of orgModels) counts.set(row.providerId, (counts.get(row.providerId) ?? 0) + 1);
+    return providers.map((p) => {
+      const conn = conns.find((c) => c.providerId === p.id);
+      return projectModelConnection(p, { ...conn, modelCount: counts.get(p.id) ?? 0 });
+    });
+  });
+
+  const findModelProvider = async (orgId: string, slug: string) => {
+    const rows = await db()
+      .select()
+      .from(modelProviders)
+      .where(and(eq(modelProviders.orgId, orgId), eq(modelProviders.slug, slug)))
+      .limit(1);
+    return rows[0];
+  };
+
+  const findModelConnection = async (orgId: string, providerId: string) => {
+    const rows = await db()
+      .select()
+      .from(modelConnections)
+      .where(and(eq(modelConnections.orgId, orgId), eq(modelConnections.providerId, providerId)))
+      .limit(1);
+    return rows[0];
+  };
+
+  router.post("/api/model-connections/:providerSlug/connect", async (ctx) => {
+    const identity = await requireAuth(ctx, "models");
+    requireOrgCapability(identity, "integrations.manage");
+    const vault = customerCredentialVault();
+    const slug = ctx.params.providerSlug!;
+    const body = ctx.body as { apiKey?: string; baseUrl?: string; models?: string[] } | undefined;
+    const provider = await findModelProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`provider ${slug} not found`, 404);
+    const caps =
+      provider.capabilities && typeof provider.capabilities === "object"
+        ? (provider.capabilities as Record<string, unknown>)
+        : {};
+    const authMethods = Array.isArray(caps.authMethods) ? (caps.authMethods as string[]) : [];
+    const needsSecret = authMethods.length > 0 && !authMethods.includes("none");
+    let credentialRefId: string | null = null;
+    if (needsSecret) {
+      const apiKey = typeof body?.apiKey === "string" && body.apiKey.trim() ? body.apiKey.trim() : undefined;
+      if (!apiKey) throw httpError(`${provider.displayName} requires an API key`, 400);
+      await vault.setSecret({ orgId: identity.orgId, externalId: `model:${slug}` }, apiKey);
+      credentialRefId = await ensureCredentialRef(identity.orgId, { scope: "model", externalId: `model:${slug}` });
+    }
+    const baseUrl = caps.baseUrlSupported && typeof body?.baseUrl === "string" ? body.baseUrl : undefined;
+    const existing = await findModelConnection(identity.orgId, provider.id);
+    if (existing) {
+      await db()
+        .update(modelConnections)
+        .set({ credentialRefId, authMethod: "api_key", connectionStatus: "configured", baseUrl: baseUrl ?? null, updatedAt: new Date() })
+        .where(eq(modelConnections.id, existing.id));
+    } else {
+      await db()
+        .insert(modelConnections)
+        .values({ orgId: identity.orgId, providerId: provider.id, credentialRefId, authMethod: "api_key", connectionStatus: "configured", baseUrl: baseUrl ?? null });
+    }
+    if (Array.isArray(body?.models)) {
+      for (const entry of body.models.slice(0, 25)) {
+        const modelSlug = String(entry).trim();
+        if (!modelSlug) continue;
+        await db()
+          .insert(models)
+          .values({ orgId: identity.orgId, providerId: provider.id, slug: modelSlug, displayName: modelSlug })
+          .onConflictDoNothing({ target: [models.providerId, models.slug] });
+      }
+    }
+    const refreshed = await findModelConnection(identity.orgId, provider.id);
+    const orgModels = await db().select({ id: models.id }).from(models).where(and(eq(models.orgId, identity.orgId), eq(models.providerId, provider.id)));
+    return projectModelConnection(provider, { ...refreshed, modelCount: orgModels.length });
+  });
+
+  router.post("/api/model-connections/:providerSlug/rotate", async (ctx) => {
+    const identity = await requireAuth(ctx, "models");
+    requireOrgCapability(identity, "integrations.manage");
+    const vault = customerCredentialVault();
+    const slug = ctx.params.providerSlug!;
+    const body = ctx.body as { apiKey?: string } | undefined;
+    const provider = await findModelProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`provider ${slug} not found`, 404);
+    const existing = await findModelConnection(identity.orgId, provider.id);
+    if (!existing?.credentialRefId) throw httpError("provider has no secret to rotate; connect it first", 409, { code: "not_connected" });
+    const apiKey = typeof body?.apiKey === "string" && body.apiKey.trim() ? body.apiKey.trim() : undefined;
+    if (!apiKey) throw httpError("a new API key is required", 400);
+    await vault.setSecret({ orgId: identity.orgId, externalId: `model:${slug}` }, apiKey);
+    await db().update(modelConnections).set({ updatedAt: new Date() }).where(eq(modelConnections.id, existing.id));
+    const refreshed = await findModelConnection(identity.orgId, provider.id);
+    return projectModelConnection(provider, refreshed);
+  });
+
+  router.delete("/api/model-connections/:providerSlug", async (ctx) => {
+    const identity = await requireAuth(ctx, "models");
+    requireOrgCapability(identity, "integrations.manage");
+    const slug = ctx.params.providerSlug!;
+    const provider = await findModelProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`provider ${slug} not found`, 404);
+    const existing = await findModelConnection(identity.orgId, provider.id);
+    if (!existing) throw httpError("no connection to disconnect", 409, { code: "not_connected" });
+    await db().delete(modelConnections).where(eq(modelConnections.id, existing.id));
+    await dropCredentialRef(identity.orgId, `model:${slug}`);
+    return { ok: true, providerId: provider.slug };
+  });
+
   router.post("/api/model-connections/:providerSlug/test", async (ctx) => {
     const identity = await requireAuth(ctx, "models");
     requireOrgCapability(identity, "integrations.manage");
@@ -2026,68 +2430,389 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.get("/api/cli-engines", async (ctx) => {
     await requireAuth(ctx, "models");
+    // Kept for backward compatibility with older CLI builds; the CLI now uses
+    // the real /api/models surface. Honest: no CLI engine state is tracked.
     throw httpError("CLI engine connection state is not configured on this deployment", 501, { code: "not_configured" });
   });
 
-  // ---- Integrations / channels ---------------------------------------------------
+  // ---- Integrations --------------------------------------------------------------
+  // Customer integration surface (Phase 03 §C): connect/disconnect is a
+  // credential vault operation, never a boolean toggle.
 
   router.get("/api/integrations", async (ctx) => {
     const identity = await requireAuth(ctx, "integrations");
+    await ensureCustomerCatalogs(identity.orgId);
     const [providers, conns] = await Promise.all([
       db().select().from(integrationProviders).where(eq(integrationProviders.orgId, identity.orgId)),
       db().select().from(integrationConnections).where(eq(integrationConnections.orgId, identity.orgId)),
     ]);
-    return providers.map((p) => ({
-      integrationId: p.slug,
-      displayName: p.displayName,
-      connected: conns.some((c) => c.providerId === p.id && c.status === "active"),
-    }));
+    return providers.map((p) => {
+      const conn = conns.find((c) => c.providerId === p.id);
+      const config = publicIntegrationConfig(p.config);
+      const configFields = Array.isArray(config.configFields) ? (config.configFields as unknown[]) : [];
+      const tools = Array.isArray(config.tools) ? (config.tools as unknown[]) : [];
+      const hasCredentials = Boolean(conn?.credentialRefId);
+      return {
+        integrationId: p.slug,
+        displayName: p.displayName,
+        kind: p.kind,
+        connectionId: conn?.id ?? null,
+        status: conn ? conn.status : "not_configured",
+        credentialConfigured: hasCredentials,
+        connected: hasCredentials && conn?.status === "active",
+        requiresRuntimeSession: Boolean(config.requiresRuntimeSession),
+        dangerous: Boolean(config.dangerous),
+        tools: tools.map(String),
+        configFields: configFields
+          .filter((f): f is Record<string, unknown> => Boolean(f) && typeof f === "object")
+          .map((f) => ({
+            key: typeof f.key === "string" ? f.key : "",
+            label: typeof f.label === "string" ? f.label : "",
+            secret: Boolean(f.secret),
+            optional: Boolean(f.optional),
+          })),
+      };
+    });
   });
 
-  router.patch("/api/integrations/:integrationId", async (ctx) => {
-    const identity = await requireAuth(ctx, "integrations");
-    requireOrgCapability(identity, "integrations.manage");
-    const body = ctx.body as { connected?: boolean } | undefined;
+  const findIntegrationProvider = async (orgId: string, slug: string) => {
     const rows = await db()
       .select()
       .from(integrationProviders)
-      .where(and(eq(integrationProviders.orgId, identity.orgId), eq(integrationProviders.slug, ctx.params.integrationId!)))
+      .where(and(eq(integrationProviders.orgId, orgId), eq(integrationProviders.slug, slug)))
       .limit(1);
-    const provider = rows[0];
-    if (!provider) throw httpError(`integration ${ctx.params.integrationId} not found`, 404);
-    const wantConnected = body?.connected !== false;
-    const existing = await db()
+    return rows[0];
+  };
+
+  const findIntegrationConnection = async (orgId: string, providerId: string) => {
+    const rows = await db()
       .select()
       .from(integrationConnections)
-      .where(and(eq(integrationConnections.orgId, identity.orgId), eq(integrationConnections.providerId, provider.id)))
+      .where(and(eq(integrationConnections.orgId, orgId), eq(integrationConnections.providerId, providerId)))
       .limit(1);
-    if (existing[0]) {
-      await db()
-        .update(integrationConnections)
-        .set({ status: wantConnected ? "active" : "disconnected" })
-        .where(eq(integrationConnections.id, existing[0].id));
-    } else if (wantConnected) {
-      await db().insert(integrationConnections).values({
-        orgId: identity.orgId,
-        providerId: provider.id,
-        status: "active",
-      });
+    return rows[0];
+  };
+
+  router.post("/api/integrations/:integrationId/connect", async (ctx) => {
+    const identity = await requireAuth(ctx, "integrations");
+    requireOrgCapability(identity, "integrations.manage");
+    const vault = customerCredentialVault();
+    const slug = ctx.params.integrationId!;
+    const body = ctx.body as { secrets?: Record<string, string>; config?: Record<string, unknown> } | undefined;
+    const provider = await findIntegrationProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`integration ${slug} not found`, 404);
+    const config = publicIntegrationConfig(provider.config);
+    const configFields = Array.isArray(config.configFields) ? (config.configFields as Record<string, unknown>[]) : [];
+    const provided = (body?.secrets && typeof body.secrets === "object" ? Object.entries(body.secrets as Record<string, unknown>) : []) as [string, unknown][];
+    const secrets: Record<string, string> = {};
+    for (const field of configFields) {
+      const key = typeof field.key === "string" ? field.key : "";
+      const label = typeof field.label === "string" ? field.label : key;
+      const isSecret = Boolean(field.secret);
+      const optional = Boolean(field.optional);
+      if (!isSecret || !key) continue;
+      const found = provided.find(([k]) => k === key);
+      const value = found ? (typeof found[1] === "string" ? found[1].trim() : "") : "";
+      if (!optional && !value) throw httpError(`${label} is required to connect ${provider.displayName}`, 400);
+      if (value) secrets[key] = value;
     }
-    return { ok: true };
+    if (Object.keys(secrets).length > 0) {
+      await vault.setSecret({ orgId: identity.orgId, externalId: `integration:${slug}` }, JSON.stringify(secrets));
+    }
+    const credentialRefId = await ensureCredentialRef(identity.orgId, { scope: "integration", externalId: `integration:${slug}` });
+    const existing = await findIntegrationConnection(identity.orgId, provider.id);
+    if (existing) {
+      await db().update(integrationConnections).set({ status: "active", credentialRefId }).where(eq(integrationConnections.id, existing.id));
+    } else {
+      await db().insert(integrationConnections).values({ orgId: identity.orgId, providerId: provider.id, status: "active", credentialRefId });
+    }
+    return { ok: true, integrationId: slug, connected: true };
   });
+
+  router.post("/api/integrations/:integrationId/disconnect", async (ctx) => {
+    const identity = await requireAuth(ctx, "integrations");
+    requireOrgCapability(identity, "integrations.manage");
+    const slug = ctx.params.integrationId!;
+    const provider = await findIntegrationProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`integration ${slug} not found`, 404);
+    const existing = await findIntegrationConnection(identity.orgId, provider.id);
+    if (!existing) return { ok: true, integrationId: slug, connected: false };
+    await db()
+      .update(integrationConnections)
+      .set({ status: "disconnected", credentialRefId: null })
+      .where(eq(integrationConnections.id, existing.id));
+    await dropCredentialRef(identity.orgId, `integration:${slug}`);
+    return { ok: true, integrationId: slug, connected: false };
+  });
+
+  router.get("/api/integrations/:integrationId/grants", async (ctx) => {
+    const identity = await requireAuth(ctx, "integrations");
+    const slug = ctx.params.integrationId!;
+    const provider = await findIntegrationProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`integration ${slug} not found`, 404);
+    const conn = await findIntegrationConnection(identity.orgId, provider.id);
+    if (!conn) return [];
+    return db()
+      .select({
+        grantId: toolGrants.id,
+        agentId: toolGrants.agentId,
+        toolPattern: toolGrants.toolPattern,
+        createdAt: toolGrants.createdAt,
+      })
+      .from(toolGrants)
+      .where(and(eq(toolGrants.connectionId, conn.id), eq(toolGrants.orgId, identity.orgId)));
+  });
+
+  router.post("/api/integrations/:integrationId/grants", async (ctx) => {
+    const identity = await requireAuth(ctx, "integrations");
+    requireOrgCapability(identity, "integrations.manage");
+    const slug = ctx.params.integrationId!;
+    const body = ctx.body as { agentId?: string; toolPattern?: string } | undefined;
+    if (!body?.agentId) throw httpError("agentId is required", 400);
+    const provider = await findIntegrationProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`integration ${slug} not found`, 404);
+    const conn = await findIntegrationConnection(identity.orgId, provider.id);
+    if (!conn || conn.status !== "active" || !conn.credentialRefId) {
+      throw httpError("connect the integration before granting tools", 409, { code: "not_connected" });
+    }
+    const agent = await db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, body.agentId), eq(agents.orgId, identity.orgId)))
+      .limit(1);
+    if (!agent[0]) throw httpError("agent not found or not owned by your org", 404);
+    const toolPattern = typeof body.toolPattern === "string" && body.toolPattern.trim() ? body.toolPattern.trim() : "*";
+    const inserted = await db()
+      .insert(toolGrants)
+      .values({ orgId: identity.orgId, agentId: agent[0].id, connectionId: conn.id, toolPattern })
+      .onConflictDoNothing({ target: [toolGrants.agentId, toolGrants.connectionId, toolGrants.toolPattern] })
+      .returning({ id: toolGrants.id });
+    if (inserted[0]) return { ok: true, grantId: inserted[0].id };
+    const existing = await db()
+      .select({ id: toolGrants.id })
+      .from(toolGrants)
+      .where(and(eq(toolGrants.agentId, agent[0].id), eq(toolGrants.connectionId, conn.id), eq(toolGrants.toolPattern, toolPattern)))
+      .limit(1);
+    return { ok: true, grantId: existing[0]!.id };
+  });
+
+  router.delete("/api/integrations/:integrationId/grants/:grantId", async (ctx) => {
+    const identity = await requireAuth(ctx, "integrations");
+    requireOrgCapability(identity, "integrations.manage");
+    const slug = ctx.params.integrationId!;
+    const provider = await findIntegrationProvider(identity.orgId, slug);
+    if (!provider) throw httpError(`integration ${slug} not found`, 404);
+    const conn = await findIntegrationConnection(identity.orgId, provider.id);
+    if (!conn) throw httpError("grant not found", 404);
+    const rows = await db()
+      .delete(toolGrants)
+      .where(and(eq(toolGrants.id, ctx.params.grantId!), eq(toolGrants.orgId, identity.orgId), eq(toolGrants.connectionId, conn.id)))
+      .returning({ id: toolGrants.id });
+    if (!rows[0]) throw httpError("grant not found", 404);
+    return { ok: true, grantId: rows[0].id };
+  });
+
+  // ---- Channels (Phase 03 §D) ----------------------------------------------------
+  // A channel connection binds a provider to exactly one agent. Web needs no
+  // secret; every other catalog entry requires a credential vault secret.
+
+  const CHANNEL_SECRET_KEYS: Record<string, string[]> = {
+    telegram: ["botToken"],
+    discord: ["botToken"],
+    slack: ["botToken", "signingSecret"],
+    whatsapp: ["accessToken", "phoneNumberId"],
+    teams: ["appId", "appSecret"],
+    web: [],
+    "generic-webhook": [],
+  };
+
+  const sanitizeChannelSecrets = (secrets: Record<string, string> | undefined, slug: string): Record<string, string> => {
+    const allowed = CHANNEL_SECRET_KEYS[slug] ?? [];
+    const out: Record<string, string> = {};
+    for (const key of allowed) {
+      const raw = secrets?.[key];
+      if (typeof raw === "string" && raw.trim()) out[key] = raw.trim();
+    }
+    return out;
+  };
+
+  const requireChannelConnection = async (orgId: string, connectionId: string) => {
+    const rows = await db()
+      .select()
+      .from(channelConnections)
+      .where(and(eq(channelConnections.id, connectionId), eq(channelConnections.orgId, orgId)))
+      .limit(1);
+    return rows[0];
+  };
 
   router.get("/api/channels", async (ctx) => {
     const identity = await requireAuth(ctx, "channels");
-    const [providers, conns] = await Promise.all([
+    await ensureCustomerCatalogs(identity.orgId);
+    const [providers, conns, agentsById] = await Promise.all([
       db().select().from(channelProviders).where(eq(channelProviders.orgId, identity.orgId)),
       db().select().from(channelConnections).where(eq(channelConnections.orgId, identity.orgId)),
+      db().select({ id: agents.id, displayName: agents.displayName }).from(agents).where(eq(agents.orgId, identity.orgId)),
     ]);
-    return providers.map((p) => ({
-      channelId: p.slug,
-      displayName: p.displayName,
-      kind: p.kind,
-      connected: conns.some((c) => c.providerId === p.id && c.status === "active"),
-    }));
+    const agentNames = new Map(agentsById.map((a) => [a.id, a.displayName]));
+    const meta = new Map(CUSTOMER_CHANNEL_CATALOG.map((c) => [c.slug, c]));
+    const rows: Array<{
+      channelId: string;
+      displayName: string;
+      kind: string;
+      setupInstructions: string;
+      prerequisites: string | null;
+      secretKeys: string[];
+      connectionId: string | null;
+      status: string;
+      credentialConfigured: boolean;
+      connected: boolean;
+      boundAgentId: string | null;
+      boundAgentName: string | null;
+    }> = [];
+    for (const p of providers) {
+      const item = meta.get(p.slug);
+      const noSecretRequired = p.kind === "web";
+      const base = {
+        channelId: p.slug,
+        displayName: p.displayName,
+        kind: p.kind,
+        setupInstructions: item?.setupInstructions ?? "See provider documentation.",
+        prerequisites: item?.prerequisites ?? null,
+        // Field KEYS only — the customer needs to know what to paste in, but
+        // stored values never leave the vault (Phase 03 §D).
+        secretKeys: noSecretRequired ? [] : (CHANNEL_SECRET_KEYS[p.slug] ?? []),
+      };
+      const owns = conns.filter((c) => c.providerId === p.id);
+      if (owns.length === 0) {
+        rows.push({
+          ...base,
+          connectionId: null,
+          status: "not_configured",
+          credentialConfigured: false,
+          connected: false,
+          boundAgentId: null,
+          boundAgentName: null,
+        });
+        continue;
+      }
+      for (const c of owns) {
+        rows.push({
+          ...base,
+          connectionId: c.id,
+          status: c.status,
+          credentialConfigured: Boolean(c.credentialRefId),
+          connected: c.status === "active" && (noSecretRequired || Boolean(c.credentialRefId)),
+          boundAgentId: c.agentId,
+          boundAgentName: agentNames.get(c.agentId) ?? null,
+        });
+      }
+    }
+    return rows;
+  });
+
+  router.post("/api/channels/:channelId/connect", async (ctx) => {
+    const identity = await requireAuth(ctx, "channels");
+    requireOrgCapability(identity, "integrations.manage");
+    const channelId = ctx.params.channelId!;
+    const body = ctx.body as { agentId?: string; secrets?: Record<string, string> } | undefined;
+    if (!body?.agentId) throw httpError("agentId is required", 400);
+    const agent = await db()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, body.agentId), eq(agents.orgId, identity.orgId)))
+      .limit(1);
+    if (!agent[0]) throw httpError("agent not found or not owned by your org", 404);
+    const provider = await db()
+      .select()
+      .from(channelProviders)
+      .where(and(eq(channelProviders.orgId, identity.orgId), eq(channelProviders.slug, channelId)))
+      .limit(1);
+    if (!provider[0]) throw httpError(`channel ${channelId} not found`, 404);
+    const needsSecret = provider[0].kind !== "web";
+    if (needsSecret) {
+      const vault = customerCredentialVault();
+      const secrets = sanitizeChannelSecrets(body?.secrets, channelId);
+      if (Object.keys(secrets).length === 0) throw httpError(`${provider[0].displayName} requires credentials to connect`, 400);
+      const externalId = `channel:${provider[0].slug}:${agent[0].id}`;
+      await vault.setSecret({ orgId: identity.orgId, externalId }, JSON.stringify(secrets));
+      const credentialRefId = await ensureCredentialRef(identity.orgId, { scope: "channel", externalId });
+      const existing = await db()
+        .select()
+        .from(channelConnections)
+        .where(and(eq(channelConnections.orgId, identity.orgId), eq(channelConnections.providerId, provider[0].id), eq(channelConnections.agentId, agent[0].id)))
+        .limit(1);
+      if (existing[0]) {
+        await db().update(channelConnections).set({ status: "active", credentialRefId }).where(eq(channelConnections.id, existing[0].id));
+      } else {
+        await db().insert(channelConnections).values({ orgId: identity.orgId, providerId: provider[0].id, agentId: agent[0].id, status: "active", credentialRefId });
+      }
+    } else {
+      const existing = await db()
+        .select()
+        .from(channelConnections)
+        .where(and(eq(channelConnections.orgId, identity.orgId), eq(channelConnections.providerId, provider[0].id), eq(channelConnections.agentId, agent[0].id)))
+        .limit(1);
+      if (existing[0]) {
+        await db().update(channelConnections).set({ status: "active", credentialRefId: existing[0].credentialRefId }).where(eq(channelConnections.id, existing[0].id));
+      } else {
+        await db().insert(channelConnections).values({ orgId: identity.orgId, providerId: provider[0].id, agentId: agent[0].id, status: "active" });
+      }
+    }
+    return { ok: true, channelId, agentId: agent[0].id, connected: true };
+  });
+
+  router.post("/api/channels/connections/:connectionId/reconnect", async (ctx) => {
+    const identity = await requireAuth(ctx, "channels");
+    requireOrgCapability(identity, "integrations.manage");
+    const body = ctx.body as { secrets?: Record<string, string> } | undefined;
+    const conn = await requireChannelConnection(identity.orgId, ctx.params.connectionId!);
+    if (!conn) throw httpError("connection not found or not owned by your org", 404);
+    const provider = await db()
+      .select({ slug: channelProviders.slug, kind: channelProviders.kind })
+      .from(channelProviders)
+      .where(and(eq(channelProviders.orgId, identity.orgId), eq(channelProviders.id, conn.providerId)))
+      .limit(1);
+    if (!provider[0]) throw httpError("channel provider not found", 404);
+    const noSecretRequired = provider[0].kind === "web";
+    if (noSecretRequired) {
+      await db().update(channelConnections).set({ status: "active" }).where(eq(channelConnections.id, conn.id));
+    } else {
+      const vault = customerCredentialVault();
+      const secrets = sanitizeChannelSecrets(body?.secrets, provider[0].slug);
+      if (Object.keys(secrets).length === 0) throw httpError("credentials are required to reconnect", 400);
+      const externalId = `channel:${provider[0].slug}:${conn.agentId}`;
+      await vault.setSecret({ orgId: identity.orgId, externalId }, JSON.stringify(secrets));
+      const credentialRefId = await ensureCredentialRef(identity.orgId, { scope: "channel", externalId });
+      await db().update(channelConnections).set({ status: "active", credentialRefId }).where(eq(channelConnections.id, conn.id));
+    }
+    return { ok: true, connectionId: conn.id, connected: true, boundAgentId: conn.agentId };
+  });
+
+  router.post("/api/channels/connections/:connectionId/disconnect", async (ctx) => {
+    const identity = await requireAuth(ctx, "channels");
+    requireOrgCapability(identity, "integrations.manage");
+    const conn = await requireChannelConnection(identity.orgId, ctx.params.connectionId!);
+    if (!conn) throw httpError("connection not found or not owned by your org", 404);
+    const provider = await db()
+      .select({ slug: channelProviders.slug, kind: channelProviders.kind })
+      .from(channelProviders)
+      .where(and(eq(channelProviders.orgId, identity.orgId), eq(channelProviders.id, conn.providerId)))
+      .limit(1);
+    await db().update(channelConnections).set({ status: "disconnected", credentialRefId: null }).where(eq(channelConnections.id, conn.id));
+    if (provider[0] && provider[0].kind !== "web") {
+      await dropCredentialRef(identity.orgId, `channel:${provider[0].slug}:${conn.agentId}`);
+    }
+    return { ok: true, connectionId: conn.id, connected: false };
+  });
+
+  router.post("/api/channels/connections/:connectionId/test", async (ctx) => {
+    const identity = await requireAuth(ctx, "channels");
+    requireOrgCapability(identity, "integrations.manage");
+    const conn = await requireChannelConnection(identity.orgId, ctx.params.connectionId!);
+    if (!conn) throw httpError("connection not found or not owned by your org", 404);
+    // Health probes require a runtime gateway that delivers to the provider;
+    // the API reports honestly rather than faking delivery.
+    throw httpError("channel health probes require a runtime gateway that is not configured on this deployment", 501, { code: "not_configured" });
   });
 
   // ---- Mox-admin: payment provider configuration (Prompt 01 §Provider config) ----
@@ -3246,6 +3971,78 @@ export function buildApiRouter(deps: ApiDeps): Router {
   const fingerprintJson = (value: unknown): string =>
     createHash("sha256").update(JSON.stringify(sortJson(value))).digest("hex");
 
+  // ---- Customer-safe plan catalog (Phase 03 §A) --------------------------------
+  // Resolved REGION prices only — no wholesale base amounts, margins, FX rates
+  // or internal identifiers. Availability resolves through the SAME authority
+  // as checkout (resolvePrice), so the web never guesses.
+
+  router.get("/api/plans", async (ctx) => {
+    const identity = await requireAuth(ctx, "billing");
+    const products = await services.billing.store.listProducts();
+    const regions = await services.billing.store.listPricingRegions();
+    const plans: Array<{
+      planVersionId: string;
+      tier: string;
+      name: string;
+      features: Record<string, boolean | number | string>;
+      pricingRegions: Array<{
+        pricingRegionCode: string;
+        displayName: string;
+        available: boolean;
+        currency: string;
+        amountMinor: number | null;
+      }>;
+      available: boolean;
+    }> = [];
+    for (const product of products) {
+      const versions = await services.billing.store.listPlanVersions(product.id);
+      const active = versions.filter((v) => v.status === "active").sort((a, b) => b.version - a.version)[0];
+      if (!active) continue;
+      const pricingRegions: Array<{
+        pricingRegionCode: string;
+        displayName: string;
+        available: boolean;
+        currency: string;
+        amountMinor: number | null;
+      }> = [];
+      for (const region of regions) {
+        try {
+          const price = await services.billing.resolvePrice(product.id, region.code);
+          pricingRegions.push({
+            pricingRegionCode: region.code,
+            displayName: region.displayName,
+            available: true,
+            currency: price.amount.currency,
+            amountMinor: Number(price.amount.amountMinor),
+          });
+        } catch {
+          pricingRegions.push({
+            pricingRegionCode: region.code,
+            displayName: region.displayName,
+            available: false,
+            currency: region.chargeCurrency,
+            amountMinor: null,
+          });
+        }
+      }
+      let features: Record<string, boolean | number | string> = {};
+      try {
+        features = await services.entitlements.planValuesFor(active.id);
+      } catch {
+        features = {};
+      }
+      plans.push({
+        planVersionId: active.id,
+        tier: product.tier,
+        name: product.displayName,
+        features,
+        pricingRegions,
+        available: pricingRegions.some((p) => p.available),
+      });
+    }
+    return plans;
+  });
+
   /** Safe public provider catalog — no secrets, ever. */
   router.get("/api/billing/providers", async (ctx) => {
     await requireAuth(ctx);
@@ -3349,8 +4146,23 @@ export function buildApiRouter(deps: ApiDeps): Router {
     const sub = await services.billing.getActiveSubscription(identity.orgId);
     if (!sub) return null;
     const cancellation = await services.billing.getSubscriptionCancellation(sub.id);
+    const decision = await services.billing.evaluateCommercialAccess(identity.orgId);
+    const version = await services.billing.store.getPlanVersion(sub.planVersionId);
+    let plan: { planVersionId: string; version: number; tier: string; name: string } | null = null;
+    if (version) {
+      const product = await services.billing.store.getProduct(version.productId);
+      if (product) {
+        plan = { planVersionId: version.id, version: version.version, tier: product.tier, name: product.displayName };
+      }
+    }
     return {
       ...sub,
+      plan,
+      reconciliationRequired: sub.reconciliationRequired ?? false,
+      commercialAccess: {
+        entitled: decision.entitled,
+        denialReason: decision.entitled ? undefined : decision.reason,
+      },
       cancellation: cancellation
         ? {
             state: cancellation.state,

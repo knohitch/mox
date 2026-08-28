@@ -485,6 +485,9 @@ importers:
       '@mox/control-plane-contracts':
         specifier: workspace:*
         version: link:../../packages/control-plane-contracts
+      '@mox/credentials':
+        specifier: workspace:*
+        version: link:../../packages/credentials
       '@mox/database':
         specifier: workspace:*
         version: link:../../packages/database

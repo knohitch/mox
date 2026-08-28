@@ -14,9 +14,7 @@
 
 import type { AgentDeployment, AgentEvent, AgentRoom, ApprovalRequest } from "@mox/contracts";
 import type {
-  ApiTokenMetadata,
   BrowserAuthResponse,
-  CreateApiTokenResponse,
   ForgotPasswordResponse,
   LoginRequest,
   MeResponse,
@@ -43,6 +41,9 @@ import type {
   AdminStaff,
   AgentDraftResult,
   AgentVersionRow,
+  ApiTokenRow,
+  BillingProviderOption,
+  ChannelCatalogRow,
   ChatMessage,
   CliEngineRow,
   ComputerSnapshot,
@@ -50,13 +51,18 @@ import type {
   CreateAgentDraftInput,
   CreateStaffInviteInput,
   Entitlements,
+  IntegrationCatalogRow,
   InvoiceRow,
+  ModelConnectionRow,
   ModelOption,
   MoxApi,
+  PlanOption,
   SendRunHandle,
   ServerSummary,
+  SubscriptionView,
   SupportCustomer,
   SupportCustomerDetail,
+  ToolGrantRow,
   UsageRow,
 } from "./types.js";
 
@@ -303,23 +309,6 @@ export class HttpMoxApi implements MoxApi {
   // Management is SESSION-only server-side; browsers call these with the
   // cookie. The plaintext token appears exactly once at creation.
 
-  createApiToken(input: { name: string; scopes?: string[] }): Promise<CreateApiTokenResponse> {
-    return this.call<CreateApiTokenResponse>("/api/auth/tokens", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
-
-  listApiTokens(): Promise<ApiTokenMetadata[]> {
-    return this.call<ApiTokenMetadata[]>("/api/auth/tokens");
-  }
-
-  revokeApiToken(tokenId: string): Promise<void> {
-    return this.call<{ ok: boolean }>(`/api/auth/tokens/${encodeURIComponent(tokenId)}`, {
-      method: "DELETE",
-    }).then(() => undefined);
-  }
-
   /** Programmatic login: the ONLY password→bearer exchange (00C §B). */
   tokenLogin(input: { email: string; password: string; name?: string; scopes?: string[] }): Promise<ProgrammaticLoginResponse> {
     return this.call<ProgrammaticLoginResponse>("/api/auth/token-login", {
@@ -556,21 +545,99 @@ export class HttpMoxApi implements MoxApi {
     return this.call("/api/cli-engines");
   }
 
-  // ---- Integrations/Apps + Channels --------------------------------------------------
+  // ---- BYOK / model connections (Phase 03 §B/§G) -----------------------------------
 
-  async listIntegrations(): Promise<Array<{ integrationId: string; displayName: string; connected: boolean }>> {
-    return this.call("/api/integrations");
+  async listModelConnections(): Promise<ModelConnectionRow[]> {
+    return this.call("/api/model-connections");
   }
 
-  async toggleIntegration(integrationId: string, connected: boolean): Promise<void> {
-    await this.call(`/api/integrations/${encodeURIComponent(integrationId)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ connected }),
+  async connectModelConnection(providerId: string, input: { apiKey?: string; baseUrl?: string; models?: string[] }): Promise<ModelConnectionRow> {
+    return this.call(`/api/model-connections/${encodeURIComponent(providerId)}/connect`, {
+      method: "POST",
+      body: JSON.stringify(input),
     });
   }
 
-  async listChannels(): Promise<Array<{ channelId: string; displayName: string; kind: string; connected: boolean }>> {
+  async rotateModelConnection(providerId: string, input: { apiKey: string }): Promise<ModelConnectionRow> {
+    return this.call(`/api/model-connections/${encodeURIComponent(providerId)}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async disconnectModelConnection(providerId: string): Promise<{ ok: boolean; providerId: string }> {
+    return this.call(`/api/model-connections/${encodeURIComponent(providerId)}`, { method: "DELETE" });
+  }
+
+  // ---- Integrations/Apps + Channels (Phase 03 §C/§D) --------------------------------
+
+  async listIntegrations(): Promise<IntegrationCatalogRow[]> {
+    return this.call("/api/integrations");
+  }
+
+  async connectIntegration(integrationId: string, input: { secrets?: Record<string, string>; config?: Record<string, unknown> }): Promise<{ ok: boolean; integrationId: string; connected: boolean }> {
+    return this.call(`/api/integrations/${encodeURIComponent(integrationId)}/connect`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async disconnectIntegration(integrationId: string): Promise<{ ok: boolean; integrationId: string; connected: boolean }> {
+    return this.call(`/api/integrations/${encodeURIComponent(integrationId)}/disconnect`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  async listIntegrationGrants(integrationId: string): Promise<ToolGrantRow[]> {
+    return this.call(`/api/integrations/${encodeURIComponent(integrationId)}/grants`);
+  }
+
+  async grantIntegrationTool(integrationId: string, input: { agentId: string; toolPattern?: string }): Promise<{ ok: boolean; grantId: string }> {
+    return this.call(`/api/integrations/${encodeURIComponent(integrationId)}/grants`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async revokeIntegrationGrant(integrationId: string, grantId: string): Promise<{ ok: boolean; grantId: string }> {
+    return this.call(`/api/integrations/${encodeURIComponent(integrationId)}/grants/${encodeURIComponent(grantId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  async listChannels(): Promise<ChannelCatalogRow[]> {
     return this.call("/api/channels");
+  }
+
+  async connectChannel(channelId: string, input: { agentId: string; secrets?: Record<string, string> }): Promise<{ ok: boolean; channelId: string; agentId: string; connected: boolean }> {
+    return this.call(`/api/channels/${encodeURIComponent(channelId)}/connect`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async reconnectChannel(connectionId: string, input: { secrets?: Record<string, string> }): Promise<{ ok: boolean; connectionId: string; connected: boolean; boundAgentId: string }> {
+    return this.call(`/api/channels/connections/${encodeURIComponent(connectionId)}/reconnect`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async disconnectChannel(connectionId: string): Promise<{ ok: boolean; connectionId: string; connected: boolean }> {
+    return this.call(`/api/channels/connections/${encodeURIComponent(connectionId)}/disconnect`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  async testChannel(connectionId: string): Promise<{ ok: boolean; reason?: string }> {
+    try {
+      await this.call(`/api/channels/connections/${encodeURIComponent(connectionId)}/test`, { method: "POST" });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   // ---- Usage/billing/settings ----------------------------------------------------------
@@ -597,6 +664,71 @@ export class HttpMoxApi implements MoxApi {
       commerciallyEntitled: response.commerciallyEntitled === true,
       values: response.values ?? {},
     };
+  }
+
+  async listPlans(): Promise<PlanOption[]> {
+    return this.call("/api/plans");
+  }
+
+  async getSubscription(): Promise<SubscriptionView | null> {
+    return this.call("/api/billing/subscription");
+  }
+
+  async listBillingProviders(): Promise<BillingProviderOption[]> {
+    return this.call("/api/billing/providers");
+  }
+
+  async startCheckout(input: {
+    planVersionId: string;
+    pricingRegionCode?: string;
+    providerName: string;
+    successUrl: string;
+    cancelUrl: string;
+  }): Promise<{ sessionId: string; providerRef: string; redirectUrl: string; state: string }> {
+    return this.call("/api/billing/checkout", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async cancelSubscription(): Promise<{ ok: boolean; subscriptionId: string }> {
+    return this.call("/api/billing/cancel", { method: "POST", body: "{}" });
+  }
+
+  async reconcileCheckout(input: { sessionId?: string }): Promise<Record<string, unknown>> {
+    return this.call("/api/billing/reconcile", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  // ---- Personal access tokens (Phase 03 §E) -------------------------------------------
+
+  async createApiToken(input: { name: string; scopes?: string[] }): Promise<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }> {
+    const created = await this.call<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }>("/api/auth/tokens", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return created;
+  }
+
+  async listApiTokens(): Promise<ApiTokenRow[]> {
+    const rows = await this.call<Array<{
+      id: string;
+      name: string;
+      scopes: string[];
+      expiresAt: string;
+      revokedAt?: string;
+      createdAt: string;
+      lastUsedAt?: string;
+    }>>("/api/auth/tokens");
+    return rows.map((row) => ({
+      tokenId: row.id,
+      name: row.name,
+      scopes: row.scopes,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      revoked: Boolean(row.revokedAt),
+      lastUsedAt: row.lastUsedAt,
+    }));
+  }
+
+  async revokeApiToken(tokenId: string): Promise<void> {
+    await this.call(`/api/auth/tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
   }
 
   // ---- Protected Mox Admin ----------------------------------------------------------
