@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentEvent } from "@mox/contracts";
-import { useMox, useEntitlement } from "../api/store.js";
+import { useBrowser, useMox, useTerminal } from "../api/store.js";
 import type { AgentSummary, ChatMessage, ComputerSnapshot } from "../api/types.js";
 import { agentStatus, STATUS_LABEL } from "../domain/roster.js";
 import { projectWorkView } from "../domain/work-view.js";
@@ -65,15 +65,48 @@ type Tab = (typeof TABS)[number];
 
 function AgentDetail({ summary }: { summary: AgentSummary }) {
   const mox = useMox();
-  const terminalAllowed = useEntitlement("terminal");
-  const computerAllowed = useEntitlement("computer");
+  const terminalAllowed = useTerminal();
+  const computerAllowed = useBrowser();
   const [tab, setTab] = useState<Tab>("chat");
-  const threadId = `t_${summary.definition.agentId}`;
   const agentId = summary.definition.agentId;
+  // Real hosted thread lifecycle (Phase 02 §D): the server is the authority for
+  // thread identity — no synthetic `t_<agentId>` ids.
+  const [threads, setThreads] = useState<Array<{ threadId: string; title?: string }>>([]);
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const syncThreads = useCallback(
+    async (prefer?: string) => {
+      const list = await mox.api.listThreads(agentId);
+      setThreads(list);
+      if (list.length === 0) {
+        setThreadId(null);
+      } else {
+        const chosen = prefer && list.some((t) => t.threadId === prefer) ? prefer : list[0]!.threadId;
+        setThreadId(chosen);
+      }
+    },
+    [mox, agentId],
+  );
 
   useEffect(() => {
-    void mox.loadThread(agentId, threadId);
+    void syncThreads();
+  }, [agentId, syncThreads]);
+
+  useEffect(() => {
+    if (threadId) void mox.loadThread(agentId, threadId);
   }, [agentId, threadId, mox]);
+
+  const newChat = async () => {
+    setCreating(true);
+    try {
+      const created = await mox.api.createThread({ agentId, title: "New chat" });
+      await syncThreads(created.threadId);
+      setTab("chat");
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const enabled: Record<Tab, boolean> = {
     chat: true,
@@ -101,6 +134,9 @@ function AgentDetail({ summary }: { summary: AgentSummary }) {
         </div>
         <div className="spacer" />
         {summary.modelBadge && <Badge tone="accent">{summary.modelBadge}</Badge>}
+        <button className="primary" onClick={newChat} disabled={creating}>
+          {creating ? "Starting…" : "+ New Chat"}
+        </button>
       </header>
 
       <nav className="tabs" aria-label="Agent sections">
@@ -113,9 +149,37 @@ function AgentDetail({ summary }: { summary: AgentSummary }) {
         ))}
       </nav>
 
+      {(tab === "chat" || tab === "work") && (
+        <nav className="thread-list" aria-label="Threads">
+          {(threadId ? threads : []).length === 0 ? (
+            <span className="muted">No conversations yet.</span>
+          ) : (
+            threads.map((t) => (
+              <button
+                key={t.threadId}
+                className={t.threadId === threadId ? "active" : ""}
+                onClick={() => setThreadId(t.threadId)}
+              >
+                {t.title ?? "Chat"}
+              </button>
+            ))
+          )}
+        </nav>
+      )}
+
       <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
-        {tab === "chat" && <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} />}
-        {tab === "work" && <WorkTab subjectId={threadId} />}
+        {tab === "chat" &&
+          (threadId ? (
+            <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} />
+          ) : (
+            <div className="empty" style={{ padding: 24 }}>
+              <p>No conversation yet. Start a new chat to begin.</p>
+              <button className="primary" onClick={newChat} disabled={creating}>
+                {creating ? "Starting…" : "New Chat"}
+              </button>
+            </div>
+          ))}
+        {tab === "work" && threadId && <WorkTab subjectId={threadId} />}
         {tab === "computer" && <ComputerTab agentId={agentId} />}
         {tab === "files" && <FilesTab agentId={agentId} />}
         {tab === "terminal" && <TerminalTab agentId={agentId} />}

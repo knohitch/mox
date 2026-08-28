@@ -2996,6 +2996,59 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
       const asSupport = await call("/api/admin/staff", { headers: { cookie: support.cookie } });
       expect(asSupport.status).toBe(403);
     });
+
+    it("rooms persist real member agents transactionally and reject cross-org membership (Phase 01 §E)", async () => {
+      const owner = await signupUser(`room-${randomUUID().slice(0, 8)}@mox.test`, "roompass-12345");
+      const ownerMe = (await (await call("/api/me", { headers: { cookie: owner.cookie } })).body) as { orgId: string };
+      await seedCommercialSubscription(ownerMe.orgId, { agent_rooms: 2 });
+
+      const { agents: agentsTable } = await import("@mox/database");
+      const insertAgent = async (orgId: string, userId: string, slug: string) =>
+        (await server.services.db
+          .insert(agentsTable)
+          .values({
+            orgId,
+            slug,
+            displayName: slug,
+            status: "active",
+            definition: { agentId: slug, model: { providerId: "p", modelId: "m" } },
+            createdByUserId: userId,
+          })
+          .returning({ id: agentsTable.id }))[0]!.id;
+
+      const a1 = await insertAgent(ownerMe.orgId, owner.userId, `room-a1-${randomUUID().slice(0, 6)}`);
+      const a2 = await insertAgent(ownerMe.orgId, owner.userId, `room-a2-${randomUUID().slice(0, 6)}`);
+
+      // Create a room WITH members → persisted transactionally, not echoed.
+      const create = await call("/api/rooms", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({ title: "Research room", memberAgentIds: [a1, a2] }),
+      });
+      expect(create.status).toBe(200);
+      const created = create.body as { roomId: string; memberAgentIds: string[] };
+      expect([...created.memberAgentIds].sort()).toEqual([a1, a2].sort());
+
+      // GET returns durable persisted members, not an empty stub.
+      const list = await call("/api/rooms", { headers: { cookie: owner.cookie } });
+      expect(list.status).toBe(200);
+      const room = (list.body as Array<{ roomId: string; memberAgentIds: string[] }>).find((r) => r.roomId === created.roomId);
+      expect(room?.memberAgentIds).toBeTruthy();
+      expect([...(room?.memberAgentIds ?? [])].sort()).toEqual([a1, a2].sort());
+
+      // Cross-org: a member agent from ANOTHER org must be rejected (400),
+      // so membership can never span org boundaries.
+      const outsider = await signupUser(`room-x-${randomUUID().slice(0, 8)}@mox.test`, "roomxpass-12345");
+      const outsiderMe = (await (await call("/api/me", { headers: { cookie: outsider.cookie } })).body) as { orgId: string };
+      const b1 = await insertAgent(outsiderMe.orgId, outsider.userId, `room-b1-${randomUUID().slice(0, 6)}`);
+
+      const cross = await call("/api/rooms", {
+        method: "POST",
+        headers: { cookie: owner.cookie, ...CSRF },
+        body: JSON.stringify({ title: "Bad", memberAgentIds: [a1, b1] }),
+      });
+      expect(cross.status).toBe(400);
+    });
   });
 
 });

@@ -1,5 +1,7 @@
-import { useEffect, useState } from "react";
-import { useMox, useEntitlement } from "../api/store.js";
+import { useCallback, useEffect, useState } from "react";
+import { useMox } from "../api/store.js";
+import { useAgentRooms, useModelConnections, useEntitlements } from "../api/store.js";
+import { CANONICAL_ENTITLEMENT_KEYS } from "../api/entitlement.js";
 import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, KpiCard, LoadingState, PageHeader, Panel } from "../ui/primitives.js";
 import { Markdown } from "../ui/markdown.js";
 import { Link } from "../router.js";
@@ -18,6 +20,12 @@ const statusTone = (s: string | undefined): "good" | "warn" | "bad" | "accent" |
 
 function humanState(state: string | undefined): string {
   return (state ?? "n/a").replace(/[_-]/g, " ");
+}
+
+/** Render telemetry that may be explicitly unavailable (Phase 01 §C). */
+function telemetry(value: number | null | undefined, unit?: string): string {
+  if (value === null || value === undefined) return "unavailable";
+  return `${String(value)}${unit ?? ""}`;
 }
 
 function greeting(): string {
@@ -166,13 +174,17 @@ function AgentRow({ agent }: { agent: AgentSummary }) {
 
 export function RoomsView() {
   const mox = useMox();
-  const roomsAllowed = useEntitlement("rooms");
+  const roomsAllowed = useAgentRooms();
   const [rooms, setRooms] = useState<AgentRoom[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  const [showCreate, setShowCreate] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [memberIds, setMemberIds] = useState<Set<string>>(new Set());
+  const [creating, setCreating] = useState(false);
+
+  const load = useCallback(() => {
     void mox.api
       .listRooms()
       .then((r) => {
@@ -184,13 +196,69 @@ export function RoomsView() {
         setLoading(false);
       });
   }, [mox.api]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
   const selected = rooms.find((r) => r.roomId === selectedId) ?? null;
+
+  const toggleMember = (id: string) => {
+    setMemberIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const createRoom = async () => {
+    const title = newTitle.trim();
+    if (!title || creating) return;
+    setCreating(true);
+    try {
+      const created = await mox.api.createRoom({ title, memberAgentIds: [...memberIds] });
+      setNewTitle("");
+      setMemberIds(new Set());
+      setShowCreate(false);
+      await mox.api.listRooms().then(setRooms);
+      setSelectedId(created.roomId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCreating(false);
+    }
+  };
 
   if (!roomsAllowed) return <EmptyState>Agent Rooms are not enabled for this workspace.</EmptyState>;
 
   return (
     <div>
       <PageHeader title="Agent Rooms" subtitle="Shared threads that coordinate multiple agents together." />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <Button kind="primary" onClick={() => setShowCreate((v) => !v)} disabled={creating}>
+          + Create Room
+        </Button>
+        {showCreate && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <input value={newTitle} placeholder="Room title" onChange={(e) => setNewTitle(e.target.value)} aria-label="Room title" />
+            <label>Members:</label>
+            {mox.agents.map((a) => (
+              <label key={a.definition.agentId} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={memberIds.has(a.definition.agentId)}
+                  onChange={() => toggleMember(a.definition.agentId)}
+                />
+                {a.definition.identity.displayName}
+              </label>
+            ))}
+            <Button kind="primary" onClick={createRoom} disabled={creating || !newTitle.trim()}>
+              {creating ? "Creating…" : "Create"}
+            </Button>
+          </div>
+        )}
+      </div>
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       <div className="grid grid-2">
@@ -214,49 +282,23 @@ export function RoomsView() {
             ))
           )}
         </Panel>
-        <Panel title={selected ? `#${selected.title}` : "Shared thread"}>
+        <Panel title={selected ? `#${selected.title}` : "Room details"}>
           {!selected ? (
-            <EmptyState>Select a room to open its shared thread.</EmptyState>
+            <EmptyState>Select a room to see its members.</EmptyState>
           ) : (
             <>
               <div className="muted" style={{ marginBottom: 8 }}>
-                Members: {selected.memberAgentIds.map((id) => agentName(mox.agents, id)).join(", ")} + humans.
+                Members: {selected.memberAgentIds.length ? selected.memberAgentIds.map((id) => agentName(mox.agents, id)).join(", ") : "none"} + humans.
               </div>
-              <RoomThread roomId={`room:${selected.roomId}`} />
-              <form
-                className="composer"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (!draft.trim() || !selected.memberAgentIds[0]) return;
-                  void mox.send(selected.memberAgentIds[0], `room:${selected.roomId}`, draft);
-                  setDraft("");
-                }}
-              >
-                <textarea value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Post to the room…" aria-label="Message to the room" />
-                <Button kind="primary" type="submit">Send</Button>
-              </form>
+              {/* Phase 02 §G: no canonical room-scoped thread authority exists —
+                  threads are per-agent, so a shared room thread is NOT fabricated
+                  with a synthetic `room:<id>` id (that would call a guaranteed
+                  failing endpoint). Render an honest unavailable state instead. */}
+              <EmptyState>Shared room chat is not yet available on this deployment.</EmptyState>
             </>
           )}
         </Panel>
       </div>
-    </div>
-  );
-}
-
-function RoomThread({ roomId }: { roomId: string }) {
-  const mox = useMox();
-  const msgs = mox.messages(roomId);
-  useEffect(() => {
-    void mox.loadThread("*", roomId);
-  }, [roomId, mox]);
-  if (msgs.length === 0) return <EmptyState>No messages yet.</EmptyState>;
-  return (
-    <div className="chat-scroll" style={{ maxHeight: 300 }}>
-      {msgs.map((m) => (
-        <div key={m.messageId} className={`bubble ${m.role}`}>
-          <Markdown text={m.text || "…"} />
-        </div>
-      ))}
     </div>
   );
 }
@@ -287,11 +329,13 @@ export function ServersView() {
           head={[
             { key: "displayName", label: "Server" },
             { key: "kind", label: "Kind", render: (r) => humanState(r.kind) },
+            { key: "computeClass", label: "Class", render: (r) => String(r.computeClass ?? "") },
             { key: "region", label: "Region" },
             { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-            { key: "agentsRunning", label: "Agents", render: (r) => String(r.agentsRunning) },
-            { key: "cpuPct", label: "CPU", render: (r) => `${r.cpuPct}%` },
-            { key: "memPct", label: "Mem", render: (r) => `${r.memPct}%` },
+            { key: "agentsRunning", label: "Agents", render: (r) => telemetry(r.agentsRunning as number | null) },
+            { key: "cpuPct", label: "CPU", render: (r) => telemetry(r.cpuPct as number | null, "%") },
+            { key: "memPct", label: "Mem", render: (r) => telemetry(r.memPct as number | null, "%") },
+            { key: "lastError", label: "Last error", render: (r) => String(r.lastError ?? "") },
           ]}
           rows={servers}
           empty="No servers provisioned for this workspace yet."
@@ -344,7 +388,7 @@ export function DeploymentsView() {
 
 export function ModelsView() {
   const mox = useMox();
-  const custom = useEntitlement("customModels");
+  const custom = useModelConnections();
   const [models, setModels] = useState<Awaited<ReturnType<typeof mox.api.listModels>>>([]);
   const [cliEngines, setCliEngines] = useState<Awaited<ReturnType<typeof mox.api.listCliEngines>>>([]);
   const [status, setStatus] = useState<string | null>(null);
@@ -566,8 +610,15 @@ export function BillingView() {
 
 export function SettingsView() {
   const mox = useMox();
-  const caps = mox.entitlements ?? {};
-  const enabled = Object.entries(caps).filter(([, v]) => v).map(([k]) => k);
+  const ents = useEntitlements();
+  const caps = ents?.values ?? {};
+  const enabled = CANONICAL_ENTITLEMENT_KEYS.filter((k) => {
+    const v = caps[k];
+    if (typeof v === "boolean") return v;
+    if (typeof v === "number") return v > 0;
+    if (typeof v === "string") return v !== "";
+    return false;
+  });
   return (
     <div>
       <PageHeader title="Settings" subtitle="Workspace capabilities and account details." />
@@ -583,13 +634,19 @@ export function SettingsView() {
             <p className="muted">Workspace identity available after sign-in.</p>
           )}
         </Panel>
-        <Panel title="Capabilities" subtitle="Entitlements for this workspace">
-          {enabled.length === 0 ? (
+        <Panel title="Capabilities" subtitle={ents?.commerciallyEntitled ? "Entitlements for this workspace" : "Commercial access is currently denied"}>
+          {!ents?.commerciallyEntitled ? (
+            <EmptyState>
+              {ents?.commerciallyEntitled === false
+                ? "Commercial access is not currently active for this workspace. Capability values are hidden until access is restored."
+                : "No capability data available."}
+            </EmptyState>
+          ) : enabled.length === 0 ? (
             <EmptyState>No add-on capabilities enabled.</EmptyState>
           ) : (
             <ul className="cap-list">
-              {enabled.map((k) => (
-                <li key={k}><Badge tone="accent">{humanState(k)}</Badge></li>
+              {CANONICAL_ENTITLEMENT_KEYS.filter((k) => caps[k] !== undefined && caps[k] !== "" && caps[k] !== false && caps[k] !== 0).map((k) => (
+                <li key={k}><Badge tone="accent">{humanState(k)}</Badge> <span className="muted">{String(caps[k])}</span></li>
               ))}
             </ul>
           )}

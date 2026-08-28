@@ -16,6 +16,8 @@ import type {
   Entitlements,
   MoxApi,
 } from "./types.js";
+import { hasAgentRooms, hasBackups, hasBrowser, hasChannels, hasDeveloperMode, hasIntegrations, hasMoxAiCredits, hasModelConnections, hasStorage, hasTeamMembers, hasTerminal, hasVoice } from "./entitlement.js";
+import type { CanonicalEntitlementKey } from "./entitlement.js";
 
 /**
  * App-wide state over the MoxApi seam. Views never touch the API directly —
@@ -94,6 +96,7 @@ function failingApi(message: string): MoxApi {
     getAgent: fail,
     updateModel: fail,
     listThreads: fail,
+    createThread: fail,
     getMessages: fail,
     send: () => Promise.reject(new Error(message)),
     openApprovals: fail,
@@ -554,8 +557,37 @@ export function useMox(): MoxStore {
   return ctx;
 }
 
-/** Entitlement gate HOOK backed by durable server values (§D4). */
-export function useEntitlement(cap: keyof Entitlements): boolean {
+/**
+ * Entitlement hooks backed by durable server values (§D4 / Phase 01 §B).
+ *
+ * These are the ONLY sanctioned capability gate series for the customer
+ * surface. Each hook maps a UX capability to its canonical entitlement key via
+ * the selector helpers in `entitlement.ts` — call sites never inspect raw
+ * `entitlements.values` directly.
+ */
+
+export function useEntitlements(): Entitlements | undefined {
   const { entitlements } = useMox();
-  return entitlements?.[cap] === true;
+  return entitlements;
+}
+
+export const useBrowser = () => hasBrowser(useEntitlements());
+export const useTerminal = () => hasTerminal(useEntitlements());
+export const useAgentRooms = () => hasAgentRooms(useEntitlements());
+export const useModelConnections = () => hasModelConnections(useEntitlements());
+export const useVoice = () => hasVoice(useEntitlements());
+export const useIntegrations = () => hasIntegrations(useEntitlements());
+export const useChannels = () => hasChannels(useEntitlements());
+export const useDeveloperMode = () => hasDeveloperMode(useEntitlements());
+export const useBackups = () => hasBackups(useEntitlements());
+export const useTeamMembers = () => hasTeamMembers(useEntitlements());
+export const useStorage = () => hasStorage(useEntitlements());
+export const useMoxAiCredits = () => hasMoxAiCredits(useEntitlements());
+
+/** Raw canonical value (0 / "" / false when unavailable). */
+export function useCanonicalValue(
+  key: CanonicalEntitlementKey,
+): boolean | number | string | undefined {
+  const { entitlements } = useMox();
+  return entitlements?.values[key];
 }

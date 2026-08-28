@@ -357,6 +357,13 @@ export class HttpMoxApi implements MoxApi {
     return this.call(`/api/agents/${encodeURIComponent(agentId)}/threads`);
   }
 
+  async createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }> {
+    return this.call("/api/threads", {
+      method: "POST",
+      body: JSON.stringify({ agentId: input.agentId, title: input.title }),
+    });
+  }
+
   async getMessages(threadId: string): Promise<ChatMessage[]> {
     return this.call(`/api/threads/${encodeURIComponent(threadId)}/messages`);
   }
@@ -383,6 +390,9 @@ export class HttpMoxApi implements MoxApi {
 
     void (async () => {
       try {
+        // Success means the turn was durably accepted (and launched server-side
+        // when a runtime is composed). Turn progress arrives via the events
+        // stream, so we do NOT invent a turn.failed here.
         await this.call(`/api/threads/${encodeURIComponent(threadId)}/messages`, {
           method: "POST",
           body: JSON.stringify({ text }),
@@ -391,13 +401,11 @@ export class HttpMoxApi implements MoxApi {
           finish();
           return;
         }
-        onEvent({
-          type: "turn.failed",
-          error:
-            "The Mox control plane accepted your message but no turn-execution engine is configured on this deployment.",
-          threadId,
-        } as unknown as AgentEvent);
       } catch (error) {
+        if (cancelled) {
+          finish();
+          return;
+        }
         onEvent({
           type: "turn.failed",
           error: error instanceof Error ? error.message : String(error),
@@ -507,23 +515,18 @@ export class HttpMoxApi implements MoxApi {
   }
 
   async getEntitlements(): Promise<Entitlements> {
-    // Security Repair 05A §J: the endpoint now reports commercial-access
-    // truth (commerciallyEntitled + denial reason); effective values exist
-    // only while currently entitled.
+    // Security Repair 05A §J: the endpoint reports commercial-access truth
+    // (commerciallyEntitled + denial reason); effective VALUE exists only while
+    // currently entitled. The UI keeps the canonical key/value map — no legacy
+    // boolean buckets.
     const response = await this.call<{
       planVersionId?: string;
       commerciallyEntitled: boolean;
       values: Record<string, boolean | number | string>;
     }>("/api/billing/entitlements");
-    const flag = (key: keyof Entitlements): boolean =>
-      response.commerciallyEntitled === true &&
-      (response.values[key] === true || response.values[key] === "true");
     return {
-      computer: flag("computer"),
-      terminal: flag("terminal"),
-      voice: flag("voice"),
-      rooms: flag("rooms"),
-      customModels: flag("customModels"),
+      commerciallyEntitled: response.commerciallyEntitled === true,
+      values: response.values ?? {},
     };
   }
 

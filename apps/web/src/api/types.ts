@@ -5,6 +5,9 @@ import type {
   AgentRoom,
   ApprovalRequest,
 } from "@mox/contracts";
+import type { Entitlements } from "./entitlement.js";
+
+export type { Entitlements } from "./entitlement.js";
 
 /**
  * The web app's ONLY access to Mox backend capabilities (Prompt 05
@@ -35,13 +38,32 @@ export interface AgentSummary {
 
 export interface ServerSummary {
   serverId: string;
+  orderId: string;
   displayName: string;
   kind: "mox-cloud" | "customer-vps";
+  computeClass?: string;
   region: string;
-  state: "provisioning" | "running" | "degraded" | "suspended";
-  agentsRunning: number;
-  cpuPct: number;
-  memPct: number;
+  /** Actual lifecycle state from the compute orchestrator authority. */
+  state:
+    | "requested"
+    | "provisioning"
+    | "running"
+    | "error"
+    | "resizing"
+    | "stopping"
+    | "stopped"
+    | "cancelling"
+    | "canceled"
+    | "retention"
+    | "destroyed";
+  /** Telemetry is explicitly unavailable (null) when no authority reports it. */
+  agentsRunning: number | null;
+  cpuPct: number | null;
+  memPct: number | null;
+  provider?: string | null;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ModelOption {
@@ -73,14 +95,6 @@ export interface CliEngineRow {
   supportTier: string;
   state: string;
   reason?: string;
-}
-
-export interface Entitlements {
-  computer: boolean;
-  terminal: boolean;
-  voice: boolean;
-  rooms: boolean;
-  customModels: boolean;
 }
 
 export interface AdminOverview {
@@ -294,6 +308,7 @@ export interface MoxApi {
 
   // Threads & chat
   listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string }>>;
+  createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }>;
   getMessages(threadId: string): Promise<ChatMessage[]>;
   send(
     agentId: string,

@@ -1,0 +1,17 @@
+# MOX UI PARITY IMPLEMENTATION PACK
+
+Generated against GitHub `master` reference HEAD:
+
+`ecf054d1fea293168c42d4748c9f66731a41d3ed`
+
+Run `00_RUN_ALL_UI_PARITY.md` as the only initial prompt. It instructs the implementation agent to execute all remaining files sequentially.
+
+Files:
+- `00_RUN_ALL_UI_PARITY.md`
+- `01_PRODUCT_SURFACE_INVENTORY_AND_TRUTH.md`
+- `02_CUSTOMER_CORE_PARITY.md`
+- `03_CUSTOMER_COMMERCIAL_CONNECTIONS_AND_DEVELOPER.md`
+- `04_CUSTOMER_EXTENDED_CAPABILITIES.md`
+- `05_ADMIN_SURFACE_PARITY.md`
+- `06_SUPPORT_SURFACE_PARITY.md`
+- `07_FINAL_PARITY_REVALIDATION_AND_RELEASE_GATE.md`

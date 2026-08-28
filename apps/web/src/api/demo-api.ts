@@ -242,6 +242,17 @@ export class DemoMoxApi implements MoxApi {
     return this.s.threads.get(subjectId) ?? [];
   }
 
+  async createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }> {
+    this.requireAgent(input.agentId);
+    if (!this.s.threads.has(input.agentId)) this.s.threads.set(input.agentId, []);
+    const list = this.s.threads.get(input.agentId) as Array<{ threadId: string; title?: string; agentId: string }>;
+    const threadId = randomUUID();
+    list.unshift({ threadId, title: input.title ?? "New chat", agentId: input.agentId });
+    this.s.messages.set(threadId, []);
+    this.s.events.set(threadId, []);
+    return { threadId, title: input.title };
+  }
+
   async getMessages(threadId: string): Promise<ChatMessage[]> {
     return [...(this.s.messages.get(threadId) ?? [])];
   }
@@ -329,10 +340,11 @@ export class DemoMoxApi implements MoxApi {
   // ---- Infrastructure ----
 
   async listServers(): Promise<ServerSummary[]> {
+    const at = now();
     return [
-      { serverId: "srv_1", displayName: "mox-cloud · eu-central-1", kind: "mox-cloud", region: "eu-central", state: "running", agentsRunning: 3, cpuPct: 41, memPct: 58 },
-      { serverId: "srv_2", displayName: "customer-vps · contabo #8841", kind: "customer-vps", region: "us-east", state: "running", agentsRunning: 1, cpuPct: 12, memPct: 34 },
-      { serverId: "srv_3", displayName: "customer-vps · hetzner #2210", kind: "customer-vps", region: "eu-west", state: "degraded", agentsRunning: 0, cpuPct: 96, memPct: 91 },
+      { serverId: "srv_1", orderId: "ord_1", displayName: "mox-cloud · eu-central-1", kind: "mox-cloud", region: "eu-central", state: "running", agentsRunning: 3, cpuPct: 41, memPct: 58, createdAt: at, updatedAt: at },
+      { serverId: "srv_2", orderId: "ord_2", displayName: "customer-vps · contabo #8841", kind: "customer-vps", region: "us-east", state: "running", agentsRunning: 1, cpuPct: 12, memPct: 34, createdAt: at, updatedAt: at },
+      { serverId: "srv_3", orderId: "ord_3", displayName: "customer-vps · hetzner #2210", kind: "customer-vps", region: "eu-west", state: "error", agentsRunning: 0, cpuPct: 96, memPct: 91, createdAt: at, updatedAt: at },
     ];
   }
 
@@ -437,7 +449,18 @@ export class DemoMoxApi implements MoxApi {
   async getEntitlements(): Promise<Entitlements> {
     // Demo workspace entitlements; hosted product resolves from plan/contract
     // via the entitlements service (Prompt 08). Gates stay hooks in the UI.
-    return { computer: true, terminal: true, voice: false, rooms: true, customModels: true };
+    // Returns the canonical key/value representation (Phase 01 §B).
+    return {
+      commerciallyEntitled: true,
+      values: {
+        browser_sessions: 1,
+        cli_sessions: 1,
+        agent_rooms: 2,
+        model_connections: 2,
+        mox_ai_credits: 0,
+        developer_mode: true,
+      },
+    };
   }
 
   // ---- Computer (gateway contract) ----

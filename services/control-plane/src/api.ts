@@ -48,6 +48,7 @@ import {
   products,
   providerAccounts,
   providerPayments,
+  roomMembers,
   serverOperations,
   serverOrders,
   sessionEvents,
@@ -62,6 +63,13 @@ import {
   verifiedWebhookEvents,
 } from "@mox/database";
 import { sanitizeForPersistence } from "@mox/security";
+import {
+  deploymentVersionId,
+  projectDeploymentState,
+  projectDeploymentTarget,
+  projectModelAvailability,
+  projectServerSummary,
+} from "./projections.js";
 import type { ControlPlaneServices } from "./composition.js";
 import { verifyDependencies } from "./composition.js";
 import {
@@ -1380,28 +1388,76 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.get("/api/rooms", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
-    const rows = await db().select().from(agentRooms).where(eq(agentRooms.orgId, identity.orgId));
-    return rows.map((row) => ({
-      roomId: row.id,
-      orgId: row.orgId,
-      title: row.name,
-      description: row.description,
-      memberAgentIds: [] as string[],
-    }));
+    // Phase 01 §E: return the actually persisted members, not an empty stub.
+    const [rooms, members] = await Promise.all([
+      db().select().from(agentRooms).where(eq(agentRooms.orgId, identity.orgId)),
+      db().select().from(roomMembers).where(eq(roomMembers.orgId, identity.orgId)),
+    ]);
+    return rooms.map((row) => {
+      const roomMemberIds = members.filter((m) => m.roomId === row.id && m.agentId).map((m) => m.agentId!);
+      return {
+        roomId: row.id,
+        orgId: row.orgId,
+        title: row.name,
+        description: row.description,
+        memberAgentIds: roomMemberIds,
+      };
+    });
   });
 
   router.post("/api/rooms", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
     await requireCommercialMutation(identity, "agent_rooms", { min: 1 }, "member");
     const body = ctx.body as { title?: string; memberAgentIds?: string[] } | undefined;
-    if (!body?.title) throw httpError("title is required", 400);
-    const inserted = await db()
-      .insert(agentRooms)
-      .values({ orgId: identity.orgId, name: body.title })
-      .returning();
-    const row = inserted[0];
-    if (!row) throw httpError("room insert failed", 500, { unavailable: true });
-    return { roomId: row.id, orgId: row.orgId, title: row.name, description: row.description, memberAgentIds: body.memberAgentIds ?? [] };
+    const title = body?.title;
+    if (!title) throw httpError("title is required", 400);
+    const memberAgentIds = Array.isArray(body.memberAgentIds) ? [...new Set(body.memberAgentIds)] : [];
+
+    // Validate that every requested member agent belongs to the SAME org, so
+    // membership can never span org boundaries (Phase 01 §E).
+    let validatedMembers: typeof agents.$inferSelect[] = [];
+    if (memberAgentIds.length) {
+      const agentRows = await db().select().from(agents).where(inArray(agents.id, memberAgentIds));
+      const byId = new Map(agentRows.map((a) => [a.id, a]));
+      const crossOrg = memberAgentIds.filter((id) => byId.get(id)?.orgId !== identity.orgId);
+      if (crossOrg.length) {
+        throw httpError("room member agents must belong to the same org", 400, {
+          reason: `rejected agents: ${crossOrg.join(", ")}`,
+        });
+      }
+      // Preserve request ordering, skipping any ids that do not resolve.
+      validatedMembers = memberAgentIds
+        .map((id) => byId.get(id))
+        .filter((a): a is typeof agents.$inferSelect => Boolean(a));
+    }
+
+    const row = await db().transaction(async (tx) => {
+      const inserted = await tx
+        .insert(agentRooms)
+        .values({ orgId: identity.orgId, name: title })
+        .returning();
+      const room = inserted[0];
+      if (!room) throw httpError("room insert failed", 500, { unavailable: true });
+      if (validatedMembers.length) {
+        await tx.insert(roomMembers).values(
+          validatedMembers.map((a) => ({
+            roomId: room.id,
+            orgId: identity.orgId,
+            userId: identity.userId,
+            agentId: a.id,
+          })),
+        );
+      }
+      return room;
+    });
+
+    return {
+      roomId: row.id,
+      orgId: row.orgId,
+      title: row.name,
+      description: row.description,
+      memberAgentIds: validatedMembers.map((a) => a.id),
+    };
   });
 
   // ---- Servers (compute orchestrator authority) -------------------------------
@@ -1409,17 +1465,12 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.get("/api/servers", async (ctx) => {
     const identity = await requireAuth(ctx, "servers");
     const orders = await services.orchestrator.listOrders(identity.orgId);
-    return orders.map((order) => ({
-      serverId: order.providerInstanceId ?? order.id,
-      orderId: order.id,
-      displayName: order.hostname,
-      kind: "customer-vps" as const,
-      region: order.regionCode ?? "unknown",
-      state: order.state === "running" ? ("running" as const) : ("provisioning" as const),
-      agentsRunning: 0,
-      cpuPct: 0,
-      memPct: 0,
-    }));
+    // Product-truth projection (Phase 01 §C): preserve the ACTUAL lifecycle
+    // state from the orchestrator authority — never collapse every non-running
+    // server to "provisioning". No telemetry authority is wired on this
+    // surface, so agentsRunning/cpuPct/memPct are reported as explicitly
+    // unavailable (null) rather than fabricated zeros.
+    return orders.map((order) => projectServerSummary(order));
   });
 
   router.post("/api/servers/orders", async (ctx) => {
@@ -1498,19 +1549,32 @@ export function buildApiRouter(deps: ApiDeps): Router {
 
   router.get("/api/deployments", async (ctx) => {
     const identity = await requireAuth(ctx, "servers");
-    const rows = await db()
-      .select()
-      .from(agentDeployments)
-      .where(eq(agentDeployments.orgId, identity.orgId));
-    return rows.map((row) => ({
-      deploymentId: row.id,
-      agentId: row.agentId,
-      target: { kind: "sandbox" },
-      state: "desired",
-      desiredRevision: row.desiredRevision,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    }));
+    // Product-truth projection (Phase 01 §D): derive target + state from
+    // durable/reconciled authorities (deployment kind, linked orchestrator
+    // order, node heartbeat) instead of hardcoding sandbox/desired.
+    const [rows, agentRows, orders, nodes] = await Promise.all([
+      db().select().from(agentDeployments).where(eq(agentDeployments.orgId, identity.orgId)),
+      db().select().from(agents).where(eq(agents.orgId, identity.orgId)),
+      db().select().from(serverOrders).limit(1500),
+      db().select().from(moxNodes).limit(1500),
+    ]);
+    return rows.map((row) => {
+      const agent = agentRows.find((a) => a.id === row.agentId);
+      const order = row.computeInstanceId ? orders.find((o) => o.id === row.computeInstanceId) : undefined;
+      const node = order ? nodes.find((n) => n.orderId === order.id) : undefined;
+      return {
+        deploymentId: row.id,
+        agentId: row.agentId,
+        versionId: deploymentVersionId(agent?.id, row.desiredRevision),
+        target: projectDeploymentTarget(row.kind, order?.id),
+        state: projectDeploymentState(order?.state, node?.lastHeartbeatAt?.toISOString()),
+        lastOperationId: null,
+        desiredRevision: row.desiredRevision,
+        serverPlacement: order?.hostname ?? null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      };
+    });
   });
 
   // ---- Models / connections ------------------------------------------------------
@@ -1520,17 +1584,24 @@ export function buildApiRouter(deps: ApiDeps): Router {
     const providers = await db().select().from(modelProviders).where(eq(modelProviders.orgId, identity.orgId));
     const allModels = await db().select().from(models).where(eq(models.orgId, identity.orgId));
     const connections = await db().select().from(modelConnections).where(eq(modelConnections.orgId, identity.orgId));
-    return providers.flatMap((provider) =>
-      allModels
+    // Phase 01 §F: availability derives from the provider's connection + credential
+    // authorities, never blanket `available: true`.
+    return providers.flatMap((provider) => {
+      const connection = connections.find((c) => c.providerId === provider.id);
+      const status = connection?.connectionStatus ?? "unconfigured";
+      const hasCreds = Boolean(connection?.credentialRefId);
+      const ready = hasCreds && status === "configured";
+      return allModels
         .filter((m) => m.providerId === provider.id)
         .map((model) => ({
           modelId: model.slug,
           providerId: provider.slug,
           displayName: model.displayName,
-          byok: connections.some((c) => c.providerId === provider.id),
-          available: true,
-        })),
-    );
+          byok: hasCreds,
+          available: ready,
+          availability: projectModelAvailability(status, hasCreds),
+        }));
+    });
   });
 
   router.post("/api/model-connections/:providerSlug/test", async (ctx) => {
