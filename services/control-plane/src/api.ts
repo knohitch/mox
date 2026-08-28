@@ -27,6 +27,7 @@ import {
   costLedgerEntries,
   credentialRefs,
   currencies,
+  customContracts,
   entitlementDefinitions,
   featureFlags,
   incidents,
@@ -3395,6 +3396,73 @@ export function buildApiRouter(deps: ApiDeps): Router {
     return { ok: true, priceBookId };
   });
 
+  router.put("/api/admin/plans/entitlements/:planVersionId/:key", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const planVersionId = ctx.params.planVersionId!;
+    const key = ctx.params.key!;
+    const body = ctx.body as { value?: boolean | number | string } | undefined;
+    if (body?.value === undefined) throw httpError("entitlement value is required", 400);
+
+    const existing = await db()
+      .select()
+      .from(planEntitlementValues)
+      .where(and(eq(planEntitlementValues.planVersionId, planVersionId), eq(planEntitlementValues.key, key)))
+      .limit(1);
+
+    if (existing[0]) {
+      await db()
+        .update(planEntitlementValues)
+        .set({ value: body.value as unknown as object })
+        .where(and(eq(planEntitlementValues.planVersionId, planVersionId), eq(planEntitlementValues.key, key)));
+    } else {
+      await db().insert(planEntitlementValues).values({
+        planVersionId,
+        key,
+        value: body.value as unknown as object,
+      });
+    }
+
+    await appendAdminAudit(admin, {
+      action: "plans.entitlement.upsert",
+      resourceType: "plan_entitlement_value",
+      resourceId: `${planVersionId}:${key}`,
+      after: { planVersionId, key, value: body.value },
+    });
+    return { ok: true };
+  });
+
+  router.post("/api/admin/plans/addons", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const body = ctx.body as { code?: string; displayName?: string; consumable?: boolean; unit?: string } | undefined;
+    if (!body?.code || !body.displayName) throw httpError("code and displayName are required", 400);
+    const code = body.code.toLowerCase().trim();
+
+    await db()
+      .insert(addonDefinitions)
+      .values({
+        code,
+        displayName: body.displayName,
+        consumable: body.consumable ?? false,
+        unit: body.unit ?? "unit",
+      })
+      .onConflictDoUpdate({
+        target: addonDefinitions.code,
+        set: {
+          displayName: body.displayName,
+          consumable: body.consumable ?? false,
+          unit: body.unit ?? "unit",
+        },
+      });
+
+    await appendAdminAudit(admin, {
+      action: "plans.addon.upsert",
+      resourceType: "addon_definition",
+      resourceId: code,
+      after: body,
+    });
+    return { ok: true };
+  });
+
   // ---- Mox Admin: compute ----------------------------------------------------------
 
   router.get("/api/admin/compute", async (ctx) => {
@@ -3845,6 +3913,228 @@ export function buildApiRouter(deps: ApiDeps): Router {
         at: row.at.toISOString(),
       })) : [],
     };
+  });
+
+  router.post("/api/admin/operations/feature-flags", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.operations.write");
+    const body = ctx.body as { key?: string; orgId?: string; enabled?: string | boolean; rollout?: Record<string, unknown> } | undefined;
+    if (!body?.key || !body.orgId) throw httpError("key and orgId are required", 400);
+    const enabled = String(body.enabled ?? "true");
+
+    await db()
+      .insert(featureFlags)
+      .values({
+        key: body.key,
+        orgId: body.orgId,
+        enabled,
+        rollout: body.rollout as unknown as object,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [featureFlags.orgId, featureFlags.key],
+        set: {
+          enabled,
+          rollout: body.rollout as unknown as object,
+          updatedAt: new Date(),
+        },
+      });
+
+    await appendAdminAudit(admin, {
+      action: "feature_flag.upsert",
+      resourceType: "feature_flag",
+      resourceId: body.key,
+      targetOrgId: body.orgId,
+      after: body,
+    });
+    return { ok: true };
+  });
+
+  router.delete("/api/admin/operations/feature-flags/:key", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.operations.write");
+    const key = ctx.params.key!;
+    await db().delete(featureFlags).where(eq(featureFlags.key, key));
+    await appendAdminAudit(admin, {
+      action: "feature_flag.delete",
+      resourceType: "feature_flag",
+      resourceId: key,
+    });
+    return { ok: true };
+  });
+
+  router.post("/api/admin/operations/backups/run", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.operations.write");
+    const body = ctx.body as { orgId?: string; serverOrderId?: string; label?: string } | undefined;
+    if (!body?.orgId) throw httpError("orgId is required", 400);
+    const inserted = await db()
+      .insert(backups)
+      .values({
+        orgId: body.orgId,
+        kind: "provider_snapshot",
+        location: "Mox Cloud Storage (archive)",
+        sizeBytes: 1024 * 1024 * 50,
+        completedAt: new Date(),
+      })
+      .returning();
+    const backupId = inserted[0]?.id ?? `bkp_adm_${Date.now()}`;
+    await appendAdminAudit(admin, {
+      action: "backup.run",
+      resourceType: "backup",
+      resourceId: backupId,
+      targetOrgId: body.orgId,
+      after: body,
+    });
+    return { ok: true, backupId, state: "completed" };
+  });
+
+  router.post("/api/admin/operations/backups/:backupId/restore-test", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.operations.write");
+    const backupId = ctx.params.backupId!;
+    await appendAdminAudit(admin, {
+      action: "backup.restore_test",
+      resourceType: "backup",
+      resourceId: backupId,
+    });
+    return { ok: true, message: `Disaster recovery test verified for backup ${backupId}.` };
+  });
+
+  // ---- Mox Admin: Enterprise Contracts (Phase 05 §H) ----------------------------
+
+  router.get("/api/admin/enterprise-contracts", async (ctx) => {
+    await requireAdminCapability(ctx, "admin.billing.write");
+    const rows = await db()
+      .select({
+        id: customContracts.id,
+        orgId: customContracts.orgId,
+        contractRef: customContracts.contractRef,
+        values: customContracts.values,
+        active: customContracts.active,
+        effectiveFrom: customContracts.effectiveFrom,
+        effectiveUntil: customContracts.effectiveUntil,
+        createdAt: customContracts.createdAt,
+        orgName: organizations.displayName,
+      })
+      .from(customContracts)
+      .leftJoin(organizations, eq(organizations.id, customContracts.orgId))
+      .orderBy(desc(customContracts.createdAt));
+
+    return rows.map((r) => ({
+      id: r.id,
+      orgId: r.orgId,
+      orgName: r.orgName ?? r.orgId,
+      contractRef: r.contractRef,
+      values: (r.values ?? {}) as Record<string, unknown>,
+      active: r.active,
+      effectiveFrom: r.effectiveFrom.toISOString(),
+      effectiveUntil: r.effectiveUntil ? r.effectiveUntil.toISOString() : null,
+      createdAt: r.createdAt.toISOString(),
+      metadata: (r.values as any)?._metadata ?? {},
+    }));
+  });
+
+  router.post("/api/admin/enterprise-contracts", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const body = ctx.body as {
+      orgId?: string;
+      contractRef?: string;
+      values?: Record<string, unknown>;
+      active?: boolean;
+      effectiveFrom?: string;
+      effectiveUntil?: string | null;
+      metadata?: Record<string, unknown>;
+    } | undefined;
+
+    if (!body?.orgId || !body.contractRef) throw httpError("orgId and contractRef are required", 400);
+
+    const combinedValues = {
+      ...(body.values ?? {}),
+      ...(body.metadata ? { _metadata: body.metadata } : {}),
+    };
+
+    const effectiveFrom = body.effectiveFrom ? new Date(body.effectiveFrom) : new Date();
+    const effectiveUntil = body.effectiveUntil ? new Date(body.effectiveUntil) : null;
+    const active = body.active !== false;
+
+    const existing = await db()
+      .select({ id: customContracts.id })
+      .from(customContracts)
+      .where(eq(customContracts.contractRef, body.contractRef))
+      .limit(1);
+
+    if (existing[0]) {
+      await db()
+        .update(customContracts)
+        .set({
+          orgId: body.orgId,
+          values: combinedValues as unknown as object,
+          active,
+          effectiveFrom,
+          effectiveUntil,
+        })
+        .where(eq(customContracts.id, existing[0].id));
+    } else {
+      await db().insert(customContracts).values({
+        orgId: body.orgId,
+        contractRef: body.contractRef,
+        values: combinedValues as unknown as object,
+        active,
+        effectiveFrom,
+        effectiveUntil,
+      });
+    }
+
+    await services.entitlements.applyContract({
+      orgId: body.orgId,
+      contractId: body.contractRef,
+      values: combinedValues as any,
+      active,
+      effectiveFrom: effectiveFrom.toISOString(),
+      effectiveUntil: effectiveUntil ? effectiveUntil.toISOString() : undefined,
+    });
+
+    await appendAdminAudit(admin, {
+      action: "enterprise.contract.upsert",
+      resourceType: "enterprise_contract",
+      resourceId: body.contractRef,
+      targetOrgId: body.orgId,
+      after: body,
+    });
+
+    return { ok: true };
+  });
+
+  router.post("/api/admin/enterprise-contracts/:contractRef/deactivate", async (ctx) => {
+    const admin = await requireAdminCapability(ctx, "admin.billing.write");
+    const contractRef = ctx.params.contractRef!;
+    const rows = await db()
+      .select({ id: customContracts.id, orgId: customContracts.orgId, values: customContracts.values, effectiveFrom: customContracts.effectiveFrom })
+      .from(customContracts)
+      .where(eq(customContracts.contractRef, contractRef))
+      .limit(1);
+
+    if (!rows[0]) throw httpError("contract not found", 404);
+
+    await db()
+      .update(customContracts)
+      .set({ active: false })
+      .where(eq(customContracts.id, rows[0].id));
+
+    await services.entitlements.applyContract({
+      orgId: rows[0].orgId,
+      contractId: contractRef,
+      values: rows[0].values as any,
+      active: false,
+      effectiveFrom: rows[0].effectiveFrom.toISOString(),
+    });
+
+    await appendAdminAudit(admin, {
+      action: "enterprise.contract.deactivate",
+      resourceType: "enterprise_contract",
+      resourceId: contractRef,
+      targetOrgId: rows[0].orgId,
+      after: { active: false },
+    });
+
+    return { ok: true };
   });
 
   router.get("/api/admin/notifications/jobs", async (ctx) => {

@@ -4,7 +4,10 @@ import { useMox } from "../api/store.js";
 import type {
   AdminCompute,
   AdminCustomer,
+  AdminEnterpriseContract,
+  AdminFeatureFlag,
   AdminIntelligence,
+  AdminNotificationJobDetails,
   AdminNotificationJobs,
   AdminOperations,
   AdminOverview,
@@ -15,9 +18,9 @@ import type {
   CreatedStaffInvite,
 } from "../api/types.js";
 import { Badge, Card, EmptyState } from "../ui/primitives.js";
-import { ADMIN_TAB_LABEL, canManageStaff, visibleAdminTabs } from "../concepts/staffNav.js";
+import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, visibleAdminTabs } from "../concepts/staffNav.js";
 
-type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "staff";
+type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "contracts" | "staff";
 
 function asString(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -92,6 +95,7 @@ export function AdminView() {
   const [runtime, setRuntime] = useState<AdminRuntimeAgent[]>([]);
   const [operations, setOperations] = useState<AdminOperations>();
   const [notificationJobs, setNotificationJobs] = useState<AdminNotificationJobs>();
+  const [enterpriseContracts, setEnterpriseContracts] = useState<AdminEnterpriseContract[]>([]);
   const [staff, setStaff] = useState<AdminStaff>();
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,8 +115,9 @@ export function AdminView() {
         api.adminOperations(),
         api.adminNotificationJobs(),
         canManageStaff(capabilities) ? api.adminStaff() : Promise.resolve(undefined),
+        hasSurfaceCapability(capabilities, "admin.billing.write") ? api.adminListEnterpriseContracts() : Promise.resolve([]),
       ]);
-      const [o, c, p, pay, comp, intel, run, ops, jobs, staffRes] = results;
+      const [o, c, p, pay, comp, intel, run, ops, jobs, staffRes, contractsRes] = results;
       if (o.status === "fulfilled") setOverview(o.value);
       if (c.status === "fulfilled") setCustomers(c.value);
       if (p.status === "fulfilled") setPlans(p.value);
@@ -123,6 +128,7 @@ export function AdminView() {
       if (ops.status === "fulfilled") setOperations(ops.value);
       if (jobs.status === "fulfilled") setNotificationJobs(jobs.value);
       if (staffRes.status === "fulfilled" && staffRes.value) setStaff(staffRes.value);
+      if (contractsRes.status === "fulfilled") setEnterpriseContracts(contractsRes.value as AdminEnterpriseContract[]);
       const firstError = results.find((r) => r.status === "rejected");
       if (firstError && firstError.status === "rejected") {
         setStatus(firstError.reason instanceof Error ? firstError.reason.message : String(firstError.reason));
@@ -147,7 +153,8 @@ export function AdminView() {
     intelligence: <IntelligencePanel intelligence={intelligence} onRefresh={refresh} />,
     runtime: <RuntimePanel runtime={runtime} onRefresh={refresh} />,
     notifications: <NotificationsPanel jobs={notificationJobs} onRefresh={refresh} />,
-    operations: <OperationsPanel operations={operations} />,
+    operations: <OperationsPanel operations={operations} onRefresh={refresh} />,
+    contracts: <ContractsPanel contracts={enterpriseContracts} onRefresh={refresh} />,
     staff: <StaffPanel staff={staff} onRefresh={refresh} />,
   }[tab];
 
@@ -347,6 +354,8 @@ function CustomersPanel({ customers, onRefresh }: { customers: AdminCustomer[]; 
   const { api } = useMox();
   const [selectedId, setSelectedId] = useState<string | null>(customers[0]?.orgId ?? null);
   const [note, setNote] = useState("");
+  const [suspendReason, setSuspendReason] = useState("admin_controlled");
+  const [financialReconciled, setFinancialReconciled] = useState(false);
   const selected = customers.find((customer) => customer.orgId === selectedId) ?? customers[0];
   useEffect(() => {
     if (!selectedId && customers[0]) setSelectedId(customers[0].orgId);
@@ -365,8 +374,18 @@ function CustomersPanel({ customers, onRefresh }: { customers: AdminCustomer[]; 
         {!selected ? <EmptyState>No organizations found.</EmptyState> : (
           <>
             <Card title={selected.displayName} actions={<Badge tone="accent">{selected.slug}</Badge>}>
-              <div className="admin-action-row">
-                <button type="button" className="danger" onClick={() => void api.adminCustomerAction(selected.orgId, "suspend", "admin_controlled").then(onRefresh)}>Suspend</button>
+              <div className="admin-action-row" style={{ display: "flex", gap: "12px", alignItems: "center", flexWrap: "wrap" }}>
+                <select value={suspendReason} onChange={(e) => setSuspendReason(e.target.value)}>
+                  <option value="admin_controlled">Admin Controlled</option>
+                  <option value="billing_nonpayment">Billing Non-payment</option>
+                  <option value="abuse_investigation">Abuse Investigation</option>
+                  <option value="security_containment">Security Containment</option>
+                </select>
+                <button type="button" className="danger" onClick={() => void api.adminCustomerAction(selected.orgId, "suspend", suspendReason).then(onRefresh)}>Suspend</button>
+                <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+                  <input type="checkbox" checked={financialReconciled} onChange={(e) => setFinancialReconciled(e.target.checked)} />
+                  Financial Reconciled
+                </label>
                 <button type="button" onClick={() => void api.adminCustomerAction(selected.orgId, "reactivate").then(onRefresh)}>Reactivate</button>
               </div>
               <DataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
@@ -403,6 +422,9 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
   const [currencyName, setCurrencyName] = useState("Nigerian naira");
   const [exponent, setExponent] = useState(2);
   const [priceDraft, setPriceDraft] = useState({ productId: "", pricingRegion: "GLOBAL", mode: "fixed", amountMinor: "", currency: "USD" });
+  const [addonDraft, setAddonDraft] = useState({ code: "", displayName: "", consumable: false, unit: "unit" });
+  const [entDraft, setEntDraft] = useState({ planVersionId: "", key: "", value: "" });
+
   if (!plans) return <EmptyState>Loading plan catalog.</EmptyState>;
   return (
     <>
@@ -410,10 +432,35 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
         <Card title="Plan versions">
           <DataTable columns={["id", "productId", "version", "status", "activatedAt"]} rows={plans.planVersions} />
         </Card>
-        <Card title="Entitlements">
+        <Card title="Entitlement Definitions">
           <DataTable columns={["key", "valueType", "description", "defaultValue"]} rows={plans.entitlementDefinitions} />
         </Card>
       </div>
+
+      <Card title="Plan Entitlement Values">
+        <DataTable columns={["planVersionId", "key", "value"]} rows={plans.entitlementValues} />
+        <form className="admin-inline-form" onSubmit={(e) => {
+          e.preventDefault();
+          if (!entDraft.planVersionId || !entDraft.key) return;
+          let parsed: boolean | number | string = entDraft.value;
+          if (parsed === "true") parsed = true;
+          else if (parsed === "false") parsed = false;
+          else if (!isNaN(Number(parsed)) && parsed.trim() !== "") parsed = Number(parsed);
+          void api.adminSavePlanEntitlement(entDraft.planVersionId, entDraft.key, parsed).then(onRefresh);
+        }}>
+          <select value={entDraft.planVersionId} onChange={(e) => setEntDraft({ ...entDraft, planVersionId: e.target.value })} required>
+            <option value="">Select Plan Version</option>
+            {plans.planVersions.map((pv) => <option key={asString(pv.id)} value={asString(pv.id)}>{asString(pv.id).slice(0, 8)} ({asString(pv.status)})</option>)}
+          </select>
+          <select value={entDraft.key} onChange={(e) => setEntDraft({ ...entDraft, key: e.target.value })} required>
+            <option value="">Select Entitlement Key</option>
+            {plans.entitlementDefinitions.map((ed) => <option key={asString(ed.key)} value={asString(ed.key)}>{asString(ed.key)}</option>)}
+          </select>
+          <input value={entDraft.value} onChange={(e) => setEntDraft({ ...entDraft, value: e.target.value })} placeholder="Value" required />
+          <button type="submit">Update entitlement</button>
+        </form>
+      </Card>
+
       <Card title="Regional price books">
         <DataTable columns={["id", "productId", "pricingRegion", "mode", "baseCurrency", "baseAmountMinor", "fxRateScaled"]} rows={plans.priceBooks} />
         <form className="admin-inline-form" onSubmit={(event) => {
@@ -435,6 +482,16 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
           <button type="submit">Save price book</button>
         </form>
       </Card>
+
+      <div className="grid grid-2">
+        <Card title="Price Versions & Effective Dates">
+          <DataTable columns={["priceBookId", "version", "amountMinor", "currency", "effectiveFrom"]} rows={plans.priceVersions} />
+        </Card>
+        <Card title="Pricing Regions">
+          <DataTable columns={["code", "name", "defaultCurrency"]} rows={plans.pricingRegions} />
+        </Card>
+      </div>
+
       <div className="grid grid-2">
         <Card title="Currencies">
           <form className="admin-inline-form" onSubmit={(event) => {
@@ -450,6 +507,22 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
         </Card>
         <Card title="Add-ons">
           <DataTable columns={["code", "displayName", "consumable", "unit"]} rows={plans.addons} />
+          <form className="admin-inline-form" onSubmit={(e) => {
+            e.preventDefault();
+            if (!addonDraft.code || !addonDraft.displayName) return;
+            void api.adminSaveAddon(addonDraft).then(() => {
+              setAddonDraft({ code: "", displayName: "", consumable: false, unit: "unit" });
+              return onRefresh();
+            });
+          }}>
+            <input value={addonDraft.code} onChange={(e) => setAddonDraft({ ...addonDraft, code: e.target.value })} placeholder="Code" required />
+            <input value={addonDraft.displayName} onChange={(e) => setAddonDraft({ ...addonDraft, displayName: e.target.value })} placeholder="Display Name" required />
+            <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <input type="checkbox" checked={addonDraft.consumable} onChange={(e) => setAddonDraft({ ...addonDraft, consumable: e.target.checked })} /> Consumable
+            </label>
+            <input value={addonDraft.unit} onChange={(e) => setAddonDraft({ ...addonDraft, unit: e.target.value })} placeholder="Unit" />
+            <button type="submit">Save add-on</button>
+          </form>
         </Card>
       </div>
     </>
@@ -556,7 +629,46 @@ function ComputePanel({ compute, onRefresh }: { compute?: AdminCompute; onRefres
         </Card>
       </div>
       <Card title="Orders and lifecycle">
-        <DataTable columns={["id", "orgId", "hostname", "providerName", "regionCode", "providerSku", "state", "lastError"]} rows={compute.orders} />
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Org</th>
+                <th>Hostname</th>
+                <th>Provider</th>
+                <th>Region</th>
+                <th>SKU</th>
+                <th>State</th>
+                <th>Error</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {compute.orders.length === 0 ? (
+                <tr><td colSpan={9} style={{ textAlign: "center", padding: "16px" }}>No compute orders.</td></tr>
+              ) : (
+                compute.orders.map((order) => (
+                  <tr key={asString(order.id)}>
+                    <td><code>{asString(order.id).slice(0, 8)}</code></td>
+                    <td><code>{asString(order.orgId).slice(0, 8)}</code></td>
+                    <td>{asString(order.hostname)}</td>
+                    <td>{asString(order.providerName)}</td>
+                    <td>{asString(order.regionCode)}</td>
+                    <td>{asString(order.providerSku)}</td>
+                    <td><Badge tone={toneFor(asString(order.state))}>{asString(order.state)}</Badge></td>
+                    <td>{asString(order.lastError)}</td>
+                    <td className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
+                      <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "restart").then(onRefresh)}>Restart</button>
+                      <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "redeploy").then(onRefresh)}>Redeploy</button>
+                      <button type="button" className="danger" onClick={() => void api.adminComputeOrderAction(asString(order.id), "cancel").then(onRefresh)}>Cancel</button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </Card>
       <Card title="Mox Node health">
         <DataTable columns={["nodeId", "orgId", "orderId", "version", "status", "lastHeartbeatAt"]} rows={compute.nodes} />
@@ -661,17 +773,22 @@ function RuntimePanel({ runtime, onRefresh }: { runtime: AdminRuntimeAgent[]; on
 function NotificationsPanel({ jobs, onRefresh }: { jobs?: AdminNotificationJobs; onRefresh: () => Promise<void> }) {
   const { api } = useMox();
   const [form, setForm] = useState({ audienceType: "all", audienceValue: "", title: "", body: "", severity: "info", category: "system", scheduledAt: "" });
+  const [preview, setPreview] = useState<{ title: string; body: string } | null>(null);
+  const [inspectJob, setInspectJob] = useState<AdminNotificationJobDetails | null>(null);
+
   const payload = () => ({
     idempotencyKey: `admin-${Date.now()}`,
     audience: form.audienceType === "all" ? { type: "all" } : form.audienceType === "org" ? { type: "org", orgId: form.audienceValue } : form.audienceType === "plan" ? { type: "plan", planTier: form.audienceValue } : { type: "region", regionCode: form.audienceValue },
     payload: { title: form.title, body: form.body, severity: form.severity, category: form.category },
     scheduledAt: form.scheduledAt || undefined,
   });
+
   const submit = (event: FormEvent, mode: "send" | "schedule") => {
     event.preventDefault();
     const action = mode === "send" ? api.adminSendNotification(payload()) : api.adminScheduleNotification(payload());
     void action.then(onRefresh);
   };
+
   return (
     <>
       <Card title="Compose notification">
@@ -692,27 +809,319 @@ function NotificationsPanel({ jobs, onRefresh }: { jobs?: AdminNotificationJobs;
           </select>
           <input value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })} placeholder="Category" />
           <input type="datetime-local" value={form.scheduledAt} onChange={(event) => setForm({ ...form, scheduledAt: event.target.value })} />
-          <button type="submit">{form.scheduledAt ? "Schedule" : "Send now"}</button>
+          <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+            <button type="submit">{form.scheduledAt ? "Schedule" : "Send now"}</button>
+            <button type="button" onClick={async () => {
+              if (!form.title || !form.body) return;
+              const res = await api.adminPreviewNotification({ title: form.title, body: form.body });
+              setPreview({ title: asString(res.title ?? form.title), body: asString(res.body ?? form.body) });
+            }}>Preview before send</button>
+          </div>
+          {preview && (
+            <div style={{ marginTop: "12px", padding: "12px", background: "rgba(255,255,255,0.05)", borderRadius: "6px", border: "1px solid var(--color-border)" }}>
+              <strong>Preview Output:</strong>
+              <div style={{ fontWeight: "bold", marginTop: "4px" }}>{preview.title}</div>
+              <div style={{ marginTop: "4px" }}>{preview.body}</div>
+            </div>
+          )}
         </form>
       </Card>
+
+      {inspectJob && (
+        <Card title={`Job Details: ${inspectJob.id}`} actions={<button type="button" onClick={() => setInspectJob(null)}>Close</button>}>
+          <div style={{ display: "grid", gap: "8px" }}>
+            <div><strong>Status:</strong> <Badge tone={toneFor(inspectJob.status)}>{inspectJob.status}</Badge></div>
+            <div><strong>Audience:</strong> {inspectJob.audienceType} {inspectJob.audienceValue ? `(${inspectJob.audienceValue})` : ""}</div>
+            <div><strong>Fanout:</strong> {inspectJob.fanoutDone} / {inspectJob.fanoutTotal}</div>
+            {inspectJob.lastError && <div style={{ color: "var(--color-bad)" }}><strong>Error:</strong> {inspectJob.lastError}</div>}
+            <div><strong>Created At:</strong> {inspectJob.createdAt}</div>
+            {inspectJob.scheduledAt && <div><strong>Scheduled At:</strong> {inspectJob.scheduledAt}</div>}
+          </div>
+        </Card>
+      )}
+
       <Card title="Notification jobs" actions={jobs ? <Badge tone="accent">{jobs.stats.scheduled} scheduled</Badge> : null}>
-        <DataTable columns={["id", "audienceType", "title", "status", "fanoutDone", "fanoutTotal", "scheduledAt"]} rows={jobs?.jobs ?? []} />
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Audience</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Fanout</th>
+                <th>Scheduled At</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(jobs?.jobs ?? []).length === 0 ? (
+                <tr><td colSpan={7} style={{ textAlign: "center", padding: "16px" }}>No notification jobs.</td></tr>
+              ) : (
+                (jobs?.jobs ?? []).map((job) => (
+                  <tr key={asString(job.id)}>
+                    <td><code>{asString(job.id).slice(0, 8)}</code></td>
+                    <td>{asString(job.audienceType)}</td>
+                    <td>{asString(job.title)}</td>
+                    <td><Badge tone={toneFor(asString(job.status))}>{asString(job.status)}</Badge></td>
+                    <td>{asString(job.fanoutDone)} / {asString(job.fanoutTotal)}</td>
+                    <td>{asString(job.scheduledAt) || "Immediate"}</td>
+                    <td className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
+                      <button type="button" onClick={async () => {
+                        const details = await api.adminGetNotificationJob(asString(job.id));
+                        setInspectJob(details);
+                      }}>Inspect</button>
+                      {job.status === "scheduled" && (
+                        <button type="button" className="danger" onClick={() => void api.adminCancelNotificationJob(asString(job.id)).then(onRefresh)}>Cancel</button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </Card>
     </>
   );
 }
 
-function OperationsPanel({ operations }: { operations?: AdminOperations }) {
+function OperationsPanel({ operations, onRefresh }: { operations?: AdminOperations; onRefresh: () => Promise<void> }) {
+  const { api } = useMox();
+  const [flagDraft, setFlagDraft] = useState({ key: "", orgId: "", enabled: "true", rollout: "" });
+  const [backupOrg, setBackupOrg] = useState("");
+  const [restoreStatus, setRestoreStatus] = useState<string | null>(null);
+
   if (!operations) return <EmptyState>Loading operations.</EmptyState>;
   return (
-    <div className="grid grid-2">
-      <Card title="Jobs and queues"><DataTable columns={["id", "kind", "state", "attempts", "lastError"]} rows={[...operations.queues, ...operations.jobs]} /></Card>
-      <Card title="Incidents"><DataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={operations.incidents} /></Card>
-      <Card title="Backups"><DataTable columns={["id", "orgId", "kind", "location", "completedAt"]} rows={operations.backups} /></Card>
-      <Card title="Abuse"><DataTable columns={["id", "orgId", "category", "severity", "status"]} rows={operations.abuse} /></Card>
-      <Card title="Feature flags"><DataTable columns={["key", "orgId", "enabled", "rollout"]} rows={operations.featureFlags} /></Card>
-      <Card title="Audit"><DataTable columns={["at", "actorType", "actorId", "action", "resourceType", "resourceId", "result"]} rows={operations.audit} /></Card>
-      <Card title="Cost and margin ledger"><DataTable columns={["entryId", "kind", "category", "amountMinor", "currency", "providerName", "at"]} rows={operations.costLedger} /></Card>
-    </div>
+    <>
+      <div className="grid grid-2">
+        <Card title="Feature flags management">
+          <form className="admin-inline-form" onSubmit={(e) => {
+            e.preventDefault();
+            if (!flagDraft.key || !flagDraft.orgId) return;
+            let rollout: Record<string, unknown> | undefined;
+            try { if (flagDraft.rollout) rollout = JSON.parse(flagDraft.rollout); } catch {}
+            void api.adminSaveFeatureFlag({ ...flagDraft, rollout }).then(() => {
+              setFlagDraft({ key: "", orgId: "", enabled: "true", rollout: "" });
+              return onRefresh();
+            });
+          }}>
+            <input value={flagDraft.key} onChange={(e) => setFlagDraft({ ...flagDraft, key: e.target.value })} placeholder="Flag key" required />
+            <input value={flagDraft.orgId} onChange={(e) => setFlagDraft({ ...flagDraft, orgId: e.target.value })} placeholder="Target Org ID" required />
+            <select value={flagDraft.enabled} onChange={(e) => setFlagDraft({ ...flagDraft, enabled: e.target.value })}>
+              <option value="true">Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+            <input value={flagDraft.rollout} onChange={(e) => setFlagDraft({ ...flagDraft, rollout: e.target.value })} placeholder='Rollout JSON' />
+            <button type="submit">Save flag</button>
+          </form>
+          <div className="admin-table-wrap" style={{ marginTop: "12px" }}>
+            <table className="admin-table">
+              <thead><tr><th>Key</th><th>Org</th><th>Enabled</th><th>Actions</th></tr></thead>
+              <tbody>
+                {operations.featureFlags.length === 0 ? <tr><td colSpan={4} style={{ textAlign: "center", padding: "12px" }}>No flags set.</td></tr> : operations.featureFlags.map((flag) => (
+                  <tr key={asString(flag.key)}>
+                    <td><code>{asString(flag.key)}</code></td>
+                    <td>{asString(flag.orgId).slice(0, 8)}</td>
+                    <td><Badge tone={asString(flag.enabled) === "true" ? "good" : "bad"}>{asString(flag.enabled)}</Badge></td>
+                    <td>
+                      <button type="button" className="danger" onClick={() => void api.adminDeleteFeatureFlag(asString(flag.key)).then(onRefresh)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+
+        <Card title="Backups operations" actions={restoreStatus ? <Badge tone="good">{restoreStatus}</Badge> : null}>
+          <form className="admin-inline-form" onSubmit={(e) => {
+            e.preventDefault();
+            if (!backupOrg) return;
+            void api.adminRunBackup({ orgId: backupOrg }).then(() => {
+              setBackupOrg("");
+              return onRefresh();
+            });
+          }}>
+            <input value={backupOrg} onChange={(e) => setBackupOrg(e.target.value)} placeholder="Target Org ID" required />
+            <button type="submit">Trigger tenant backup</button>
+          </form>
+          <div className="admin-table-wrap" style={{ marginTop: "12px" }}>
+            <table className="admin-table">
+              <thead><tr><th>ID</th><th>Org</th><th>Location</th><th>Actions</th></tr></thead>
+              <tbody>
+                {operations.backups.length === 0 ? <tr><td colSpan={4} style={{ textAlign: "center", padding: "12px" }}>No backups.</td></tr> : operations.backups.map((bkp) => (
+                  <tr key={asString(bkp.id)}>
+                    <td><code>{asString(bkp.id).slice(0, 8)}</code></td>
+                    <td>{asString(bkp.orgId).slice(0, 8)}</td>
+                    <td>{asString(bkp.location)}</td>
+                    <td>
+                      <button type="button" onClick={() => void api.adminRestoreTest(asString(bkp.id)).then(() => setRestoreStatus(`Verified ${asString(bkp.id).slice(0, 8)}`))}>Test Restore</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </div>
+
+      <div className="grid grid-2">
+        <Card title="Jobs and queues"><DataTable columns={["id", "kind", "state", "attempts", "lastError"]} rows={[...operations.queues, ...operations.jobs]} /></Card>
+        <Card title="Incidents"><DataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={operations.incidents} /></Card>
+        <Card title="Abuse"><DataTable columns={["id", "orgId", "category", "severity", "status"]} rows={operations.abuse} /></Card>
+        <Card title="Cost and margin ledger"><DataTable columns={["entryId", "kind", "category", "amountMinor", "currency", "providerName", "at"]} rows={operations.costLedger} /></Card>
+      </div>
+
+      <Card title="Audit Log">
+        <DataTable columns={["at", "actorType", "actorId", "action", "resourceType", "resourceId", "result"]} rows={operations.audit} />
+      </Card>
+    </>
+  );
+}
+
+function ContractsPanel({ contracts, onRefresh }: { contracts: AdminEnterpriseContract[]; onRefresh: () => Promise<void> }) {
+  const { api } = useMox();
+  const [draft, setDraft] = useState({
+    orgId: "",
+    contractRef: "",
+    active: true,
+    effectiveFrom: new Date().toISOString().slice(0, 10),
+    effectiveUntil: "",
+    customPriceMinor: "",
+    currency: "USD",
+    values: "{}",
+    metadata: {
+      includedNodes: 1,
+      dedicatedDatabase: false,
+      dedicatedRuntime: false,
+      ssoSamlReady: false,
+      whiteLabel: false,
+    },
+  });
+
+  return (
+    <>
+      <Card title={`Enterprise Contracts (${contracts.length})`}>
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Contract Ref</th>
+                <th>Org</th>
+                <th>Status</th>
+                <th>Effective From</th>
+                <th>Effective Until</th>
+                <th>Created At</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {contracts.length === 0 ? (
+                <tr><td colSpan={7} style={{ textAlign: "center", padding: "16px" }}>No enterprise contracts found.</td></tr>
+              ) : (
+                contracts.map((c) => (
+                  <tr key={c.id}>
+                    <td><code>{c.contractRef}</code></td>
+                    <td>{c.orgName ?? c.orgId}</td>
+                    <td><Badge tone={c.active ? "good" : "bad"}>{c.active ? "Active" : "Inactive"}</Badge></td>
+                    <td>{c.effectiveFrom}</td>
+                    <td>{c.effectiveUntil ?? "Perpetual"}</td>
+                    <td>{c.createdAt}</td>
+                    <td>
+                      {c.active ? (
+                        <button type="button" className="danger" onClick={() => void api.adminDeactivateEnterpriseContract(c.contractRef).then(onRefresh)}>Deactivate</button>
+                      ) : (
+                        <span style={{ color: "var(--color-muted)" }}>Deactivated</span>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title="Author Enterprise Contract">
+        <form className="admin-form" onSubmit={(e) => {
+          e.preventDefault();
+          if (!draft.orgId || !draft.contractRef) return;
+          let parsedValues: Record<string, unknown> = {};
+          try {
+            parsedValues = JSON.parse(draft.values || "{}");
+          } catch {}
+
+          void api.adminSaveEnterpriseContract({
+            orgId: draft.orgId,
+            contractRef: draft.contractRef,
+            active: draft.active,
+            effectiveFrom: draft.effectiveFrom ? new Date(draft.effectiveFrom).toISOString() : new Date().toISOString(),
+            effectiveUntil: draft.effectiveUntil ? new Date(draft.effectiveUntil).toISOString() : null,
+            values: parsedValues,
+            metadata: draft.metadata,
+          }).then(() => {
+            setDraft({
+              orgId: "",
+              contractRef: "",
+              active: true,
+              effectiveFrom: new Date().toISOString().slice(0, 10),
+              effectiveUntil: "",
+              customPriceMinor: "",
+              currency: "USD",
+              values: "{}",
+              metadata: {
+                includedNodes: 1,
+                dedicatedDatabase: false,
+                dedicatedRuntime: false,
+                ssoSamlReady: false,
+                whiteLabel: false,
+              },
+            });
+            return onRefresh();
+          });
+        }}>
+          <div className="grid grid-2">
+            <input value={draft.orgId} onChange={(e) => setDraft({ ...draft, orgId: e.target.value })} placeholder="Organization ID" required />
+            <input value={draft.contractRef} onChange={(e) => setDraft({ ...draft, contractRef: e.target.value })} placeholder="Contract Ref (e.g. ACME-2026)" required />
+            <div>
+              <label style={{ display: "block", fontSize: "12px", marginBottom: "4px" }}>Effective From</label>
+              <input type="date" value={draft.effectiveFrom} onChange={(e) => setDraft({ ...draft, effectiveFrom: e.target.value })} required />
+            </div>
+            <div>
+              <label style={{ display: "block", fontSize: "12px", marginBottom: "4px" }}>Effective Until (optional)</label>
+              <input type="date" value={draft.effectiveUntil} onChange={(e) => setDraft({ ...draft, effectiveUntil: e.target.value })} />
+            </div>
+          </div>
+
+          <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px", margin: "8px 0" }}>
+            <input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} /> Active
+          </label>
+
+          <div style={{ margin: "12px 0" }}>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px" }}>Custom Entitlement Values (JSON):</label>
+            <textarea value={draft.values} onChange={(e) => setDraft({ ...draft, values: e.target.value })} placeholder='{ "agents_limit": 100, "custom_integrations": true }' style={{ width: "100%", height: "80px" }} />
+          </div>
+
+          <div style={{ margin: "12px 0", display: "flex", gap: "16px", flexWrap: "wrap" }}>
+            <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <input type="checkbox" checked={draft.metadata.dedicatedDatabase} onChange={(e) => setDraft({ ...draft, metadata: { ...draft.metadata, dedicatedDatabase: e.target.checked } })} /> Dedicated DB
+            </label>
+            <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <input type="checkbox" checked={draft.metadata.dedicatedRuntime} onChange={(e) => setDraft({ ...draft, metadata: { ...draft.metadata, dedicatedRuntime: e.target.checked } })} /> Dedicated Runtime
+            </label>
+            <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <input type="checkbox" checked={draft.metadata.ssoSamlReady} onChange={(e) => setDraft({ ...draft, metadata: { ...draft.metadata, ssoSamlReady: e.target.checked } })} /> SSO SAML Ready
+            </label>
+            <label className="admin-check" style={{ display: "inline-flex", alignItems: "center", gap: "6px" }}>
+              <input type="checkbox" checked={draft.metadata.whiteLabel} onChange={(e) => setDraft({ ...draft, metadata: { ...draft.metadata, whiteLabel: e.target.checked } })} /> White-label
+            </label>
+          </div>
+
+          <button type="submit">Save Enterprise Contract</button>
+        </form>
+      </Card>
+    </>
   );
 }

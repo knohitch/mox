@@ -393,6 +393,60 @@ export interface AdminNotificationJobs {
   stats: { scheduled: number; completed: number; failed: number };
 }
 
+export interface AdminNotificationJobDetails {
+  id: string;
+  audienceType: string;
+  audienceValue?: string;
+  title: string;
+  body: string;
+  severity: string;
+  category: string;
+  status: string;
+  scheduledAt?: string | null;
+  fanoutDone: number;
+  fanoutTotal: number;
+  createdAt: string;
+  lastError?: string | null;
+}
+
+export interface AdminEnterpriseContract {
+  id: string;
+  orgId: string;
+  orgName?: string;
+  contractRef: string;
+  values: Record<string, unknown>;
+  active: boolean;
+  effectiveFrom: string;
+  effectiveUntil?: string | null;
+  createdAt: string;
+  customPriceMinor?: string | number;
+  currency?: string;
+  metadata?: {
+    includedNodes?: number;
+    customComputeClassCodes?: string[];
+    privateModelSlugs?: string[];
+    dedicatedDatabase?: boolean;
+    dedicatedRuntime?: boolean;
+    customRetentionDays?: number;
+    customDomains?: string[];
+    auditExportEnabled?: boolean;
+    ssoSamlReady?: boolean;
+    ssoMetadataUrl?: string;
+    privateNetworkingHooks?: string[];
+    slaMonthlyUptimePct?: number;
+    slaSupportResponseHours?: number;
+    whiteLabel?: boolean;
+  };
+}
+
+export interface AdminFeatureFlag {
+  key: string;
+  orgId: string;
+  enabled: string;
+  rollout?: Record<string, unknown>;
+  updatedAt?: string;
+}
+
 // ---- Prompt 03: Staff & Access + Support console ---------------------------
 
 export interface StaffMember {
@@ -753,6 +807,22 @@ export interface MoxApi {
   adminSendNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
   adminScheduleNotification(input: Record<string, unknown>): Promise<Record<string, unknown>>;
   adminCancelNotificationJob(jobId: string): Promise<void>;
+  adminGetNotificationJob(jobId: string): Promise<AdminNotificationJobDetails>;
+
+  // Enterprise Contracts (Phase 05 §H)
+  adminListEnterpriseContracts(): Promise<AdminEnterpriseContract[]>;
+  adminSaveEnterpriseContract(input: Partial<AdminEnterpriseContract>): Promise<{ ok: boolean }>;
+  adminDeactivateEnterpriseContract(contractRef: string): Promise<{ ok: boolean }>;
+
+  // Feature Flags & Operations (Phase 05 §G)
+  adminSaveFeatureFlag(flag: { key: string; orgId: string; enabled: string; rollout?: Record<string, unknown> }): Promise<{ ok: boolean }>;
+  adminDeleteFeatureFlag(key: string): Promise<{ ok: boolean }>;
+  adminRunBackup(input: { orgId: string; serverOrderId?: string; label?: string }): Promise<Record<string, unknown>>;
+  adminRestoreTest(backupId: string): Promise<Record<string, unknown>>;
+
+  // Plan Entitlements & Addons (Phase 05 §C)
+  adminSavePlanEntitlement(planVersionId: string, key: string, value: boolean | number | string): Promise<{ ok: boolean }>;
+  adminSaveAddon(addon: { code: string; displayName: string; consumable: boolean; unit?: string }): Promise<{ ok: boolean }>;
 
   // Prompt 03: Staff & Access (admin.staff.write — superadmin only)
   adminStaff(): Promise<AdminStaff>;

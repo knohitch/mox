@@ -17,6 +17,7 @@ export type AdminTabKey =
   | "runtime"
   | "notifications"
   | "operations"
+  | "contracts"
   | "staff";
 
 /** One capability per admin tab. Staff & Access is reserved for `admin.staff.write`. */
@@ -30,6 +31,7 @@ export const ADMIN_TAB_CAPABILITY: Record<AdminTabKey, string> = {
   runtime: "admin.operations.write",
   notifications: "admin.notifications.write",
   operations: "admin.read",
+  contracts: "admin.billing.write",
   staff: "admin.staff.write",
 };
 
@@ -43,6 +45,7 @@ export const ADMIN_TAB_LABEL: Record<AdminTabKey, string> = {
   runtime: "Runtime",
   notifications: "Notifications",
   operations: "Operations",
+  contracts: "Contracts",
   staff: "Staff & Access",
 };
 

@@ -50,4 +50,17 @@ describe("staff-surface capability gating (Prompt 03)", () => {
   it("a support agent sees no admin tabs at all", () => {
     expect(visibleAdminTabs(SUPPORT_AGENT)).toEqual([]);
   });
+
+  it("a billing_admin sees commercial tabs including contracts but not staff", () => {
+    const BILLING_ADMIN = ["admin.read", "admin.billing.write", "admin.notifications.write"];
+    expect(visibleAdminTabs(BILLING_ADMIN)).toEqual([
+      "dashboard",
+      "customers",
+      "plans",
+      "payments",
+      "notifications",
+      "operations",
+      "contracts",
+    ]);
+  });
 });

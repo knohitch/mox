@@ -526,6 +526,16 @@ export class DemoMoxApi implements MoxApi {
   async adminSendNotification() { return this.adminUnavailable(); }
   async adminScheduleNotification() { return this.adminUnavailable(); }
   async adminCancelNotificationJob() { return this.adminUnavailable(); }
+  async adminGetNotificationJob(): Promise<never> { return this.adminUnavailable(); }
+  async adminListEnterpriseContracts(): Promise<never> { return this.adminUnavailable(); }
+  async adminSaveEnterpriseContract(): Promise<never> { return this.adminUnavailable(); }
+  async adminDeactivateEnterpriseContract(): Promise<never> { return this.adminUnavailable(); }
+  async adminSaveFeatureFlag(): Promise<never> { return this.adminUnavailable(); }
+  async adminDeleteFeatureFlag(): Promise<never> { return this.adminUnavailable(); }
+  async adminRunBackup(): Promise<never> { return this.adminUnavailable(); }
+  async adminRestoreTest(): Promise<never> { return this.adminUnavailable(); }
+  async adminSavePlanEntitlement(): Promise<never> { return this.adminUnavailable(); }
+  async adminSaveAddon(): Promise<never> { return this.adminUnavailable(); }
   async adminStaff() { return this.adminUnavailable(); }
   async adminCreateStaffInvite() { return this.adminUnavailable(); }
   async adminRevokeStaffInvite() { return this.adminUnavailable(); }

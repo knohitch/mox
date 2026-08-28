@@ -31,7 +31,9 @@ import type {
   AgentSummary,
   AdminCompute,
   AdminCustomer,
+  AdminEnterpriseContract,
   AdminIntelligence,
+  AdminNotificationJobDetails,
   AdminNotificationJobs,
   AdminOperations,
   AdminOverview,
@@ -953,6 +955,69 @@ export class HttpMoxApi implements MoxApi {
       method: "POST",
       body: "{}",
     }).then(() => undefined);
+  }
+
+  adminGetNotificationJob(jobId: string): Promise<AdminNotificationJobDetails> {
+    return this.call<AdminNotificationJobDetails>(`/api/admin/notifications/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  adminListEnterpriseContracts(): Promise<AdminEnterpriseContract[]> {
+    return this.call<AdminEnterpriseContract[]>("/api/admin/enterprise-contracts");
+  }
+
+  adminSaveEnterpriseContract(input: Partial<AdminEnterpriseContract>): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>("/api/admin/enterprise-contracts", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  adminDeactivateEnterpriseContract(contractRef: string): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>(`/api/admin/enterprise-contracts/${encodeURIComponent(contractRef)}/deactivate`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  adminSaveFeatureFlag(flag: { key: string; orgId: string; enabled: string; rollout?: Record<string, unknown> }): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>("/api/admin/operations/feature-flags", {
+      method: "POST",
+      body: JSON.stringify(flag),
+    });
+  }
+
+  adminDeleteFeatureFlag(key: string): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>(`/api/admin/operations/feature-flags/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    });
+  }
+
+  adminRunBackup(input: { orgId: string; serverOrderId?: string; label?: string }): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>("/api/admin/operations/backups/run", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  adminRestoreTest(backupId: string): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>(`/api/admin/operations/backups/${encodeURIComponent(backupId)}/restore-test`, {
+      method: "POST",
+      body: "{}",
+    });
+  }
+
+  adminSavePlanEntitlement(planVersionId: string, key: string, value: boolean | number | string): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>(`/api/admin/plans/entitlements/${encodeURIComponent(planVersionId)}/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    });
+  }
+
+  adminSaveAddon(addon: { code: string; displayName: string; consumable: boolean; unit?: string }): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>("/api/admin/plans/addons", {
+      method: "POST",
+      body: JSON.stringify(addon),
+    });
   }
 
   // ---- Prompt 03: Staff & Access + Support console ------------------------------
