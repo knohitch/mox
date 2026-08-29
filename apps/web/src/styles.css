@@ -1621,40 +1621,21 @@ small {
 .ui-studio-stage {
   flex: 1;
   display: flex;
-  justify-content: center;
-  align-items: stretch;
-  background: #000000;
-}
-
-.ui-studio-stage.fluid-stage {
-  padding: 0 !important;
   width: 100%;
-}
-
-.ui-studio-stage:not(.fluid-stage) {
-  padding: 24px;
+  padding: 0 !important;
+  background: #000000;
+  overflow-x: hidden;
 }
 
 .ui-studio-viewport {
-  background: #000000;
-  overflow: hidden;
-  transition: width 0.25s ease, max-width 0.25s ease;
-  min-height: 100vh;
-}
-
-.ui-studio-viewport.fluid-viewport {
   width: 100% !important;
   max-width: 100% !important;
+  background: #000000;
+  overflow: hidden;
+  min-height: 100vh;
   border: none !important;
   border-radius: 0 !important;
   box-shadow: none !important;
-}
-
-.ui-studio-viewport.framed {
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.8);
-  margin: 0 auto;
 }
 
 /* Dev Mode Quick Access on Auth Page */

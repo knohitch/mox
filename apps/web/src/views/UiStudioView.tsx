@@ -21,8 +21,6 @@ import {
   UsageView,
 } from "./MiscViews.js";
 
-type ViewportPreset = "1440px" | "1280px" | "768px" | "390px" | "100%";
-
 const CUSTOMER_PAGES = [
   { id: "/dashboard", label: "Dashboard", component: () => <HomeView /> },
   { id: "/agents", label: "Agents", component: () => <AgentsView /> },
@@ -50,7 +48,6 @@ export function UiStudioView() {
   const [surface, setSurface] = useState<UiStudioSurface>(getInitialSurface);
   const [customerPage, setCustomerPage] = useState<string>("/dashboard");
   const [state, setState] = useState<UiStudioState>("populated");
-  const [viewport, setViewport] = useState<ViewportPreset>("100%");
 
   const handleSurfaceChange = (s: UiStudioSurface) => {
     setSurface(s);
@@ -165,34 +162,13 @@ export function UiStudioView() {
             </div>
           </div>
 
-          {/* Viewport size selection */}
-          <div className="ui-studio-group" role="group" aria-label="Viewport">
-            <span className="ui-studio-group-label">Viewport</span>
-            <div className="ui-studio-segmented">
-              {(["1440px", "1280px", "768px", "390px", "100%"] as const).map((vp) => (
-                <button
-                  key={vp}
-                  type="button"
-                  className={viewport === vp ? "active" : ""}
-                  onClick={() => setViewport(vp)}
-                >
-                  {vp === "100%" ? "Fluid" : vp}
-                </button>
-              ))}
-            </div>
           </div>
         </div>
       </header>
 
-      {/* Preview Viewport Container */}
-      <div className={`ui-studio-stage${viewport === "100%" ? " fluid-stage" : ""}`}>
-        <div
-          className={`ui-studio-viewport${viewport === "100%" ? " fluid-viewport" : " framed"}`}
-          style={{
-            width: viewport,
-            maxWidth: viewport === "100%" ? "100%" : viewport,
-          }}
-        >
+      {/* Absolute Fluid Screen */}
+      <div className="ui-studio-stage fluid-stage">
+        <div className="ui-studio-viewport fluid-viewport">
           <MoxPreviewProvider value={mockStore}>
             {renderSurfaceContent()}
           </MoxPreviewProvider>
