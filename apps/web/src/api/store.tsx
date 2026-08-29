@@ -28,7 +28,7 @@ import type { CanonicalEntitlementKey } from "./entitlement.js";
  * fallback path.
  */
 
-interface MoxStore {
+export interface MoxStore {
   api: MoxApi;
   ready: boolean;
   /** Honest failure surface: configuration or backend unavailability. */
@@ -613,6 +613,10 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     invalidateEvents: () => setEventsVersion((v) => v + 1),
   };
 
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+export function MoxPreviewProvider({ value, children }: { value: MoxStore; children: ReactNode }) {
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

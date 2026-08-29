@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@700&display=swap');
+
 :root {
   /* Surfaces — sophisticated dark neutral base */
   --bg: #0e1116;
@@ -364,72 +366,447 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   font-size: 13px;
 }
 
-.auth-gate {
-  max-width: 360px;
-  margin: 8vh auto;
+/* ── Auth Pages: Modern AI Framework Style (Mastra Inspiration) ─────── */
+.mastra-auth-shell {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  background-color: #000000;
+  color: #ffffff;
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  box-sizing: border-box;
+}
+
+/* Master Card enclosing both Auth Forms and Showcase Image with Glowing White Border */
+.mastra-auth-card {
+  display: flex;
+  width: 100%;
+  max-width: 1440px;
+  min-height: 720px;
+  height: calc(100vh - 56px);
+  max-height: 900px;
+  background: #000000;
+  border-radius: 32px;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.25),
+    0 0 32px rgba(255, 255, 255, 0.45),
+    0 0 64px rgba(255, 255, 255, 0.18),
+    0 30px 90px rgba(0, 0, 0, 0.95);
+  overflow: hidden;
+  position: relative;
+}
+
+/* Left Form Column */
+.mastra-form-col {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 44px;
+  background: #000000;
+  overflow-y: auto;
+}
+
+.mastra-form-wrapper {
+  width: 100%;
+  max-width: 390px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  align-items: stretch;
 }
-.auth-gate h1 { font-size: 20px; }
-.auth-gate label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
-.auth-gate input {
-  background: var(--bg-raise);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  color: var(--text);
-  padding: 8px 10px;
-  font-size: 14px;
-}
-.auth-gate button {
-  background: var(--accent);
-  border: none;
-  border-radius: 6px;
-  color: #fff;
-  padding: 9px 12px;
-  font-size: 14px;
-  cursor: pointer;
-}
-.auth-gate button.linklike { background: transparent; color: var(--text-dim); }
-.signout { text-align: left; background: transparent; border: none; cursor: pointer; }
 
-/* Standalone (no-shell) surface auth pages (Prompt 01) */
-.auth-shell {
-  min-height: 100vh;
+/* Brand header */
+.mastra-brand-block {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 24px;
+  text-align: center;
+  margin-bottom: 32px;
 }
-.auth-brand {
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  margin-bottom: 12px;
+
+.mox-logo-wrapper {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 16px;
 }
-.auth-brand span { color: var(--accent); }
-.auth-brand small { font-size: 12px; color: var(--text-dim); font-weight: 600; }
-.auth-shell .auth-gate { margin: 0; width: 100%; }
-.auth-links {
+
+.mox-brand-logo {
+  width: 175px;
+  height: auto;
+  color: #ffffff;
+  display: block;
+  filter: drop-shadow(0 2px 14px rgba(255, 255, 255, 0.16));
+  transition: transform 0.2s ease, filter 0.2s ease;
+}
+
+.mox-brand-logo:hover {
+  filter: drop-shadow(0 4px 22px rgba(255, 255, 255, 0.26));
+}
+
+.mastra-surface-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #a1a1aa;
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 4px;
+  padding: 2px 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mastra-tagline {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.55;
+  color: #ffffff;
+  margin: 0;
+  max-width: 350px;
+  letter-spacing: -0.01em;
+}
+
+/* Form Gate */
+.mastra-gate {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
+  gap: 16px;
+  width: 100%;
 }
-.auth-links .linklike {
+
+.mastra-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
   text-align: left;
+}
+
+.mastra-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mastra-label-text {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e4e4e7;
+  letter-spacing: -0.01em;
+}
+
+.mastra-hint {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 11.5px;
+  color: #a1a1aa;
+  font-weight: 500;
+}
+
+.mastra-input-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background: #14151d;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 0 14px;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: border-box;
+  height: 46px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.mastra-input-box:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  background: #1a1b24;
+}
+
+.mastra-input-box:focus-within {
+  border-color: #ffffff;
+  background: #1c1d28;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.25),
+    0 0 20px rgba(255, 255, 255, 0.15);
+}
+
+.mastra-input-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  margin-right: 12px;
+  flex-shrink: 0;
+  transition: color 0.2s ease;
+}
+
+.mastra-input-box:focus-within .mastra-input-icon {
+  color: #ffffff;
+}
+
+.mastra-input {
+  flex: 1;
   background: transparent;
   border: none;
-  color: var(--text-dim);
-  font-size: 13px;
-  cursor: pointer;
-  padding: 0;
+  outline: none;
+  padding: 10px 0;
+  color: #ffffff;
+  font-size: 14.5px;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-weight: 500;
+  width: 100%;
 }
-.auth-gate small.muted { color: var(--text-dim); }
+
+.mastra-input::placeholder {
+  color: #94a3b8;
+  font-weight: 400;
+}
+
+.mastra-pwd-toggle {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  border-radius: 6px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.mastra-pwd-toggle:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Primary CTA Button */
+.mastra-btn-primary {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  background: #ffffff;
+  color: #000000;
+  border: none;
+  border-radius: 10px;
+  height: 46px;
+  padding: 0 16px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 4px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mastra-btn-primary:hover:not(:disabled) {
+  background: #f4f4f5;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 22px rgba(255, 255, 255, 0.25);
+}
+
+.mastra-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.15);
+}
+
+.mastra-btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Divider */
+.mastra-auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 4px 0;
+  color: #ffffff;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 12px;
+}
+
+.mastra-auth-divider::before,
+.mastra-auth-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.mastra-auth-divider span {
+  padding: 0 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: #ffffff;
+}
+
+/* Google SSO Button */
+.mastra-btn-google {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: #14151d;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  color: #ffffff;
+  height: 46px;
+  padding: 0 16px;
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  width: 100%;
+}
+
+.mastra-btn-google:hover {
+  background: #1a1b24;
+  border-color: rgba(255, 255, 255, 0.38);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.mastra-btn-google:active {
+  transform: translateY(0);
+}
+
+/* Footer links */
+.mastra-footer-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  text-align: center;
+}
+
+.mastra-switch-text {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13.5px;
+  color: #ffffff;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.mastra-link-highlight {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  color: #22c55e;
+  font-weight: 600;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.mastra-link-highlight:hover {
+  color: #4ade80;
+  text-decoration: underline;
+}
+
+.mastra-link-muted {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 13px;
+  color: #ffffff;
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+.mastra-link-muted:hover {
+  color: #ffffff;
+  text-decoration: underline;
+  opacity: 0.8;
+}
+
+/* Alerts & Notifications */
+.mastra-notify {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  background: #18181b;
+  border: 1px solid #27272a;
+  color: #d4d4d8;
+}
+.mastra-notify.invite-warning {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #fde68a;
+}
+.mastra-notify.success {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #86efac;
+}
+
+.mastra-error-box {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+}
+
+/* Right Showcase Column */
+.mastra-showcase-col {
+  flex: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 20px 20px 0;
+  background: #000000;
+}
+
+.mastra-showcase-frame {
+  width: 100%;
+  height: 100%;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.6);
+  background: #000000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mastra-showcase-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 20px;
+}
+
+/* Responsive: Collapse showcase on tablet/mobile */
+@media (max-width: 960px) {
+  .mastra-auth-shell { padding: 16px; }
+  .mastra-auth-card { min-height: auto; height: auto; border-radius: 24px; max-width: 480px; }
+  .mastra-showcase-col { display: none; }
+  .mastra-form-col { padding: 36px 24px; }
+}
 .staff-identity {
   font-size: 12px;
   line-height: 1.4;
@@ -814,4 +1191,341 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .page-head { flex-direction: column; }
   .page-title { font-size: 21px; }
   .kpi-row { grid-template-columns: 1fr; }
+}
+
+/* ==========================================================================
+   Unified Dashboard Design System & Staff Shell Extensions
+   ========================================================================== */
+
+.topbar-staff {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--bg-surface, #12131a);
+  border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  gap: 16px;
+}
+
+.surface-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.surface-badge.surface-admin {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.surface-badge.surface-support {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.brand-surface-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.brand-surface-badge.brand-admin {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.brand-surface-badge.brand-support {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.staff-topbar-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.staff-topbar-info .staff-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim, #94a3b8);
+}
+
+/* Status Indicator Primitive */
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-indicator-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-ind-good .status-indicator-dot {
+  background: #22c55e;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+}
+
+.status-ind-warn .status-indicator-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.6);
+}
+
+.status-ind-bad .status-indicator-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+}
+
+.status-ind-accent .status-indicator-dot {
+  background: #8b5cf6;
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.6);
+}
+
+.status-ind-neutral .status-indicator-dot {
+  background: #71717a;
+}
+
+.status-indicator.pulse .status-indicator-dot {
+  animation: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(1.2); }
+}
+
+/* Metric Card Primitive */
+.metric-card {
+  background: var(--bg-surface, #12131a);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.metric-card:hover {
+  background: var(--bg-surface-elevated, #181924);
+  border-color: var(--border-default, rgba(255, 255, 255, 0.16));
+}
+
+.metric-card .metric-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.metric-card .metric-label {
+  font-size: 12.5px;
+  color: #a1a1aa;
+  font-weight: 500;
+}
+
+.metric-card .metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: -0.02em;
+}
+
+.metric-card .metric-detail {
+  font-size: 12px;
+  color: #71717a;
+  margin-top: 2px;
+}
+
+/* Surface Tag */
+.surface-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.surface-tag-admin {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.surface-tag-support {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+/* ==========================================================================
+   UI Studio Styles
+   ========================================================================== */
+
+.ui-studio-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #07080b;
+  color: #f4f4f5;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.ui-studio-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: #0f1016;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  flex-wrap: wrap;
+  gap: 14px;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+.ui-studio-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14.5px;
+}
+
+.ui-studio-glyph {
+  color: #3b82f6;
+  font-size: 18px;
+}
+
+.ui-studio-pill {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.06em;
+}
+
+.ui-studio-pill.dev {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+}
+
+.ui-studio-pill.safe {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.ui-studio-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ui-studio-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-studio-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #71717a;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ui-studio-segmented {
+  display: inline-flex;
+  background: #171821;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.ui-studio-segmented button {
+  background: transparent;
+  border: none;
+  color: #a1a1aa;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ui-studio-segmented button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ui-studio-segmented button.active {
+  color: #ffffff;
+  background: #272836;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.ui-studio-select {
+  background: #171821;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.ui-studio-stage {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 24px;
+  overflow-x: auto;
+  background: #050608;
+}
+
+.ui-studio-viewport {
+  background: #090a0f;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7);
+  transition: width 0.25s ease, max-width 0.25s ease;
+  min-height: 800px;
 }

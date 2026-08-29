@@ -26,7 +26,7 @@ export interface NavGroup {
 export const CUSTOMER_NAV: readonly NavGroup[] = [
   {
     label: "Home",
-    entries: [{ to: "/", label: "Home", icon: "⌂" }],
+    entries: [{ to: "/dashboard", label: "Dashboard", icon: "⌂" }],
   },
   {
     label: "Build",
@@ -55,6 +55,7 @@ export const CUSTOMER_NAV: readonly NavGroup[] = [
     entries: [
       { to: "/usage", label: "Usage", icon: "∑" },
       { to: "/billing", label: "Billing", icon: "¢" },
+      { to: "/backups", label: "Backups", icon: "◫" },
       { to: "/settings", label: "Settings", icon: "⚙" },
     ],
   },
@@ -64,6 +65,12 @@ export const CUSTOMER_NAV: readonly NavGroup[] = [
 export const CUSTOMER_DESTINATIONS: readonly string[] = CUSTOMER_NAV.flatMap((g) =>
   g.entries.map((e) => e.to),
 );
+
+export const CUSTOMER_NAV_GROUPS = CUSTOMER_NAV;
+
+export function isCustomerDestination(path: string): boolean {
+  return (CUSTOMER_DESTINATIONS as readonly string[]).includes(path);
+}
 
 /**
  * Staff surface roots and public auth routes. These are intentionally NOT in

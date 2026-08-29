@@ -72,6 +72,9 @@ export const SUPPORT_SECTION_LABEL: Record<SupportSectionKey, string> = {
   escalation: "Escalation",
 };
 
+export const ADMIN_TABS: readonly AdminTabKey[] = Object.keys(ADMIN_TAB_CAPABILITY) as AdminTabKey[];
+export const SUPPORT_SECTIONS: readonly SupportSectionKey[] = Object.keys(SUPPORT_SECTION_CAPABILITY) as SupportSectionKey[];
+
 /** A capability list grants a capability when it contains it or the wildcard. */
 export function hasSurfaceCapability(capabilities: string[], capability: string): boolean {
   return capabilities.includes("*") || capabilities.includes(capability);

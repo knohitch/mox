@@ -1,0 +1,339 @@
+import type { MoxStore } from "../api/store.js";
+import type { MoxApi } from "../api/types.js";
+import {
+  createCustomerAgentsFixture,
+  createCustomerBackupsFixture,
+  createCustomerBillingFixture,
+  createCustomerChannelsFixture,
+  createCustomerDeploymentsFixture,
+  createCustomerIntegrationsFixture,
+  createCustomerModelsFixture,
+  createCustomerNotificationsFixture,
+  createCustomerRoomsFixture,
+  createCustomerServersFixture,
+  createCustomerTeamFixture,
+  createCustomerUsageFixture,
+  createCustomerUserFixture,
+} from "../fixtures/customerFixtures.js";
+import {
+  createAdminComputeFixture,
+  createAdminCustomersFixture,
+  createAdminEnterpriseContractsFixture,
+  createAdminIntelligenceFixture,
+  createAdminNotificationsFixture,
+  createAdminOperationsFixture,
+  createAdminOverviewFixture,
+  createAdminPaymentsFixture,
+  createAdminPlansFixture,
+  createAdminRuntimeFixture,
+  createAdminStaffFixture,
+} from "../fixtures/adminFixtures.js";
+import {
+  createSupportCustomerDetailFixture,
+  createSupportCustomersFixture,
+} from "../fixtures/supportFixtures.js";
+
+export type UiStudioSurface = "customer" | "admin" | "support";
+export type UiStudioState = "populated" | "empty" | "loading" | "error" | "gated";
+
+export function createMockMoxStore(
+  surface: UiStudioSurface,
+  state: UiStudioState,
+): MoxStore {
+  const isLoading = state === "loading";
+  const isError = state === "error";
+  const isEmpty = state === "empty";
+  const isGated = state === "gated";
+
+  const customerUser = createCustomerUserFixture();
+  const customerAgents = isEmpty ? [] : createCustomerAgentsFixture();
+  const customerRooms = isEmpty ? [] : createCustomerRoomsFixture();
+  const customerServers = isEmpty ? [] : createCustomerServersFixture();
+  const customerDeployments = isEmpty ? [] : createCustomerDeploymentsFixture();
+  const customerModels = createCustomerModelsFixture();
+  const customerIntegrations = isEmpty ? [] : createCustomerIntegrationsFixture();
+  const customerChannels = isEmpty ? [] : createCustomerChannelsFixture();
+  const customerUsage = createCustomerUsageFixture();
+  const customerBilling = createCustomerBillingFixture();
+  const customerBackups = createCustomerBackupsFixture();
+  const customerTeam = createCustomerTeamFixture();
+  const customerNotifications = createCustomerNotificationsFixture();
+
+  const adminOverview = createAdminOverviewFixture();
+  const adminCustomers = isEmpty ? [] : createAdminCustomersFixture();
+  const adminPlans = createAdminPlansFixture();
+  const adminPayments = isEmpty ? [] : createAdminPaymentsFixture();
+  const adminCompute = createAdminComputeFixture();
+  const adminIntelligence = createAdminIntelligenceFixture();
+  const adminRuntime = isEmpty ? [] : createAdminRuntimeFixture();
+  const adminOperations = createAdminOperationsFixture();
+  const adminNotifications = createAdminNotificationsFixture();
+  const adminContracts = isEmpty ? [] : createAdminEnterpriseContractsFixture();
+  const adminStaff = createAdminStaffFixture();
+
+  const supportCustomers = isEmpty ? [] : createSupportCustomersFixture();
+  const supportCustomerDetail = createSupportCustomerDetailFixture();
+
+  const noopPromise = async () => {};
+
+  const mockApi: MoxApi = {
+    listAgents: async () => (isEmpty ? [] : customerAgents),
+    getAgent: async (id) => customerAgents.find((a) => a.agentId === id),
+    updateModel: noopPromise,
+    createAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]!.definition }),
+    updateAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]!.definition }),
+    publishAgent: async () => ({ agentId: "draft_1", revision: 2, status: "published" }),
+    listAgentVersions: async () => [],
+    diffAgentVersions: async () => ({ from: 1, to: 2, changes: ["Updated prompt"] }),
+    rollbackAgent: async () => ({ agentId: "draft_1", revision: 1 }),
+    listThreads: async () => [{ threadId: "th_main", title: "General Discussion" }],
+    createThread: async () => ({ threadId: "th_new", title: "New Conversation" }),
+    archiveThread: async () => ({ threadId: "th_main", status: "archived" }),
+    getMessages: async () => [],
+    send: async () => ({ runId: "run_mock", done: Promise.resolve(), cancel: () => {} }),
+    openApprovals: async () => [],
+    resolveApproval: noopPromise,
+    getEvents: async () => [],
+    listRooms: async () => customerRooms,
+    createRoom: async (input) => ({
+      roomId: `room_${Date.now()}` as any,
+      orgId: "org_acme_prod" as any,
+      title: input.title,
+      memberAgentIds: input.memberAgentIds as any,
+      memberUserIds: [],
+      createdAt: new Date().toISOString(),
+    }),
+    listServers: async () => customerServers,
+    serverAction: async () => ({ ok: true }),
+    listDeployments: async () => customerDeployments,
+    deployAgent: async () => ({ ok: true, state: "running" }),
+    redeployDeployment: async () => ({ ok: true, state: "running" }),
+    deploymentRollback: async () => ({ ok: true, state: "running" }),
+    listModels: async () => (isEmpty ? [] : customerModels.models),
+    testProviderConnection: async () => ({ ok: true }),
+    listCliEngines: async () => [],
+    listModelConnections: async () => (isEmpty ? [] : customerModels.connections),
+    connectModelConnection: async () => customerModels.connections[0]!,
+    rotateModelConnection: async () => customerModels.connections[0]!,
+    disconnectModelConnection: async () => ({ ok: true, providerId: "anthropic" }),
+    listIntegrations: async () => customerIntegrations,
+    connectIntegration: async () => ({ ok: true, integrationId: "github", connected: true }),
+    disconnectIntegration: async () => ({ ok: true, integrationId: "github", connected: false }),
+    listIntegrationGrants: async () => [],
+    grantIntegrationTool: async () => ({ ok: true, grantId: "grant_1" }),
+    revokeIntegrationGrant: async () => ({ ok: true, grantId: "grant_1" }),
+    listChannels: async () => customerChannels,
+    connectChannel: async () => ({ ok: true, channelId: "slack", agentId: "agent_orchestrator", connected: true }),
+    reconnectChannel: async () => ({ ok: true, connectionId: "conn_1", connected: true, boundAgentId: "agent_orchestrator" }),
+    disconnectChannel: async () => ({ ok: true, connectionId: "conn_1", connected: false }),
+    testChannel: async () => ({ ok: true }),
+    getUsage: async () => (isEmpty ? [] : customerUsage.rows),
+    getUsageDetails: async () => customerUsage.details,
+    listInvoices: async () => (isEmpty ? [] : customerBilling.invoices),
+    getEntitlements: async () => ({
+      commerciallyEntitled: !isGated,
+      values: isGated
+        ? {}
+        : {
+            agent_rooms: 10,
+            model_connections: 5,
+            integrations: 10,
+            channel_connections: 5,
+            backup_retention_days: 30,
+            team_members: 10,
+            storage_gb: 100,
+          },
+    }),
+    listPlans: async () => customerBilling.plans,
+    getSubscription: async () => (isEmpty ? null : customerBilling.subscription),
+    listBillingProviders: async () => [
+      {
+        providerName: "stripe",
+        displayName: "Stripe",
+        environment: "live",
+        enabled: true,
+        supportedCurrencies: ["USD", "EUR"],
+        available: true,
+      },
+    ],
+    startCheckout: async () => ({ sessionId: "cs_mock", providerRef: "pi_mock", redirectUrl: "#", state: "open" }),
+    cancelSubscription: async () => ({ ok: true, subscriptionId: "sub_scale_active" }),
+    reconcileCheckout: async () => ({ status: "active" }),
+    getNotificationPreferences: async () => customerNotifications,
+    updateNotificationPreferences: async (prefs) => ({
+      availableRoutes: customerNotifications.availableRoutes,
+      items: customerNotifications.items.map((i) => ({ ...i, muted: prefs.mutedEventTypes.includes(i.eventType) })),
+    }),
+    getBackupsOverview: async () => (isEmpty ? { availability: false, retentionDays: 0, failedCount: 0, backups: [] } : customerBackups),
+    triggerManualBackup: async () => ({ ok: true, backupId: "bak_manual", state: "pending" }),
+    testBackupRestore: async () => ({ ok: true, message: "Backup validated successfully" }),
+    getTeamOverview: async () => (isEmpty ? { members: [customerTeam.members[0]!], invitations: [], totalUsed: 1, limit: 5 } : customerTeam),
+    inviteTeamMember: async (email, role) => ({ invitationId: "inv_1", email, role, inviteToken: "tok_1", inviteUrl: "#", expiresAt: new Date().toISOString() }),
+    revokeTeamInvitation: noopPromise,
+    updateTeamMemberRole: noopPromise,
+    removeTeamMember: noopPromise,
+    listKnowledgeSources: async () => [],
+    createKnowledgeSource: async (input) => ({ id: "ks_1", name: input.name, kind: input.kind, createdAt: new Date().toISOString() }),
+    deleteKnowledgeSource: noopPromise,
+    listVoices: async () => [],
+    previewVoice: async () => ({ ok: true }),
+    createApiToken: async () => ({ token: "mox_tok_mock", tokenId: "tok_1", scopes: ["read"], expiresAt: new Date().toISOString() }),
+    listApiTokens: async () => [],
+    revokeApiToken: noopPromise,
+    adminOverview: async () => adminOverview,
+    adminCustomers: async () => adminCustomers,
+    adminCustomerAction: noopPromise,
+    adminAddSupportNote: noopPromise,
+    adminPlans: async () => adminPlans,
+    adminUpsertCurrency: noopPromise,
+    adminUpsertPriceBook: noopPromise,
+    adminPaymentProviders: async () => adminPayments,
+    adminSavePaymentProvider: noopPromise,
+    adminCompute: async () => adminCompute,
+    adminSaveComputeAccount: noopPromise,
+    adminSaveComputeClass: noopPromise,
+    adminComputeOrderAction: noopPromise,
+    adminIntelligence: async () => adminIntelligence,
+    adminSaveIntelligenceProvider: noopPromise,
+    adminRuntime: async () => adminRuntime,
+    adminRuntimeAction: noopPromise,
+    adminOperations: async () => adminOperations,
+    adminNotificationJobs: async () => adminNotifications,
+    adminPreviewNotification: async () => ({}),
+    adminSendNotification: async () => ({}),
+    adminScheduleNotification: async () => ({}),
+    adminCancelNotificationJob: noopPromise,
+    adminGetNotificationJob: async (jobId) => ({
+      id: jobId,
+      audienceType: "all",
+      title: "Security Update",
+      body: "Platform maintenance advisory.",
+      severity: "info",
+      category: "security",
+      status: "completed",
+      fanoutDone: 142,
+      fanoutTotal: 142,
+      createdAt: new Date().toISOString(),
+      logs: [],
+    }),
+    adminListEnterpriseContracts: async () => adminContracts,
+    adminSaveEnterpriseContract: async () => ({ ok: true }),
+    adminDeactivateEnterpriseContract: async () => ({ ok: true }),
+    adminSaveFeatureFlag: async () => ({ ok: true }),
+    adminDeleteFeatureFlag: async () => ({ ok: true }),
+    adminRunBackup: async () => ({ ok: true }),
+    adminRestoreTest: async () => ({ ok: true }),
+    adminSavePlanEntitlement: async () => ({ ok: true }),
+    adminSaveAddon: async () => ({ ok: true }),
+    adminStaff: async () => adminStaff,
+    adminCreateStaffInvite: async () => ({
+      invitationId: "sinv_1",
+      email: "staff@mox.internal",
+      role: "operator",
+      inviteToken: "stok_1",
+      token: "stok_1",
+      surface: "admin",
+      expiresAt: new Date().toISOString(),
+    }),
+    adminRevokeStaffInvite: noopPromise,
+    adminStaffAction: noopPromise,
+    supportCustomers: async () => supportCustomers,
+    supportCustomer: async (orgId) => {
+      const found = supportCustomers.find((c) => c.orgId === orgId);
+      return found ? createSupportCustomerDetailFixture(found.orgId) : supportCustomerDetail;
+    },
+    supportAddNote: noopPromise,
+    computerSnapshot: async () => undefined,
+    computerTakeover: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "#", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
+    computerRestart: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "#", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
+    listFiles: async () => [],
+    filePreview: async () => "",
+    runTerminalCommand: async () => ({ output: "Command completed." }),
+    getLogs: async () => [],
+  };
+
+  const adminCapabilities = isGated
+    ? ["admin.overview.read"]
+    : [
+        "admin.overview.read",
+        "admin.customers.read",
+        "admin.customers.write",
+        "admin.plans.read",
+        "admin.plans.write",
+        "admin.compute.read",
+        "admin.compute.write",
+        "admin.intelligence.read",
+        "admin.runtime.read",
+        "admin.operations.read",
+        "admin.staff.read",
+        "admin.staff.write",
+      ];
+
+  const supportCapabilities = isGated
+    ? []
+    : [
+        "support.customer.lookup",
+        "support.customer.read",
+        "support.customer.diagnostics",
+        "support.ticket.read",
+        "support.ticket.write",
+        "support.note.write",
+      ];
+
+  return {
+    api: mockApi,
+    ready: !isLoading && !isError,
+    error: isError ? "Simulated Network Error: Failed to reach Mox Control Plane cluster." : null,
+    needsAuth: false,
+    me: isEmpty ? { ...customerUser, orgDisplayName: "Empty Sandbox Org" } : customerUser,
+    switchOrg: noopPromise,
+    signIn: noopPromise,
+    signUp: noopPromise,
+    signOut: noopPromise,
+    staffSession: {
+      staffUserId: surface === "admin" ? "usr_mock_admin" : "usr_mock_support",
+      email: surface === "admin" ? "admin@mox.internal" : "support@mox.internal",
+      displayName: surface === "admin" ? "Admin Preview Operator" : "Support Preview Agent",
+      role: surface === "admin" ? "superadmin" : "tier2_support",
+      surface: surface === "customer" ? "admin" : surface,
+      capabilities: surface === "admin" ? adminCapabilities : supportCapabilities,
+    },
+    staffSurface: surface === "customer" ? null : surface,
+    staffReady: !isLoading && !isError,
+    staffError: isError ? "Simulated Staff Error: Authentication gateway timed out." : null,
+    verifyStaffSession: async () => null,
+    adminLogin: async () => undefined,
+    supportLogin: async () => undefined,
+    adminSignup: noopPromise,
+    supportSignup: noopPromise,
+    staffSignOut: noopPromise,
+    forgotPassword: async () => ({ ok: true, message: "Reset sent" }),
+    resetPassword: noopPromise,
+    agents: customerAgents,
+    refreshAgents: noopPromise,
+    refreshEntitlements: noopPromise,
+    entitlements: {
+      commerciallyEntitled: !isGated,
+      values: isGated
+        ? {}
+        : {
+            agent_rooms: 10,
+            model_connections: 5,
+            integrations: 10,
+            channel_connections: 5,
+            backup_retention_days: 30,
+            team_members: 10,
+            storage_gb: 100,
+          },
+    },
+    approvals: [],
+    messages: () => [],
+    loadThread: noopPromise,
+    send: noopPromise,
+    cancel: () => {},
+    activeRun: () => null,
+    resolveApproval: noopPromise,
+    eventsVersion: 0,
+    invalidateEvents: () => {},
+  };
+}

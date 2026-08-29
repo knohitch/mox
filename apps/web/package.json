@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "ui:studio": "vite --mode studio",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --force",
     "test": "vitest run"

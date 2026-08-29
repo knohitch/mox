@@ -14,7 +14,7 @@ describe("customer nav information architecture (Prompt 02)", () => {
 
     const flat = CUSTOMER_NAV.flatMap((g) => g.entries.map((e) => e.label));
     expect(flat).toEqual([
-      "Home",
+      "Dashboard",
       "Agents",
       "Agent Rooms",
       "Deployments",
@@ -24,6 +24,7 @@ describe("customer nav information architecture (Prompt 02)", () => {
       "Channels",
       "Usage",
       "Billing",
+      "Backups",
       "Settings",
     ]);
   });
@@ -31,7 +32,7 @@ describe("customer nav information architecture (Prompt 02)", () => {
   it("maps every customer route to the protected path table", () => {
     // Every protected customer route must be reachable from the nav.
     expect(CUSTOMER_DESTINATIONS).toEqual([
-      "/",
+      "/dashboard",
       "/agents",
       "/rooms",
       "/deployments",
@@ -41,6 +42,7 @@ describe("customer nav information architecture (Prompt 02)", () => {
       "/channels",
       "/usage",
       "/billing",
+      "/backups",
       "/settings",
     ]);
   });

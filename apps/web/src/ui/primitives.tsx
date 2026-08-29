@@ -76,12 +76,94 @@ export function Panel({ id, title, subtitle, actions, children }: { id?: string;
 }
 
 /** Compact stat / KPI card. */
-export function KpiCard({ label, value, hint, tone }: { label: string; value: ReactNode; hint?: ReactNode; tone?: "good" | "warn" | "bad" | "accent" }) {
+export function KpiCard({ label, value, hint, tone }: { label: string; value: ReactNode; hint?: ReactNode; tone?: "good" | "warn" | "bad" | "accent" | "neutral" }) {
   return (
     <div className={`kpi ${tone ? `kpi-${tone}` : ""}`}>
       <span className="kpi-label">{label}</span>
       <strong className="kpi-value">{value}</strong>
       {hint ? <span className="kpi-hint">{hint}</span> : null}
+    </div>
+  );
+}
+
+/** Enhanced metric card for unified dashboard telemetry. */
+export function MetricCard({
+  label,
+  value,
+  detail,
+  hint,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  hint?: ReactNode;
+  tone?: "good" | "warn" | "bad" | "accent" | "neutral";
+  icon?: ReactNode;
+}) {
+  return (
+    <div className={`metric-card ${tone ? `metric-${tone}` : ""}`}>
+      <div className="metric-head">
+        <span className="metric-label">{label}</span>
+        {icon ? <span className="metric-icon" aria-hidden>{icon}</span> : null}
+      </div>
+      <strong className="metric-value">{value}</strong>
+      {detail ? <span className="metric-detail">{detail}</span> : hint ? <span className="metric-hint">{hint}</span> : null}
+    </div>
+  );
+}
+
+/** Pulsing or static status indicator dot + label. */
+export function StatusIndicator({
+  status,
+  label,
+  pulse = false,
+}: {
+  status: "good" | "warn" | "bad" | "neutral" | "accent";
+  label?: ReactNode;
+  pulse?: boolean;
+}) {
+  return (
+    <span className={`status-indicator status-ind-${status}${pulse ? " pulse" : ""}`}>
+      <span className="status-indicator-dot" aria-hidden />
+      {label ? <span className="status-indicator-label">{label}</span> : null}
+    </span>
+  );
+}
+
+/** Visual surface tag (Admin / Support). */
+export function SurfaceTag({ surface }: { surface: "customer" | "admin" | "support" }) {
+  if (surface === "customer") return null;
+  return (
+    <span className={`surface-tag surface-tag-${surface}`}>
+      {surface === "admin" ? "Admin" : "Support"}
+    </span>
+  );
+}
+
+/** Unified Brand Lockup with surface indicator. */
+export function BrandLogo({
+  surface = "customer",
+  collapsed = false,
+}: {
+  surface?: "customer" | "admin" | "support";
+  collapsed?: boolean;
+}) {
+  return (
+    <div className="brand" aria-label={`Mox ${surface !== "customer" ? surface : ""}`}>
+      {collapsed ? (
+        <span>M</span>
+      ) : (
+        <>
+          M<span>ox</span>
+          {surface !== "customer" ? (
+            <small className={`brand-surface-badge brand-${surface}`}>
+              {surface === "admin" ? "Admin" : "Support"}
+            </small>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }

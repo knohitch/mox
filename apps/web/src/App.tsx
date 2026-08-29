@@ -6,7 +6,8 @@ import { CustomerShell } from "./shell/CustomerShell.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
 import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./views/AuthPages.js";
-import { Badge, Card, EmptyState } from "./ui/primitives.js";
+import { Badge, BrandLogo, Card, EmptyState } from "./ui/primitives.js";
+import { UiStudioView } from "./views/UiStudioView.js";
 import {
   SUPPORT_SECTION_LABEL,
   canSupportLookup,
@@ -36,7 +37,8 @@ import {
 // ----------------------------------------------------------------------------
 
 const CUSTOMER_ROUTES: Record<string, (params: Record<string, string>) => ReactNode> = {
-  "/": () => <HomeView />,
+  "/": () => <Redirect to="/dashboard" />,
+  "/dashboard": () => <HomeView />,
   "/agents": () => <AgentsView />,
   "/rooms": () => <RoomsView />,
   "/servers": () => <ServersView />,
@@ -64,11 +66,12 @@ const SUPPORT_PUBLIC = ["/support/login", "/support/signup", "/support/forgot-pa
  * `/support`, `//`, a scheme, or an encoded escape.
  */
 function safeCustomerReturn(raw: string | null): string {
-  if (!raw) return "/";
-  if (raw.startsWith("//") || raw.includes("://") || raw.includes("\\")) return "/";
-  if (!raw.startsWith("/")) return "/";
-  if (raw === "/admin" || raw.startsWith("/admin/")) return "/";
-  if (raw === "/support" || raw.startsWith("/support/")) return "/";
+  if (!raw) return "/dashboard";
+  if (raw.startsWith("//") || raw.includes("://") || raw.includes("\\")) return "/dashboard";
+  if (!raw.startsWith("/")) return "/dashboard";
+  if (raw === "/" || raw === "") return "/dashboard";
+  if (raw === "/admin" || raw.startsWith("/admin/")) return "/dashboard";
+  if (raw === "/support" || raw.startsWith("/support/")) return "/dashboard";
   return raw;
 }
 
@@ -93,7 +96,7 @@ function CustomerPublicAuth({ pattern }: { pattern: string }) {
         title="Sign in to Mox"
         onSubmit={async (input) => {
           await signIn({ email: input.email, password: input.password });
-          navigate(returnTo || "/");
+          navigate(returnTo || "/dashboard");
         }}
         signupPath="/signup"
         forgotPath="/forgot-password"
@@ -107,7 +110,7 @@ function CustomerPublicAuth({ pattern }: { pattern: string }) {
         title="Create your Mox workspace"
         onSubmit={async (input) => {
           await signUp({ email: input.email, password: input.password, orgName: input.orgName });
-          navigate(returnTo || "/");
+          navigate(returnTo || "/dashboard");
         }}
         loginPath="/login"
       />
@@ -187,37 +190,93 @@ export function CustomerSurface() {
   );
 }
 
-// ----------------------------------------------------------------------------
-// Staff surfaces (admin / support) — Prompt 01 isolation
-// ----------------------------------------------------------------------------
-
-function StaffShell({ surface, children }: { surface: "admin" | "support"; children: ReactNode }) {
+export function StaffShell({ surface, children }: { surface: "admin" | "support"; children: ReactNode }) {
   const { staffSignOut, staffSession } = useMox();
-  return (
-    <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          M<span>ox</span>
-          <small>{surface === "support" ? "Support" : "Admin"}</small>
+  const [collapsed, setCollapsed] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen]);
+
+  const sidebarBody = (
+    <>
+      <BrandLogo surface={surface} collapsed={collapsed} />
+      <div className="section-label">{surface === "support" ? "Support console" : "Admin console"}</div>
+      {staffSession ? (
+        <div className="staff-identity muted">
+          <strong>{staffSession.displayName}</strong>
+          <small>{staffSession.email}</small>
         </div>
-        <div className="section-label">{surface === "support" ? "Support console" : "Admin console"}</div>
-        {staffSession ? (
-          <div className="staff-identity muted">
-            {staffSession.displayName}
-            <br />
-            {staffSession.email}
-          </div>
-        ) : null}
-        <button type="button" className="nav-item signout" onClick={() => void staffSignOut()}>
-          Sign out
+      ) : null}
+      <button type="button" className="nav-item signout" onClick={() => void staffSignOut()}>
+        <span className="nav-icon" aria-hidden>⎋</span>
+        <span className="nav-label">{collapsed ? "" : "Sign out"}</span>
+      </button>
+    </>
+  );
+
+  return (
+    <div className={`app${collapsed ? " sidebar-collapsed" : ""}`}>
+      {/* Desktop sidebar */}
+      <aside className={`sidebar sidebar-desktop${collapsed ? " collapsed" : ""}`} aria-label="Primary">
+        {sidebarBody}
+        <button
+          type="button"
+          className="collapse-btn"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={() => setCollapsed((v) => !v)}
+        >
+          {collapsed ? "»" : "«"}
         </button>
       </aside>
-      <main className="main">{children}</main>
+
+      {/* Mobile drawer */}
+      {drawerOpen ? (
+        <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} role="presentation" />
+      ) : null}
+      <aside className={`sidebar sidebar-drawer${drawerOpen ? " open" : ""}`} aria-label="Primary (mobile)" aria-hidden={!drawerOpen}>
+        {drawerOpen ? sidebarBody : null}
+      </aside>
+
+      <div className="shell-body">
+        <header className="topbar-staff">
+          <button
+            type="button"
+            className="menu-toggle"
+            aria-label="Open menu"
+            onClick={() => setDrawerOpen(true)}
+          >
+            ☰
+          </button>
+          <div className="topbar-left">
+            <span className={`surface-badge surface-${surface}`}>
+              {surface === "support" ? "Mox Support" : "Mox Admin"}
+            </span>
+          </div>
+          <div className="topbar-right">
+            {staffSession ? (
+              <div className="staff-topbar-info">
+                <span className="staff-name">{staffSession.displayName}</span>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void staffSignOut()}>
+                  Sign out
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </header>
+        <main className="main">{children}</main>
+      </div>
     </div>
   );
 }
 
-function SupportConsole() {
+export function SupportConsole() {
   const NOTE_MAX_LENGTH = 4000;
   const NOTE_HTML_RE = /<\s*\/?\s*(script|iframe|object|embed|img|svg|math|style|link|meta|base)\b/i;
   const { api, staffSession } = useMox();
@@ -594,6 +653,9 @@ export function App() {
 
 export function SurfaceRouter() {
   const { path } = useRoute();
+  if (path === "/__ui" || path.startsWith("/__ui/")) {
+    return <UiStudioView />;
+  }
   if (path === "/admin" || path.startsWith("/admin/")) return <StaffSurface kind="admin" />;
   if (path === "/support" || path.startsWith("/support/")) return <StaffSurface kind="support" />;
   return <CustomerSurface />;
