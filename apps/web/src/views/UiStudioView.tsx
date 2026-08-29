@@ -161,8 +161,6 @@ export function UiStudioView() {
               ))}
             </div>
           </div>
-
-          </div>
         </div>
       </header>
 
