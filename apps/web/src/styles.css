@@ -1529,3 +1529,118 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   transition: width 0.25s ease, max-width 0.25s ease;
   min-height: 800px;
 }
+
+/* Dev Mode Quick Access on Auth Page */
+.mastra-dev-access {
+  margin-top: 22px;
+  padding: 14px 16px;
+  background: #101118;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mastra-dev-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mastra-dev-dot {
+  color: #22c55e;
+  font-size: 10px;
+  animation: dev-dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes dev-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.mastra-dev-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #94a3b8;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mastra-dev-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .mastra-dev-buttons {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mastra-dev-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-decoration: none;
+  background: #181924;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: center;
+}
+
+.mastra-dev-pill:hover {
+  background: #202230;
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.mastra-dev-pill.customer:hover {
+  border-color: rgba(56, 189, 248, 0.4);
+  color: #38bdf8;
+}
+
+.mastra-dev-pill.admin:hover {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #f87171;
+}
+
+.mastra-dev-pill.support:hover {
+  border-color: rgba(59, 130, 246, 0.4);
+  color: #60a5fa;
+}
+
+.mastra-dev-icon {
+  font-size: 13px;
+}
+
+.mastra-dev-text {
+  white-space: nowrap;
+}
+
+.ui-studio-auth-link {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-decoration: none;
+  margin-left: 12px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.15s ease;
+}
+
+.ui-studio-auth-link:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.12);
+}

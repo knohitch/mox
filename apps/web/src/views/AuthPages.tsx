@@ -159,6 +159,42 @@ export function AuthLayout({ surface, children }: { surface: SurfaceKind; childr
 
             {/* Form and Controls */}
             {children}
+
+            {/* Development Mode Direct Access (Customer, Admin, Support) */}
+            {import.meta.env.DEV ? (
+              <div className="mastra-dev-access" role="region" aria-label="Development Shortcuts">
+                <div className="mastra-dev-header">
+                  <span className="mastra-dev-dot" aria-hidden>●</span>
+                  <span className="mastra-dev-title">DEV MODE DIRECT ACCESS</span>
+                </div>
+                <div className="mastra-dev-buttons">
+                  <a
+                    href="/__ui?surface=customer"
+                    className="mastra-dev-pill customer"
+                    title="Access User / Customer Dashboard"
+                  >
+                    <span className="mastra-dev-icon">⬡</span>
+                    <span className="mastra-dev-text">User Dashboard</span>
+                  </a>
+                  <a
+                    href="/__ui?surface=admin"
+                    className="mastra-dev-pill admin"
+                    title="Access Mox Admin Dashboard"
+                  >
+                    <span className="mastra-dev-icon">🛡</span>
+                    <span className="mastra-dev-text">Admin Dashboard</span>
+                  </a>
+                  <a
+                    href="/__ui?surface=support"
+                    className="mastra-dev-pill support"
+                    title="Access Mox Support Dashboard"
+                  >
+                    <span className="mastra-dev-icon">🎧</span>
+                    <span className="mastra-dev-text">Support Dashboard</span>
+                  </a>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
 

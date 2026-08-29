@@ -39,10 +39,27 @@ const CUSTOMER_PAGES = [
 ] as const;
 
 export function UiStudioView() {
-  const [surface, setSurface] = useState<UiStudioSurface>("customer");
+  const getInitialSurface = (): UiStudioSurface => {
+    if (typeof window === "undefined") return "customer";
+    const params = new URLSearchParams(window.location.search);
+    const s = params.get("surface");
+    if (s === "admin" || s === "support" || s === "customer") return s;
+    return "customer";
+  };
+
+  const [surface, setSurface] = useState<UiStudioSurface>(getInitialSurface);
   const [customerPage, setCustomerPage] = useState<string>("/dashboard");
   const [state, setState] = useState<UiStudioState>("populated");
   const [viewport, setViewport] = useState<ViewportPreset>("100%");
+
+  const handleSurfaceChange = (s: UiStudioSurface) => {
+    setSurface(s);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("surface", s);
+      window.history.replaceState(null, "", url.toString());
+    }
+  };
 
   // Security gate: Render regular 404 if not DEV + opt-in + local host.
   if (!isUiStudioAllowed()) {
@@ -89,6 +106,9 @@ export function UiStudioView() {
           <strong>Mox UI Studio</strong>
           <span className="ui-studio-pill dev">DEV ONLY</span>
           <span className="ui-studio-pill safe">ISOLATED FIXTURES</span>
+          <a href="/login" className="ui-studio-auth-link" title="Jump to Auth Page">
+            ← Auth Page
+          </a>
         </div>
 
         <div className="ui-studio-controls">
@@ -101,7 +121,7 @@ export function UiStudioView() {
                   key={s}
                   type="button"
                   className={surface === s ? "active" : ""}
-                  onClick={() => setSurface(s)}
+                  onClick={() => handleSurfaceChange(s)}
                 >
                   {s.charAt(0).toUpperCase() + s.slice(1)}
                 </button>
