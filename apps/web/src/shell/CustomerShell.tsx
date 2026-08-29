@@ -5,6 +5,7 @@ import { useMox } from "../api/store.js";
 import { Link, useRoute } from "../router.js";
 import { CUSTOMER_NAV } from "../concepts/nav.js";
 import { NotificationBell } from "../views/NotificationCenter.js";
+import { SidebarToggleIcon } from "../ui/primitives.js";
 
 /**
  * Customer app shell (Prompt 02): grouped sidebar + useful top bar using real
@@ -194,9 +195,11 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
           type="button"
           className="collapse-btn"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           onClick={() => setCollapsed((v) => !v)}
         >
-          {collapsed ? "»" : "«"}
+          <SidebarToggleIcon collapsed={collapsed} />
+          <span className="collapse-text">{collapsed ? "" : "Collapse"}</span>
         </button>
       </aside>
 
@@ -217,6 +220,15 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
             onClick={() => setDrawerOpen(true)}
           >
             ☰
+          </button>
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            <SidebarToggleIcon collapsed={collapsed} />
           </button>
           <div className="topbar-left">
             {me ? <OrgSwitcher me={me} /> : <span className="muted">Workspace</span>}

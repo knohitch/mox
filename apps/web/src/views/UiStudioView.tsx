@@ -185,9 +185,9 @@ export function UiStudioView() {
       </header>
 
       {/* Preview Viewport Container */}
-      <div className="ui-studio-stage">
+      <div className={`ui-studio-stage${viewport === "100%" ? " fluid-stage" : ""}`}>
         <div
-          className="ui-studio-viewport"
+          className={`ui-studio-viewport${viewport === "100%" ? " fluid-viewport" : " framed"}`}
           style={{
             width: viewport,
             maxWidth: viewport === "100%" ? "100%" : viewport,

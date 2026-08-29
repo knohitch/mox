@@ -6,7 +6,7 @@ import { CustomerShell } from "./shell/CustomerShell.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
 import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./views/AuthPages.js";
-import { Badge, BrandLogo, Card, EmptyState } from "./ui/primitives.js";
+import { Badge, BrandLogo, Card, EmptyState, SidebarToggleIcon } from "./ui/primitives.js";
 import { UiStudioView } from "./views/UiStudioView.js";
 import {
   SUPPORT_SECTION_LABEL,
@@ -230,9 +230,11 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
           type="button"
           className="collapse-btn"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           onClick={() => setCollapsed((v) => !v)}
         >
-          {collapsed ? "»" : "«"}
+          <SidebarToggleIcon collapsed={collapsed} />
+          <span className="collapse-text">{collapsed ? "" : "Collapse"}</span>
         </button>
       </aside>
 
@@ -253,6 +255,15 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
             onClick={() => setDrawerOpen(true)}
           >
             ☰
+          </button>
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            <SidebarToggleIcon collapsed={collapsed} />
           </button>
           <div className="topbar-left">
             <span className={`surface-badge surface-${surface}`}>
