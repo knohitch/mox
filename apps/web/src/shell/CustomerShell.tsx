@@ -30,15 +30,30 @@ function Brand({ showText = true }: { showText?: boolean }) {
 function SidebarContent({
   active,
   collapsed,
+  onToggleCollapse,
   onNavigate,
 }: {
   active: string;
   collapsed: boolean;
+  onToggleCollapse?: () => void;
   onNavigate: () => void;
 }) {
   return (
     <>
-      <Brand showText={!collapsed} />
+      <div className="sidebar-head">
+        <Brand showText={!collapsed} />
+        {onToggleCollapse ? (
+          <button
+            type="button"
+            className="sidebar-collapse-toggle-top"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={onToggleCollapse}
+          >
+            <SidebarToggleIcon collapsed={collapsed} />
+          </button>
+        ) : null}
+      </div>
       <nav className="nav-scroll" aria-label="Main navigation">
         {CUSTOMER_NAV.map((group) => (
           <div className="nav-group" key={group.label}>
@@ -190,17 +205,12 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
     <div className={`app${collapsed ? " sidebar-collapsed" : ""}`}>
       {/* Desktop sidebar */}
       <aside className={`sidebar sidebar-desktop${collapsed ? " collapsed" : ""}`} aria-label="Primary">
-        <SidebarContent active={activePath} collapsed={collapsed} onNavigate={() => undefined} />
-        <button
-          type="button"
-          className="collapse-btn"
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={() => setCollapsed((v) => !v)}
-        >
-          <SidebarToggleIcon collapsed={collapsed} />
-          <span className="collapse-text">{collapsed ? "" : "Collapse"}</span>
-        </button>
+        <SidebarContent
+          active={activePath}
+          collapsed={collapsed}
+          onToggleCollapse={() => setCollapsed((v) => !v)}
+          onNavigate={() => undefined}
+        />
       </aside>
 
       {/* Mobile drawer */}

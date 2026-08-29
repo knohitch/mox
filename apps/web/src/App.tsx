@@ -206,7 +206,18 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
 
   const sidebarBody = (
     <>
-      <BrandLogo surface={surface} collapsed={collapsed} />
+      <div className="sidebar-head">
+        <BrandLogo surface={surface} collapsed={collapsed} />
+        <button
+          type="button"
+          className="sidebar-collapse-toggle-top"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={() => setCollapsed((v) => !v)}
+        >
+          <SidebarToggleIcon collapsed={collapsed} />
+        </button>
+      </div>
       <div className="section-label">{surface === "support" ? "Support console" : "Admin console"}</div>
       {staffSession ? (
         <div className="staff-identity muted">
@@ -226,16 +237,6 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
       {/* Desktop sidebar */}
       <aside className={`sidebar sidebar-desktop${collapsed ? " collapsed" : ""}`} aria-label="Primary">
         {sidebarBody}
-        <button
-          type="button"
-          className="collapse-btn"
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={() => setCollapsed((v) => !v)}
-        >
-          <SidebarToggleIcon collapsed={collapsed} />
-          <span className="collapse-text">{collapsed ? "" : "Collapse"}</span>
-        </button>
       </aside>
 
       {/* Mobile drawer */}
