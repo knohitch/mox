@@ -18,7 +18,8 @@ import type {
   CreatedStaffInvite,
 } from "../api/types.js";
 import { Badge, Card, EmptyState } from "../ui/primitives.js";
-import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, visibleAdminTabs } from "../concepts/staffNav.js";
+import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, isAdminTabKey, visibleAdminTabs } from "../concepts/staffNav.js";
+import { useNavSection } from "../router.js";
 
 type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "contracts" | "staff";
 
@@ -90,7 +91,13 @@ export function AdminView() {
   const { api, staffSession } = useMox();
   const capabilities = staffSession?.capabilities ?? [];
   const visibleTabs = visibleAdminTabs(capabilities);
-  const [tab, setTab] = useState<AdminTab>("dashboard");
+  const { section: previewSection, setSection: setPreviewSection } = useNavSection();
+  const [localTab, setLocalTab] = useState<AdminTab>("dashboard");
+  const tab: AdminTab = isAdminTabKey(previewSection) ? previewSection : localTab;
+  const setTab = (next: AdminTab) => {
+    if (setPreviewSection) setPreviewSection(next);
+    else setLocalTab(next);
+  };
   useEffect(() => {
     // Prompt 03: never leave a capability-gated tab active after the visible
     // set changes (e.g. a reduced-role staff member lands on a hidden tab).

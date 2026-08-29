@@ -107,3 +107,50 @@ export function visibleSupportSections(capabilities: string[]): SupportSectionKe
 }
 
 export const SUPPORT_ROLES = ["superadmin", "platform_admin", "support_manager", "support_agent"] as const;
+
+/**
+ * Canonical staff capability profiles for Admin/Support preview.
+ * Must stay aligned with `STAFF_ROLE_CAPABILITIES` / `PLATFORM_ROLE_CAPABILITIES`
+ * in `services/control-plane/src/config.ts`. The web bundle cannot import the
+ * control-plane service, so this is the UI-side copy of the same vocabulary.
+ */
+export const ADMIN_PREVIEW_ROLES = {
+  superadmin: { label: "Superadmin", capabilities: ["*"] as const },
+  platform_admin: {
+    label: "Platform Admin",
+    capabilities: ["admin.read", "admin.customers.write", "admin.support.write", "admin.operations.write"] as const,
+  },
+  billing_admin: {
+    label: "Billing Admin",
+    capabilities: ["admin.read", "admin.billing.write", "admin.notifications.write"] as const,
+  },
+  ops_admin: {
+    label: "Ops Admin",
+    capabilities: [
+      "admin.read",
+      "admin.compute.write",
+      "admin.intelligence.write",
+      "admin.operations.write",
+      "admin.notifications.write",
+    ] as const,
+  },
+} as const;
+
+export const SUPPORT_PREVIEW_ROLES = {
+  support_manager: {
+    label: "Support Manager",
+    capabilities: ["support.read", "support.ticket.write", "support.customer.lookup", "support.escalate"] as const,
+  },
+  support_agent: {
+    label: "Support Agent",
+    capabilities: ["support.read", "support.ticket.write", "support.customer.lookup"] as const,
+  },
+} as const;
+
+export function isAdminTabKey(value: string | null | undefined): value is AdminTabKey {
+  return !!value && (ADMIN_TABS as readonly string[]).includes(value);
+}
+
+export function isSupportSectionKey(value: string | null | undefined): value is SupportSectionKey {
+  return !!value && (SUPPORT_SECTIONS as readonly string[]).includes(value);
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 
 /**
@@ -68,7 +68,35 @@ export function matchPath(pattern: string, path: string): Record<string, string>
   return params;
 }
 
+/**
+ * Optional navigation adapter. Production leaves this unset so Link/useRoute
+ * talk to the History API. UI Studio provides one so product chrome stays on
+ * `/__ui` without `if (studio)` checks in views.
+ */
+export interface NavAdapter {
+  path: string;
+  navigate: (to: string) => void;
+  hrefFor: (to: string) => string;
+  section?: string;
+  setSection?: (section: string) => void;
+}
+
+const NavAdapterContext = createContext<NavAdapter | null>(null);
+
+export function NavAdapterProvider({ adapter, children }: { adapter: NavAdapter; children: ReactNode }) {
+  return <NavAdapterContext.Provider value={adapter}>{children}</NavAdapterContext.Provider>;
+}
+
+export function useNavSection(): {
+  section: string | undefined;
+  setSection: ((section: string) => void) | undefined;
+} {
+  const adapter = useContext(NavAdapterContext);
+  return { section: adapter?.section, setSection: adapter?.setSection };
+}
+
 export function useRoute(config?: RouterConfig): RouteMatch & { navigate: (to: string) => void } {
+  const adapter = useContext(NavAdapterContext);
   const [path, setPath] = useState(currentPath);
 
   useEffect(() => {
@@ -83,18 +111,22 @@ export function useRoute(config?: RouterConfig): RouteMatch & { navigate: (to: s
 
   const navigate = useCallback(
     (to: string) => {
+      if (adapter) {
+        adapter.navigate(to);
+        return;
+      }
       if (to === currentPath()) {
         // still normalize a scroll reset / state sync without a duplicate entry
         return;
       }
       pushPath(to);
     },
-    [config],
+    [adapter, config],
   );
 
   // Route table is evaluated by callers via <Route> composition; here we
   // expose the raw path plus a helper consumers use with their patterns.
-  return { path, pattern: null, params: {}, navigate };
+  return { path: adapter?.path ?? path, pattern: null, params: {}, navigate };
 }
 
 /** First matching pattern wins; patterns are exact or contain :params. */
@@ -114,10 +146,12 @@ export function Link({
   children,
   ...rest
 }: { to: string; children: ReactNode } & AnchorHTMLAttributes<HTMLAnchorElement>) {
+  const adapter = useContext(NavAdapterContext);
   const onClick = rest.onClick;
+  const href = adapter?.hrefFor(to) ?? `${routeBasename()}${to.startsWith("/") ? to : `/${to}`}`;
   return (
     <a
-      href={`${routeBasename()}${to.startsWith("/") ? to : `/${to}`}`}
+      href={href}
       {...rest}
       onClick={(event) => {
         onClick?.(event);
@@ -125,7 +159,8 @@ export function Link({
         const modifier = event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
         if (modifier || event.target instanceof HTMLAnchorElement && event.target.target === "_blank") return;
         event.preventDefault();
-        pushPath(to);
+        if (adapter) adapter.navigate(to);
+        else pushPath(to);
       }}
     >
       {children}

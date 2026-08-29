@@ -12,9 +12,11 @@ import {
   SUPPORT_SECTION_LABEL,
   canSupportLookup,
   canSupportNote,
+  isSupportSectionKey,
   visibleSupportSections,
   type SupportSectionKey,
 } from "./concepts/staffNav.js";
+import { useNavSection } from "./router.js";
 import type { SupportCustomer, SupportCustomerDetail } from "./api/types.js";
 import {
   BackupsView,
@@ -308,18 +310,54 @@ export function SupportConsole() {
   const canLookup = canSupportLookup(capabilities);
   const canNote = canSupportNote(capabilities);
   const sections = visibleSupportSections(capabilities);
+  const { section: previewSection, setSection: setPreviewSection } = useNavSection();
   const [query, setQuery] = useState("");
   const [customers, setCustomers] = useState<SupportCustomer[]>([]);
   const [selected, setSelected] = useState<SupportCustomerDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [note, setNote] = useState("");
-  const [section, setSection] = useState<SupportSectionKey>("lookup");
+  const [localSection, setLocalSection] = useState<SupportSectionKey>("lookup");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const section: SupportSectionKey = isSupportSectionKey(previewSection) ? previewSection : localSection;
+  const setSection = (next: SupportSectionKey) => {
+    if (setPreviewSection) setPreviewSection(next);
+    else setLocalSection(next);
+  };
 
   useEffect(() => {
     if (sections.length > 0 && !sections.includes(section)) setSection(sections[0]!);
   }, [section, sections]);
+
+  useEffect(() => {
+    if (!canLookup) return;
+    let cancelled = false;
+    const load = async () => {
+      setBusy(true);
+      setStatus(null);
+      try {
+        const list = await api.supportCustomers(undefined);
+        if (cancelled) return;
+        setCustomers(list);
+        if (list.length === 0) {
+          setSelected(null);
+          setSelectedId(null);
+          return;
+        }
+        const first = list[0]!;
+        setSelectedId(first.orgId);
+        setSelected(await api.supportCustomer(first.orgId));
+      } catch (error) {
+        if (!cancelled) setStatus(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [canLookup, api]);
 
   if (!staffSession) return <Connecting />;
 
@@ -337,8 +375,18 @@ export function SupportConsole() {
     setBusy(true);
     setStatus(null);
     try {
-      setCustomers(await api.supportCustomers(query.trim() || undefined));
-      if (customers.length === 0 && !selectedId) setSelected(null);
+      const list = await api.supportCustomers(query.trim() || undefined);
+      setCustomers(list);
+      if (list.length === 0) {
+        setSelected(null);
+        setSelectedId(null);
+        return;
+      }
+      if (!list.some((c) => c.orgId === selectedId)) {
+        const first = list[0]!;
+        setSelectedId(first.orgId);
+        setSelected(await api.supportCustomer(first.orgId));
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {

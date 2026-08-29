@@ -32,13 +32,36 @@ import {
   createSupportCustomerDetailFixture,
   createSupportCustomersFixture,
 } from "../fixtures/supportFixtures.js";
+import {
+  ADMIN_PREVIEW_ROLES,
+  SUPPORT_PREVIEW_ROLES,
+} from "../concepts/staffNav.js";
 
 export type UiStudioSurface = "customer" | "admin" | "support";
 export type UiStudioState = "populated" | "empty" | "loading" | "error" | "gated";
 
+function previewCapabilities(
+  surface: UiStudioSurface,
+  state: UiStudioState,
+  role: string | undefined,
+): { role: string; capabilities: string[] } {
+  if (surface === "admin") {
+    const resolved = role && role in ADMIN_PREVIEW_ROLES ? role : "superadmin";
+    const profile = ADMIN_PREVIEW_ROLES[resolved as keyof typeof ADMIN_PREVIEW_ROLES];
+    return { role: resolved, capabilities: state === "gated" ? [] : [...profile.capabilities] };
+  }
+  if (surface === "support") {
+    const resolved = role && role in SUPPORT_PREVIEW_ROLES ? role : "support_manager";
+    const profile = SUPPORT_PREVIEW_ROLES[resolved as keyof typeof SUPPORT_PREVIEW_ROLES];
+    return { role: resolved, capabilities: state === "gated" ? [] : [...profile.capabilities] };
+  }
+  return { role: "superadmin", capabilities: [] };
+}
+
 export function createMockMoxStore(
   surface: UiStudioSurface,
   state: UiStudioState,
+  role?: string,
 ): MoxStore {
   const isLoading = state === "loading";
   const isError = state === "error";
@@ -73,6 +96,9 @@ export function createMockMoxStore(
 
   const supportCustomers = isEmpty ? [] : createSupportCustomersFixture();
   const supportCustomerDetail = createSupportCustomerDetailFixture();
+  const draftDefinition = createCustomerAgentsFixture()[0]!.definition;
+  const modelConnectionTemplate = createCustomerModelsFixture().connections[0]!;
+  const { role: previewRole, capabilities: previewCaps } = previewCapabilities(surface, state, role);
 
   const noopPromise = async () => {};
 
@@ -80,8 +106,8 @@ export function createMockMoxStore(
     listAgents: async () => (isEmpty ? [] : customerAgents),
     getAgent: async (id) => customerAgents.find((a) => a.agentId === id),
     updateModel: noopPromise,
-    createAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]!.definition }),
-    updateAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]!.definition }),
+    createAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]?.definition ?? draftDefinition }),
+    updateAgentDraft: async () => ({ agentId: "draft_1", slug: "draft", status: "draft", currentVersion: 1, definition: customerAgents[0]?.definition ?? draftDefinition }),
     publishAgent: async () => ({ agentId: "draft_1", revision: 2, status: "published" }),
     listAgentVersions: async () => [],
     diffAgentVersions: async () => ({ from: 1, to: 2, changes: ["Updated prompt"] }),
@@ -113,8 +139,8 @@ export function createMockMoxStore(
     testProviderConnection: async () => ({ ok: true }),
     listCliEngines: async () => [],
     listModelConnections: async () => (isEmpty ? [] : customerModels.connections),
-    connectModelConnection: async () => customerModels.connections[0]!,
-    rotateModelConnection: async () => customerModels.connections[0]!,
+    connectModelConnection: async () => customerModels.connections[0] ?? modelConnectionTemplate,
+    rotateModelConnection: async () => customerModels.connections[0] ?? modelConnectionTemplate,
     disconnectModelConnection: async () => ({ ok: true, providerId: "anthropic" }),
     listIntegrations: async () => customerIntegrations,
     connectIntegration: async () => ({ ok: true, integrationId: "github", connected: true }),
@@ -167,7 +193,7 @@ export function createMockMoxStore(
     getBackupsOverview: async () => (isEmpty ? { availability: false, retentionDays: 0, failedCount: 0, backups: [] } : customerBackups),
     triggerManualBackup: async () => ({ ok: true, backupId: "bak_manual", state: "pending" }),
     testBackupRestore: async () => ({ ok: true, message: "Backup validated successfully" }),
-    getTeamOverview: async () => (isEmpty ? { members: [customerTeam.members[0]!], invitations: [], totalUsed: 1, limit: 5 } : customerTeam),
+    getTeamOverview: async () => (isEmpty ? { members: customerTeam.members.slice(0, 1), invitations: [], totalUsed: 1, limit: 5 } : customerTeam),
     inviteTeamMember: async (email, role) => ({ invitationId: "inv_1", email, role, inviteToken: "tok_1", inviteUrl: "#", expiresAt: new Date().toISOString() }),
     revokeTeamInvitation: noopPromise,
     updateTeamMemberRole: noopPromise,
@@ -243,42 +269,24 @@ export function createMockMoxStore(
       return found ? createSupportCustomerDetailFixture(found.orgId) : supportCustomerDetail;
     },
     supportAddNote: noopPromise,
-    computerSnapshot: async () => undefined,
-    computerTakeover: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "#", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
-    computerRestart: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "#", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
-    listFiles: async () => [],
-    filePreview: async () => "",
+    computerSnapshot: async () =>
+      isEmpty
+        ? undefined
+        : {
+            sessionId: "cs_1",
+            state: "active",
+            humanControl: false,
+            url: "https://preview.invalid",
+            frameLabel: "frame_0",
+            capturedAt: new Date().toISOString(),
+          },
+    computerTakeover: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "https://preview.invalid", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
+    computerRestart: async () => ({ sessionId: "cs_1", state: "active", humanControl: true, url: "https://preview.invalid", frameLabel: "frame_0", capturedAt: new Date().toISOString() }),
+    listFiles: async () => (isEmpty ? [] : [{ path: "workspace/README.md", sizeBytes: 1024, updatedAt: new Date().toISOString() }]),
+    filePreview: async () => (isEmpty ? "" : "# Fixture workspace\nNo production secrets."),
     runTerminalCommand: async () => ({ output: "Command completed." }),
-    getLogs: async () => [],
+    getLogs: async () => (isEmpty ? [] : [{ at: new Date().toISOString(), level: "info" as const, line: "Agent started." }]),
   };
-
-  const adminCapabilities = isGated
-    ? ["admin.overview.read"]
-    : [
-        "admin.overview.read",
-        "admin.customers.read",
-        "admin.customers.write",
-        "admin.plans.read",
-        "admin.plans.write",
-        "admin.compute.read",
-        "admin.compute.write",
-        "admin.intelligence.read",
-        "admin.runtime.read",
-        "admin.operations.read",
-        "admin.staff.read",
-        "admin.staff.write",
-      ];
-
-  const supportCapabilities = isGated
-    ? []
-    : [
-        "support.customer.lookup",
-        "support.customer.read",
-        "support.customer.diagnostics",
-        "support.ticket.read",
-        "support.ticket.write",
-        "support.note.write",
-      ];
 
   return {
     api: mockApi,
@@ -294,9 +302,11 @@ export function createMockMoxStore(
       staffUserId: surface === "admin" ? "usr_mock_admin" : "usr_mock_support",
       email: surface === "admin" ? "admin@mox.internal" : "support@mox.internal",
       displayName: surface === "admin" ? "Admin Preview Operator" : "Support Preview Agent",
-      role: surface === "admin" ? "superadmin" : "tier2_support",
+      role: previewRole,
+      roles: surface === "support" ? [previewRole] : undefined,
+      staffRoles: surface === "admin" ? [previewRole] : undefined,
       surface: surface === "customer" ? "admin" : surface,
-      capabilities: surface === "admin" ? adminCapabilities : supportCapabilities,
+      capabilities: previewCaps,
     },
     staffSurface: surface === "customer" ? null : surface,
     staffReady: !isLoading && !isError,

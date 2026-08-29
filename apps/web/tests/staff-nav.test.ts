@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  ADMIN_PREVIEW_ROLES,
   ADMIN_TAB_CAPABILITY,
+  SUPPORT_PREVIEW_ROLES,
   SUPPORT_SECTION_CAPABILITY,
   SUPPORT_SECTION_LABEL,
   canManageStaff,
   canSupportLookup,
   canSupportNote,
   hasSurfaceCapability,
+  isAdminTabKey,
+  isSupportSectionKey,
   visibleAdminTabs,
   visibleSupportSections,
 } from "../src/concepts/staffNav.js";
@@ -79,5 +83,26 @@ describe("staff-surface capability gating (Prompt 03)", () => {
       "operations",
       "contracts",
     ]);
+  });
+
+  it("preview role profiles are the production capability vocabulary", () => {
+    expect([...ADMIN_PREVIEW_ROLES.billing_admin.capabilities]).toEqual([
+      "admin.read",
+      "admin.billing.write",
+      "admin.notifications.write",
+    ]);
+    expect([...ADMIN_PREVIEW_ROLES.ops_admin.capabilities]).toEqual([
+      "admin.read",
+      "admin.compute.write",
+      "admin.intelligence.write",
+      "admin.operations.write",
+      "admin.notifications.write",
+    ]);
+    expect([...SUPPORT_PREVIEW_ROLES.support_manager.capabilities]).toContain("support.escalate");
+    expect([...SUPPORT_PREVIEW_ROLES.support_agent.capabilities]).not.toContain("support.escalate");
+    expect(isAdminTabKey("compute")).toBe(true);
+    expect(isAdminTabKey("secret")).toBe(false);
+    expect(isSupportSectionKey("escalation")).toBe(true);
+    expect(isSupportSectionKey("staff")).toBe(false);
   });
 });
