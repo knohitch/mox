@@ -497,12 +497,31 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+function staffCellTone(value: string): "neutral" | "good" | "warn" | "bad" | "accent" {
+  const v = value.toLowerCase();
+  if (["active", "running", "healthy", "completed", "current", "enabled", "available", "provisioned", "online", "live"].some((x) => v.includes(x))) return "good";
+  if (["pending", "scheduled", "maintenance", "trial", "grace", "degraded", "busy", "working", "stopping"].some((x) => v.includes(x))) return "warn";
+  if (["failed", "error", "denied", "suspended", "canceled", "not_configured", "stopped", "offline", "unavailable"].some((x) => v.includes(x))) return "bad";
+  return "neutral";
+}
+
 function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: object[]; empty?: string }) {
   const asString = (value: unknown): string => {
     if (value === null || value === undefined) return "";
     if (value instanceof Date) return value.toISOString();
     if (typeof value === "object") return JSON.stringify(value);
     return String(value);
+  };
+  const renderCell = (column: string, val: unknown): ReactNode => {
+    const str = asString(val);
+    if (!str) return "";
+    const lower = str.toLowerCase();
+    const stateColumns = ["state", "status", "lifecycle", "nodehealth", "runtimehealth", "deliverystate", "deploymentstate", "health"];
+    const stateKeywords = ["running", "active", "healthy", "idle", "provisioned", "online", "live", "degraded", "pending", "working", "failed", "error", "stopped", "unavailable", "offline", "suspended", "enabled", "disabled"];
+    if (stateColumns.includes(column.toLowerCase()) || stateKeywords.includes(lower)) {
+      return <Badge tone={staffCellTone(str)}>{str}</Badge>;
+    }
+    return str;
   };
   if (rows.length === 0) return <EmptyState>{empty}</EmptyState>;
   return (
@@ -512,7 +531,7 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
         <tbody>
           {rows.map((row, index) => (
             <tr key={asString((row as Record<string, unknown>).id ?? (row as Record<string, unknown>).orgId ?? (row as Record<string, unknown>).subscriptionId ?? (row as Record<string, unknown>).agentId ?? index)}>
-              {columns.map((column) => <td key={column}>{asString((row as Record<string, unknown>)[column])}</td>)}
+              {columns.map((column) => <td key={column}>{renderCell(column, (row as Record<string, unknown>)[column])}</td>)}
             </tr>
           ))}
         </tbody>

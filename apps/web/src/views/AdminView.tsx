@@ -36,10 +36,22 @@ function money(minor: string | number | undefined, currency = "USD"): string {
 
 function toneFor(value: string): "neutral" | "good" | "warn" | "bad" | "accent" {
   const v = value.toLowerCase();
-  if (["active", "running", "healthy", "completed", "current", "enabled", "available"].some((x) => v.includes(x))) return "good";
-  if (["pending", "scheduled", "maintenance", "trial", "grace"].some((x) => v.includes(x))) return "warn";
-  if (["failed", "error", "denied", "suspended", "canceled", "not_configured"].some((x) => v.includes(x))) return "bad";
+  if (["active", "running", "healthy", "completed", "current", "enabled", "available", "provisioned", "online", "live"].some((x) => v.includes(x))) return "good";
+  if (["pending", "scheduled", "maintenance", "trial", "grace", "degraded", "busy", "working", "stopping"].some((x) => v.includes(x))) return "warn";
+  if (["failed", "error", "denied", "suspended", "canceled", "not_configured", "stopped", "offline", "unavailable"].some((x) => v.includes(x))) return "bad";
   return "neutral";
+}
+
+function renderAdminCell(column: string, val: unknown): ReactNode {
+  const str = asString(val);
+  if (!str) return "";
+  const lower = str.toLowerCase();
+  const stateColumns = ["state", "status", "lifecycle", "nodehealth", "runtimehealth", "deliverystate", "deploymentstate", "health"];
+  const stateKeywords = ["running", "active", "healthy", "idle", "provisioned", "online", "live", "degraded", "pending", "working", "failed", "error", "stopped", "unavailable", "offline", "suspended", "enabled", "disabled"];
+  if (stateColumns.includes(column.toLowerCase()) || stateKeywords.includes(lower)) {
+    return <Badge tone={toneFor(str)}>{str}</Badge>;
+  }
+  return str;
 }
 
 function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: Array<Record<string, unknown>>; empty?: string }) {
@@ -54,7 +66,7 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
           {rows.map((row, index) => (
             <tr key={asString(row.id ?? row.key ?? row.code ?? row.providerName ?? row.slug ?? index)}>
               {columns.map((column) => (
-                <td key={column}>{asString(row[column])}</td>
+                <td key={column}>{renderAdminCell(column, row[column])}</td>
               ))}
             </tr>
           ))}
