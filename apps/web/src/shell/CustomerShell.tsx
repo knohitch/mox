@@ -186,8 +186,20 @@ function ProfileMenu() {
   );
 }
 
-export function CustomerShell({ children, activePath }: { children: ReactNode; activePath: string }) {
-  const [collapsed, setCollapsed] = useState(false);
+export function CustomerShell({
+  children,
+  activePath,
+  collapsed: externalCollapsed,
+  onToggleCollapse: externalOnToggleCollapse,
+}: {
+  children: ReactNode;
+  activePath: string;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
+  const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { me } = useMox();
 
@@ -208,7 +220,7 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
         <SidebarContent
           active={activePath}
           collapsed={collapsed}
-          onToggleCollapse={() => setCollapsed((v) => !v)}
+          onToggleCollapse={toggleCollapse}
           onNavigate={() => undefined}
         />
       </aside>
@@ -218,7 +230,14 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
         <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} role="presentation" />
       ) : null}
       <aside className={`sidebar sidebar-drawer${drawerOpen ? " open" : ""}`} aria-label="Primary (mobile)" aria-hidden={!drawerOpen}>
-        {drawerOpen ? <SidebarContent active={activePath} collapsed={false} onNavigate={() => setDrawerOpen(false)} /> : null}
+        {drawerOpen ? (
+          <SidebarContent
+            active={activePath}
+            collapsed={false}
+            onToggleCollapse={toggleCollapse}
+            onNavigate={() => setDrawerOpen(false)}
+          />
+        ) : null}
       </aside>
 
       <div className="shell-body">
@@ -236,9 +255,9 @@ export function CustomerShell({ children, activePath }: { children: ReactNode; a
             className="sidebar-toggle-btn"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setCollapsed((v) => !v)}
+            onClick={toggleCollapse}
           >
-            <SidebarToggleIcon collapsed={collapsed} />
+            <SidebarToggleIcon collapsed={collapsed} size={18} />
           </button>
           <div className="topbar-left">
             {me ? <OrgSwitcher me={me} /> : <span className="muted">Workspace</span>}

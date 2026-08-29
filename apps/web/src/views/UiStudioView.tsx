@@ -5,6 +5,7 @@ import { createMockMoxStore, type UiStudioSurface, type UiStudioState } from "..
 import { MoxPreviewProvider } from "../api/store.js";
 import { CustomerShell } from "../shell/CustomerShell.js";
 import { StaffShell, SupportConsole } from "../App.js";
+import { SidebarToggleIcon } from "../ui/primitives.js";
 import { AdminView } from "./AdminView.js";
 import { AgentsView } from "./AgentsView.js";
 import {
@@ -48,6 +49,7 @@ export function UiStudioView() {
   const [surface, setSurface] = useState<UiStudioSurface>(getInitialSurface);
   const [customerPage, setCustomerPage] = useState<string>("/dashboard");
   const [state, setState] = useState<UiStudioState>("populated");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
 
   const handleSurfaceChange = (s: UiStudioSurface) => {
     setSurface(s);
@@ -75,20 +77,32 @@ export function UiStudioView() {
   const renderSurfaceContent = (): ReactNode => {
     if (surface === "customer") {
       return (
-        <CustomerShell activePath={activeCustomerPage.id}>
+        <CustomerShell
+          activePath={activeCustomerPage.id}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+        >
           {activeCustomerPage.component()}
         </CustomerShell>
       );
     }
     if (surface === "admin") {
       return (
-        <StaffShell surface="admin">
+        <StaffShell
+          surface="admin"
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+        >
           <AdminView />
         </StaffShell>
       );
     }
     return (
-      <StaffShell surface="support">
+      <StaffShell
+        surface="support"
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+      >
         <SupportConsole />
       </StaffShell>
     );
@@ -160,6 +174,21 @@ export function UiStudioView() {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Sidebar Toggle Control at the top toolbar */}
+          <div className="ui-studio-group" role="group" aria-label="Sidebar">
+            <span className="ui-studio-group-label">Sidebar</span>
+            <button
+              type="button"
+              className={`ui-studio-toggle-btn${sidebarCollapsed ? " active" : ""}`}
+              onClick={() => setSidebarCollapsed((v) => !v)}
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              <SidebarToggleIcon collapsed={sidebarCollapsed} size={15} />
+              <span>{sidebarCollapsed ? "Collapsed" : "Expanded"}</span>
+            </button>
           </div>
         </div>
       </header>

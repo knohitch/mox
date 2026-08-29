@@ -190,9 +190,21 @@ export function CustomerSurface() {
   );
 }
 
-export function StaffShell({ surface, children }: { surface: "admin" | "support"; children: ReactNode }) {
+export function StaffShell({
+  surface,
+  children,
+  collapsed: externalCollapsed,
+  onToggleCollapse: externalOnToggleCollapse,
+}: {
+  surface: "admin" | "support";
+  children: ReactNode;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
   const { staffSignOut, staffSession } = useMox();
-  const [collapsed, setCollapsed] = useState(false);
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
+  const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
@@ -213,9 +225,9 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
           className="sidebar-collapse-toggle-top"
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={() => setCollapsed((v) => !v)}
+          onClick={toggleCollapse}
         >
-          <SidebarToggleIcon collapsed={collapsed} />
+          <SidebarToggleIcon collapsed={collapsed} size={18} />
         </button>
       </div>
       <div className="section-label">{surface === "support" ? "Support console" : "Admin console"}</div>
@@ -262,9 +274,9 @@ export function StaffShell({ surface, children }: { surface: "admin" | "support"
             className="sidebar-toggle-btn"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={() => setCollapsed((v) => !v)}
+            onClick={toggleCollapse}
           >
-            <SidebarToggleIcon collapsed={collapsed} />
+            <SidebarToggleIcon collapsed={collapsed} size={18} />
           </button>
           <div className="topbar-left">
             <span className={`surface-badge surface-${surface}`}>
