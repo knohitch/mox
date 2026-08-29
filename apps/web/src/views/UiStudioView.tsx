@@ -103,7 +103,7 @@ export function UiStudioView() {
       <header className="ui-studio-bar">
         <div className="ui-studio-brand">
           <span className="ui-studio-glyph" aria-hidden>⬡</span>
-          <strong>Mox UI Studio</strong>
+          <strong>Mox</strong>
           <span className="ui-studio-pill dev">DEV ONLY</span>
           <span className="ui-studio-pill safe">ISOLATED FIXTURES</span>
           <a href="/login" className="ui-studio-auth-link" title="Jump to Auth Page">
