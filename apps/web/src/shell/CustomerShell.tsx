@@ -283,7 +283,6 @@ export function CustomerShell({
   const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
   const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
   const { me } = useMox();
   const { navigate } = useRoute();
 
@@ -347,71 +346,23 @@ export function CustomerShell({
             <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
 
-          {/* Left Breadcrumbs trail */}
           <div className="topbar-breadcrumb">
-            <Link to="/dashboard" className="breadcrumb-back" title="Back to Dashboard">
-              ←
-            </Link>
-            <div className="breadcrumb-pill">
-              <span className="breadcrumb-icon" aria-hidden>📁</span>
-              <span className="breadcrumb-text">{me?.orgDisplayName || "Workspace"}</span>
-            </div>
-            <span className="breadcrumb-sep" aria-hidden>&gt;</span>
-            <div className="breadcrumb-pill active">
-              <span className="breadcrumb-icon" aria-hidden>📄</span>
-              <span className="breadcrumb-text">{pageTitle}</span>
-            </div>
+            {me ? <OrgSwitcher me={me} /> : <span className="topbar-page-title">Workspace</span>}
+            <span className="breadcrumb-sep" aria-hidden>/</span>
+            <span className="topbar-page-title">{pageTitle}</span>
           </div>
 
-          {/* Center Search bar with keyboard shortcut */}
-          <div className="topbar-search">
-            <span className="search-icon" aria-hidden>🔍</span>
-            <input
-              type="text"
-              placeholder="Search agents, runs, servers..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              aria-label="Global search"
-            />
-            <span className="search-kbd" aria-hidden>⌘K</span>
-          </div>
-
-          {/* Right Action buttons */}
           <div className="topbar-actions">
-            <button
-              type="button"
-              className="topbar-action-btn"
-              onClick={() => navigate("/deployments")}
-              title="Manage deployments"
-            >
-              <span className="action-icon" aria-hidden>📋</span>
-              <span className="action-label">Manage</span>
-            </button>
-
-            <button
-              type="button"
-              className="topbar-action-btn"
-              onClick={() => {
-                if (typeof navigator !== "undefined" && navigator.clipboard) {
-                  void navigator.clipboard.writeText(window.location.href);
-                }
-              }}
-              title="Copy shareable link"
-            >
-              <span className="action-icon" aria-hidden>🔗</span>
-              <span className="action-label">Share</span>
-            </button>
-
             <NotificationBell />
-
             <button
               type="button"
               className="topbar-cta-btn"
               onClick={() => navigate("/agents")}
-              title="Create new autonomous agent"
+              title="Create a new agent"
             >
-              + Create agent
+              Create agent
             </button>
+            <ProfileMenu />
           </div>
         </header>
 

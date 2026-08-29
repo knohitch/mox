@@ -219,8 +219,32 @@ export function LoadingState({ label = "Loading…" }: { label?: string }) {
 }
 
 /** Honest empty state. */
-export function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="empty">{children}</div>;
+export function EmptyState({
+  title,
+  children,
+  action,
+}: {
+  title?: string;
+  children: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="empty" role="status">
+      {title ? <strong className="empty-title">{title}</strong> : null}
+      <div className="empty-body">{children}</div>
+      {action ? <div className="empty-action">{action}</div> : null}
+    </div>
+  );
+}
+
+/** Entitlement / role gate. Explains why a surface is unavailable. */
+export function GatedState({ title, children }: { title?: string; children: ReactNode }) {
+  return (
+    <div className="state state-gated" role="status">
+      <strong>{title ?? "This capability is not available"}</strong>
+      <p className="muted">{children}</p>
+    </div>
+  );
 }
 
 /** Honest error state (localized, does not destroy navigation). */

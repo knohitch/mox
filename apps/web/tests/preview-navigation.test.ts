@@ -146,6 +146,7 @@ describe("Studio product navigation stays on /__ui", () => {
       "staff",
     ]);
     expect(STUDIO_SUPPORT_PAGES.map((p) => p.id)).toEqual([
+      "overview",
       "lookup",
       "diagnostics",
       "notes",
@@ -214,6 +215,7 @@ describe("Studio capability profiles match production vocabulary", () => {
 
     const agent = createMockMoxStore("support", "populated", "support_agent");
     expect(visibleSupportSections(agent.staffSession?.capabilities ?? [])).toEqual([
+      "overview",
       "lookup",
       "diagnostics",
       "notes",

@@ -17,7 +17,7 @@ const SUPPORT_AGENT = ["support.read", "support.customer.lookup", "support.ticke
 describe("Phase 05: Admin Surface Parity (Navigation & Gating)", () => {
   it("contracts tab is strictly capability-gated to admin.billing.write", () => {
     expect(ADMIN_TAB_CAPABILITY.contracts).toBe("admin.billing.write");
-    expect(ADMIN_TAB_LABEL.contracts).toBe("Contracts");
+    expect(ADMIN_TAB_LABEL.contracts).toBe("Enterprise Contracts");
 
     // Superadmin has wildcard -> can see contracts
     expect(hasSurfaceCapability(SUPERADMIN, ADMIN_TAB_CAPABILITY.contracts)).toBe(true);

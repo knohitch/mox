@@ -9,14 +9,20 @@ import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./
 import { Badge, BrandLogo, Card, EmptyState, SidebarToggleIcon } from "./ui/primitives.js";
 import { UiStudioView } from "./views/UiStudioView.js";
 import {
+  ADMIN_NAV_GROUPS,
+  ADMIN_TAB_LABEL,
+  SUPPORT_NAV_GROUPS,
   SUPPORT_SECTION_LABEL,
   canSupportLookup,
   canSupportNote,
   isSupportSectionKey,
+  visibleAdminTabs,
   visibleSupportSections,
+  type AdminTabKey,
   type SupportSectionKey,
 } from "./concepts/staffNav.js";
-import { useNavSection } from "./router.js";
+import { StaffSectionProvider, useStaffSection } from "./shell/staffSection.js";
+import { humanizeLabel } from "./domain/labels.js";
 import type { SupportCustomer, SupportCustomerDetail } from "./api/types.js";
 import {
   BackupsView,
@@ -203,11 +209,53 @@ export function StaffShell({
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
+  return (
+    <StaffSectionProvider defaultSection={surface === "admin" ? "dashboard" : "overview"}>
+      <StaffShellFrame
+        surface={surface}
+        collapsed={externalCollapsed}
+        onToggleCollapse={externalOnToggleCollapse}
+      >
+        {children}
+      </StaffShellFrame>
+    </StaffSectionProvider>
+  );
+}
+
+function StaffShellFrame({
+  surface,
+  children,
+  collapsed: externalCollapsed,
+  onToggleCollapse: externalOnToggleCollapse,
+}: {
+  surface: "admin" | "support";
+  children: ReactNode;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
   const { staffSignOut, staffSession } = useMox();
+  const { section, setSection } = useStaffSection();
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
   const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const capabilities = staffSession?.capabilities ?? [];
+  const adminVisible = new Set(visibleAdminTabs(capabilities));
+  const supportVisible = new Set(visibleSupportSections(capabilities));
+  const groups =
+    surface === "admin"
+      ? ADMIN_NAV_GROUPS.map((group) => ({
+          label: group.label,
+          entries: group.entries
+            .filter((key) => adminVisible.has(key))
+            .map((key) => ({ id: key, label: ADMIN_TAB_LABEL[key as AdminTabKey] })),
+        })).filter((group) => group.entries.length > 0)
+      : SUPPORT_NAV_GROUPS.map((group) => ({
+          label: group.label,
+          entries: group.entries
+            .filter((key) => supportVisible.has(key))
+            .map((key) => ({ id: key, label: SUPPORT_SECTION_LABEL[key as SupportSectionKey] })),
+        })).filter((group) => group.entries.length > 0);
 
   useEffect(() => {
     if (!drawerOpen) return;
@@ -232,17 +280,41 @@ export function StaffShell({
           <SidebarToggleIcon collapsed={collapsed} size={18} />
         </button>
       </div>
-      <div className="section-label">{surface === "support" ? "Support console" : "Admin console"}</div>
-      {staffSession ? (
-        <div className="staff-identity muted">
-          <strong>{staffSession.displayName}</strong>
-          <small>{staffSession.email}</small>
-        </div>
-      ) : null}
-      <button type="button" className="nav-item signout" onClick={() => void staffSignOut()}>
-        <span className="nav-icon" aria-hidden>⎋</span>
-        <span className="nav-label">{collapsed ? "" : "Sign out"}</span>
-      </button>
+      <nav className="nav-scroll" aria-label={surface === "support" ? "Support navigation" : "Admin navigation"}>
+        {groups.map((group) => (
+          <div className="nav-group" key={group.label}>
+            <div className="section-label">
+              <span>{group.label}</span>
+            </div>
+            {group.entries.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                className={`nav-item ${section === entry.id ? "active" : ""}`}
+                onClick={() => {
+                  setSection?.(entry.id);
+                  setDrawerOpen(false);
+                }}
+                aria-current={section === entry.id ? "page" : undefined}
+              >
+                <span className="nav-label">{collapsed ? "" : entry.label}</span>
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+      <div className="sidebar-footer">
+        {staffSession && !collapsed ? (
+          <div className="staff-identity muted">
+            <strong>{staffSession.displayName}</strong>
+            <small>{staffSession.email}</small>
+          </div>
+        ) : null}
+        <button type="button" className="nav-item signout" onClick={() => void staffSignOut()}>
+          <span className="nav-icon" aria-hidden>⎋</span>
+          <span className="nav-label">{collapsed ? "" : "Sign out"}</span>
+        </button>
+      </div>
     </>
   );
 
@@ -310,20 +382,16 @@ export function SupportConsole() {
   const canLookup = canSupportLookup(capabilities);
   const canNote = canSupportNote(capabilities);
   const sections = visibleSupportSections(capabilities);
-  const { section: previewSection, setSection: setPreviewSection } = useNavSection();
+  const { section: staffSection, setSection: setStaffSection } = useStaffSection();
   const [query, setQuery] = useState("");
   const [customers, setCustomers] = useState<SupportCustomer[]>([]);
   const [selected, setSelected] = useState<SupportCustomerDetail | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [note, setNote] = useState("");
-  const [localSection, setLocalSection] = useState<SupportSectionKey>("lookup");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const section: SupportSectionKey = isSupportSectionKey(previewSection) ? previewSection : localSection;
-  const setSection = (next: SupportSectionKey) => {
-    if (setPreviewSection) setPreviewSection(next);
-    else setLocalSection(next);
-  };
+  const section: SupportSectionKey = isSupportSectionKey(staffSection) ? staffSection : "overview";
+  const setSection = (next: SupportSectionKey) => setStaffSection?.(next);
 
   useEffect(() => {
     if (sections.length > 0 && !sections.includes(section)) setSection(sections[0]!);
@@ -419,20 +487,13 @@ export function SupportConsole() {
 
   return (
     <div className="admin-console">
-      <header className="admin-console-head">
+      <header className="admin-page-head">
         <div>
           <div className="admin-kicker">Mox Support</div>
-          <h1>Support console</h1>
+          <h1>{SUPPORT_SECTION_LABEL[section]}</h1>
+          <p className="page-sub">Safe customer diagnostics. Credentials, costs, and staff controls stay hidden.</p>
         </div>
-        <span className="muted">Least-privilege customer lookup — support sees safe diagnostics only.</span>
       </header>
-      <nav className="admin-tabs" aria-label="Mox Support sections">
-        {sections.map((key) => (
-          <button key={key} type="button" className={section === key ? "active" : ""} onClick={() => setSection(key)}>
-            {SUPPORT_SECTION_LABEL[key]}
-          </button>
-        ))}
-      </nav>
       {!canLookup ? (
         <section className="admin-body">
           <div className="empty-state" role="status">
@@ -442,8 +503,17 @@ export function SupportConsole() {
         </section>
       ) : (
         <section className="admin-body">
+          {section === "overview" ? (
+            <div className="support-overview-grid" aria-label="Support attention">
+              <div className="needs-chip"><strong>{customers.length}</strong><span>Customers in view</span></div>
+              <div className="needs-chip"><strong>{customers.reduce((n, c) => n + c.diagnostics.subscriptionsRequiringAttention, 0)}</strong><span>Subscription alerts</span></div>
+              <div className="needs-chip"><strong>{customers.reduce((n, c) => n + c.diagnostics.agentsDegraded, 0)}</strong><span>Degraded agents</span></div>
+              <div className="needs-chip"><strong>{customers.reduce((n, c) => n + c.diagnostics.serversInError, 0)}</strong><span>Servers in error</span></div>
+              <div className="needs-chip"><strong>{customers.reduce((n, c) => n + c.diagnostics.recentNotificationFailures, 0)}</strong><span>Notification failures</span></div>
+            </div>
+          ) : null}
           <form className="admin-inline-form" onSubmit={(event) => void search(event)}>
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customers (name, slug, id)" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customers (name, slug, id)" aria-label="Search customers" />
             <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
           </form>
           {status ? <div className="admin-alert" role="alert">{status}</div> : null}
@@ -588,7 +658,7 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
   return (
     <div className="admin-table-wrap">
       <table className="admin-table">
-        <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+        <thead><tr>{columns.map((column) => <th key={column}>{humanizeLabel(column)}</th>)}</tr></thead>
         <tbody>
           {rows.map((row, index) => (
             <tr key={asString((row as Record<string, unknown>).id ?? (row as Record<string, unknown>).orgId ?? (row as Record<string, unknown>).subscriptionId ?? (row as Record<string, unknown>).agentId ?? index)}>

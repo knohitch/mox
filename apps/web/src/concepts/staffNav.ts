@@ -21,6 +21,7 @@ export type AdminTabKey =
   | "staff";
 
 export type SupportSectionKey =
+  | "overview"
   | "lookup"
   | "diagnostics"
   | "notes"
@@ -45,18 +46,19 @@ export const ADMIN_TAB_CAPABILITY: Record<AdminTabKey, string> = {
 export const ADMIN_TAB_LABEL: Record<AdminTabKey, string> = {
   dashboard: "Dashboard",
   customers: "Customers",
-  plans: "Plans",
+  plans: "Plans & Pricing",
   payments: "Payments",
   compute: "Compute",
-  intelligence: "Models",
+  intelligence: "Models / Intelligence",
   runtime: "Runtime",
   notifications: "Notifications",
   operations: "Operations",
-  contracts: "Contracts",
+  contracts: "Enterprise Contracts",
   staff: "Staff & Access",
 };
 
 export const SUPPORT_SECTION_CAPABILITY: Record<SupportSectionKey, string> = {
+  overview: "support.customer.lookup",
   lookup: "support.customer.lookup",
   diagnostics: "support.customer.lookup",
   notes: "support.ticket.write",
@@ -65,12 +67,26 @@ export const SUPPORT_SECTION_CAPABILITY: Record<SupportSectionKey, string> = {
 };
 
 export const SUPPORT_SECTION_LABEL: Record<SupportSectionKey, string> = {
-  lookup: "Lookup",
+  overview: "Overview",
+  lookup: "Customer Lookup",
   diagnostics: "Diagnostics",
   notes: "Notes",
   activity: "Activity",
-  escalation: "Escalation",
+  escalation: "Escalations",
 };
+
+export const ADMIN_NAV_GROUPS: readonly { label: string; entries: readonly AdminTabKey[] }[] = [
+  { label: "Overview", entries: ["dashboard"] },
+  { label: "Customers", entries: ["customers", "contracts"] },
+  { label: "Commercial", entries: ["plans", "payments"] },
+  { label: "Infrastructure", entries: ["compute", "intelligence", "runtime"] },
+  { label: "Operations", entries: ["notifications", "operations"] },
+  { label: "Platform", entries: ["staff"] },
+];
+
+export const SUPPORT_NAV_GROUPS: readonly { label: string; entries: readonly SupportSectionKey[] }[] = [
+  { label: "Support", entries: ["overview", "lookup", "diagnostics", "notes", "activity", "escalation"] },
+];
 
 export const ADMIN_TABS: readonly AdminTabKey[] = Object.keys(ADMIN_TAB_CAPABILITY) as AdminTabKey[];
 export const SUPPORT_SECTIONS: readonly SupportSectionKey[] = Object.keys(SUPPORT_SECTION_CAPABILITY) as SupportSectionKey[];

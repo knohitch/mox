@@ -19,7 +19,9 @@ import type {
 } from "../api/types.js";
 import { Badge, Card, EmptyState } from "../ui/primitives.js";
 import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, isAdminTabKey, visibleAdminTabs } from "../concepts/staffNav.js";
-import { useNavSection } from "../router.js";
+import { useStaffSection } from "../shell/staffSection.js";
+import { humanizeLabel } from "../domain/labels.js";
+
 
 type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "contracts" | "staff";
 
@@ -61,7 +63,7 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
     <div className="admin-table-wrap">
       <table className="admin-table">
         <thead>
-          <tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr>
+          <tr>{columns.map((column) => <th key={column}>{humanizeLabel(column)}</th>)}</tr>
         </thead>
         <tbody>
           {rows.map((row, index) => (
@@ -91,13 +93,9 @@ export function AdminView() {
   const { api, staffSession } = useMox();
   const capabilities = staffSession?.capabilities ?? [];
   const visibleTabs = visibleAdminTabs(capabilities);
-  const { section: previewSection, setSection: setPreviewSection } = useNavSection();
-  const [localTab, setLocalTab] = useState<AdminTab>("dashboard");
-  const tab: AdminTab = isAdminTabKey(previewSection) ? previewSection : localTab;
-  const setTab = (next: AdminTab) => {
-    if (setPreviewSection) setPreviewSection(next);
-    else setLocalTab(next);
-  };
+  const { section: staffSection, setSection: setStaffSection } = useStaffSection();
+  const tab: AdminTab = isAdminTabKey(staffSection) ? staffSection : "dashboard";
+  const setTab = (next: AdminTab) => setStaffSection?.(next);
   useEffect(() => {
     // Prompt 03: never leave a capability-gated tab active after the visible
     // set changes (e.g. a reduced-role staff member lands on a hidden tab).
@@ -187,22 +185,16 @@ export function AdminView() {
 
   return (
     <div className="admin-console">
-      <header className="admin-console-head">
+      <header className="admin-page-head">
         <div>
           <div className="admin-kicker">Mox Admin</div>
-          <h1>Platform control</h1>
+          <h1>{ADMIN_TAB_LABEL[tab]}</h1>
+          <p className="page-sub">Platform operations for the role on this session. Secrets stay off this surface.</p>
         </div>
         <button type="button" onClick={() => void refresh()} disabled={busy}>
           {busy ? "Refreshing" : "Refresh"}
         </button>
       </header>
-      <nav className="admin-tabs" aria-label="Mox Admin sections">
-        {visibleTabs.map((key) => (
-          <button key={key} type="button" className={tab === key ? "active" : ""} onClick={() => setTab(key)}>
-            {ADMIN_TAB_LABEL[key]}
-          </button>
-        ))}
-      </nav>
       {status ? <div className="admin-alert" role="alert">{status}</div> : null}
       {content}
     </div>
@@ -338,21 +330,25 @@ function confirmAnd(action: () => Promise<void>): Promise<void> {
 }
 
 function DashboardPanel({ overview }: { overview?: AdminOverview }) {
-  if (!overview) return <EmptyState>Loading Mox Admin dashboard.</EmptyState>;
+  if (!overview) return <EmptyState title="Loading dashboard">Fetching authorized platform metrics.</EmptyState>;
   const m = overview.metrics;
+  const healthyAgents = m.runtimeAgentHealth.total - m.runtimeAgentHealth.degraded;
   return (
     <>
+      <div className="needs-attention-grid" aria-label="Needs attention">
+        <div className="needs-chip"><strong>{m.paymentFailures}</strong><span>Payment failures</span></div>
+        <div className="needs-chip"><strong>{m.serverProvisioningFailures}</strong><span>Provisioning failures</span></div>
+        <div className="needs-chip"><strong>{m.runtimeAgentHealth.degraded}</strong><span>Degraded runtime agents</span></div>
+        <div className="needs-chip"><strong>{m.providerIncidents}</strong><span>Provider incidents</span></div>
+      </div>
       <div className="admin-metrics">
         <Metric label="Customers" value={m.customers} />
         <Metric label="Active subscriptions" value={m.activeSubscriptions} />
-        <Metric label="Payment failures" value={m.paymentFailures} />
         <Metric label="Active servers" value={m.activeServers} />
-        <Metric label="Provisioning failures" value={m.serverProvisioningFailures} />
-        <Metric label="Runtime health" value={`${m.runtimeAgentHealth.total - m.runtimeAgentHealth.degraded}/${m.runtimeAgentHealth.total}`} detail="agents healthy" />
-        <Metric label="Provider incidents" value={m.providerIncidents} />
-        <Metric label="Notifications" value={m.notifications} />
-        <Metric label="Abuse" value={m.abuse} />
-        <Metric label="Margin" value={money(Number(m.costMargin.revenueMinor) - Number(m.costMargin.costMinor), m.costMargin.currency)} />
+        <Metric label="Runtime health" value={`${healthyAgents}/${m.runtimeAgentHealth.total}`} detail="agents healthy" />
+        <Metric label="Notification jobs" value={m.notifications} />
+        <Metric label="Abuse reports" value={m.abuse} />
+        {m.costMargin ? <Metric label="Recorded revenue" value={money(Number(m.costMargin.revenueMinor), m.costMargin.currency)} /> : null}
       </div>
       <div className="grid grid-3">
         <Card title="Provider incidents">

@@ -60,7 +60,7 @@ export function isStudioPath(pathname: string): boolean {
 
 export function defaultPageFor(surface: StudioSurface): string {
   if (surface === "admin") return "dashboard";
-  if (surface === "support") return "lookup";
+  if (surface === "support") return "overview";
   return "/dashboard";
 }
 
@@ -132,7 +132,7 @@ export function applyStudioNavigation(current: StudioUrlState, to: string): Stud
   }
 
   if (path === "/support" || path.startsWith("/support/")) {
-    const rest = path === "/support" ? "lookup" : path.slice("/support/".length);
+    const rest = path === "/support" ? "overview" : path.slice("/support/".length);
     const page = isSupportSectionKey(rest) ? rest : defaultPageFor("support");
     return {
       ...current,

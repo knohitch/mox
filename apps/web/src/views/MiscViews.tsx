@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useMox } from "../api/store.js";
 import { useAgentRooms, useModelConnections, useEntitlements } from "../api/store.js";
 import { CANONICAL_ENTITLEMENT_KEYS } from "../api/entitlement.js";
-import { Avatar, AvatarStack, Badge, Button, DataTable, EmptyState, ErrorState, KpiCard, LoadingState, MiniBarChart, MiniSparkline, PageHeader, Panel, PriorityBadge, SteppedChart } from "../ui/primitives.js";
+import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, GatedState, KpiCard, LoadingState, PageHeader, Panel } from "../ui/primitives.js";
 import { Link } from "../router.js";
+import { buildAttentionItems, buildOpsSnapshot, isNewWorkspace } from "../domain/ops-dashboard.js";
 import { resolveWebConfig } from "../config.js";
 import type { AgentDeployment, AgentRoom } from "@mox/contracts";
 import type {
@@ -69,7 +70,6 @@ export function HomeView() {
   const [deployments, setDeployments] = useState<AgentDeployment[]>([]);
   const [usage, setUsage] = useState<Awaited<ReturnType<typeof mox.api.getUsage>>>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"board" | "spreadsheet" | "deployments" | "timeline">("board");
 
   useEffect(() => {
     void Promise.all([mox.api.listServers(), mox.api.listDeployments(), mox.api.getUsage()])
@@ -82,436 +82,123 @@ export function HomeView() {
   }, [mox.api]);
 
   const agents = mox.agents;
-  const working = agents.filter((a) => (a.runtimeStatus ?? "").toLowerCase().startsWith("busy")).length;
-  const runningServers = servers.filter((s) => s.state === "running").length;
-  const healthyDeps = deployments.filter((d) => d.state === "running").length;
-
-  const collaboratorAvatars = agents.slice(0, 4).map((a) => ({
-    name: a.definition.identity.displayName,
-    slug: a.agentId,
-  }));
-
-  // Partition agents / items into the 4 kanban categories matching the reference
-  const backlogAgents = agents.filter((a) => a.status === "draft" || (!a.runtimeStatus?.startsWith("busy") && a.status !== "active"));
-  const inProgressAgents = agents.filter((a) => (a.runtimeStatus ?? "").startsWith("busy") || a.status === "active");
-  const validationApprovals = mox.approvals;
-  const doneDeployments = deployments;
+  const snapshot = buildOpsSnapshot({
+    agents,
+    deployments,
+    servers,
+    approvals: mox.approvals,
+    commerciallyEntitled: mox.entitlements?.commerciallyEntitled,
+  });
+  const attention = buildAttentionItems({
+    snapshot,
+    failedDeploymentLabels: deployments.filter((d) => /fail|error/i.test(d.state ?? "")).map((d) => d.agentId ?? d.deploymentId),
+    degradedServerLabels: servers.filter((row) => /fail|error|degrad|stop|offline/i.test(row.state ?? "")).map((row) => row.displayName || row.serverId),
+  });
+  const fresh = isNewWorkspace(snapshot);
+  const workspace = mox.me?.orgDisplayName || "Workspace";
 
   return (
-    <div className="home-dashboard">
-      {/* Page Header matching reference */}
-      <div className="dashboard-page-head">
-        <div className="dashboard-page-head-text">
-          <h1>Tasks report</h1>
-          <p className="page-sub">
-            Stay on top of your tasks, monitor progress, and track status. Streamline your workflow and transform how you deliver results.
-          </p>
+    <div className="ops-page home-dashboard">
+      <header className="ops-hero">
+        <div>
+          <h1>{workspace}</h1>
+          <p className="page-sub">What is running, what needs you, and what to do next.</p>
         </div>
-        <AvatarStack items={collaboratorAvatars.length ? collaboratorAvatars : [{ name: mox.me?.displayName || "Mox" }]} />
-      </div>
+        <div className="ops-hero-actions">
+          <Link to="/agents"><Button kind="primary">Create agent</Button></Link>
+          <Link to="/servers"><Button>Provision server</Button></Link>
+          <Link to="/models"><Button>Connect model</Button></Link>
+        </div>
+      </header>
 
       {loadError ? (
-        <ErrorState message={`Some summary data is unavailable right now: ${loadError}`} onRetry={() => window.location.reload()} />
+        <ErrorState message={loadError} onRetry={() => window.location.reload()} />
       ) : null}
 
-      {/* Top Metrics & Charts Grid matching reference */}
-      <div className="dashboard-top-grid">
-        {/* Card 1: Task / Agent Status Breakdown */}
-        <div className="dash-card status-card">
-          <div className="dash-card-head">
-            <div className="dash-card-title">
-              <span className="dash-card-icon" aria-hidden>📦</span>
-              <span>Task status</span>
-            </div>
-            <div className="dash-card-tools" aria-hidden>
-              <button type="button" className="tool-btn" title="Edit">✏</button>
-              <button type="button" className="tool-btn" title="Expand">⛶</button>
-              <button type="button" className="tool-btn" title="More">⋯</button>
-            </div>
+      <section className="ops-kpis" aria-label="Operational summary">
+        <KpiCard label="Agents" value={snapshot.agentCount} hint={`${snapshot.runningAgents} active`} tone={snapshot.agentCount ? "good" : "neutral"} />
+        <KpiCard label="Deployments" value={snapshot.deploymentCount} hint={snapshot.failedDeployments ? `${snapshot.failedDeployments} failed` : "healthy"} tone={snapshot.failedDeployments ? "bad" : "neutral"} />
+        <KpiCard label="Servers" value={snapshot.serverCount} hint={`${snapshot.healthyServers} healthy`} tone={snapshot.degradedServers ? "warn" : "neutral"} />
+        <KpiCard label="Approvals" value={snapshot.openApprovals} hint="waiting on you" tone={snapshot.openApprovals ? "warn" : "neutral"} />
+      </section>
+
+      {fresh ? (
+        <Panel title="Get started" subtitle="This workspace has no agents or infrastructure yet.">
+          <div className="getting-started">
+            <Link to="/agents"><strong>Create an agent</strong><small>Define instructions, model, and tools.</small></Link>
+            <Link to="/models"><strong>Connect a model</strong><small>Bring your own provider key.</small></Link>
+            <Link to="/servers"><strong>Provision a server</strong><small>Give agents a runtime target.</small></Link>
           </div>
-          <div className="status-kpi-row">
-            <div className="status-kpi-item">
-              <span className="status-kpi-val">{agents.length || 24}</span>
-              <span className="status-kpi-lbl">
-                Backlog <span className="indicator-box box-blue" aria-hidden />
-              </span>
-            </div>
-            <div className="status-kpi-item">
-              <span className="status-kpi-val">{working || 4}</span>
-              <span className="status-kpi-lbl">
-                In progress <span className="indicator-symbol" aria-hidden>⚡</span>
-              </span>
-            </div>
-            <div className="status-kpi-item">
-              <span className="status-kpi-val">{validationApprovals.length || 7}</span>
-              <span className="status-kpi-lbl">
-                Validation <span className="indicator-symbol" aria-hidden>✨</span>
-              </span>
-            </div>
-          </div>
-          <div className="gradient-timeline-strip-wrap">
-            <div className="gradient-timeline-strip" />
-            <div className="gradient-timeline-labels">
-              <span>1d</span>
-              <span>7d</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Card 2: Dual Compact Metrics (Comments + Commits/Events) */}
-        <div className="dash-mini-column">
-          <div className="dash-card mini-card">
-            <div className="dash-card-head">
-              <div className="dash-card-title">
-                <span className="dash-card-icon" aria-hidden>💬</span>
-                <span>Comments</span>
-              </div>
-              <div className="dash-card-tools" aria-hidden>
-                <button type="button" className="tool-btn" title="Edit">✏</button>
-                <button type="button" className="tool-btn" title="Expand">⛶</button>
-                <button type="button" className="tool-btn" title="More">⋯</button>
-              </div>
-            </div>
-            <div className="mini-card-body">
-              <div className="mini-stat">
-                <span className="mini-val">109</span>
-                <span className="mini-trend trend-down">
-                  <span aria-hidden>↙</span> 10.2% (7d)
-                </span>
-              </div>
-              <MiniSparkline trend="down" />
-            </div>
-          </div>
-
-          <div className="dash-card mini-card">
-            <div className="dash-card-head">
-              <div className="dash-card-title">
-                <span className="dash-card-icon" aria-hidden>⬆</span>
-                <span>Commits</span>
-              </div>
-              <div className="dash-card-tools" aria-hidden>
-                <button type="button" className="tool-btn" title="Edit">✏</button>
-                <button type="button" className="tool-btn" title="Expand">⛶</button>
-                <button type="button" className="tool-btn" title="More">⋯</button>
-              </div>
-            </div>
-            <div className="mini-card-body">
-              <div className="mini-stat">
-                <span className="mini-val">{runningServers > 0 ? runningServers * 9 : 27}</span>
-                <span className="mini-trend trend-up">
-                  <span aria-hidden>↖</span> 2.9% (7d)
-                </span>
-              </div>
-              <MiniBarChart />
-            </div>
-          </div>
-        </div>
-
-        {/* Card 3: Burndown / Runtime Telemetry Chart */}
-        <div className="dash-card burndown-card">
-          <div className="dash-card-head">
-            <div className="dash-card-title">
-              <span className="dash-card-icon" aria-hidden>📉</span>
-              <span>Burndown chart (estimate points)</span>
-            </div>
-            <div className="dash-card-tools" aria-hidden>
-              <button type="button" className="tool-btn" title="Edit">✏</button>
-              <button type="button" className="tool-btn" title="Expand">⛶</button>
-              <button type="button" className="tool-btn" title="More">⋯</button>
-            </div>
-          </div>
-          <SteppedChart />
-        </div>
-      </div>
-
-      {/* Middle View Switcher & Action Controls */}
-      <div className="dashboard-control-row">
-        <div className="view-switcher-tabs" role="tablist" aria-label="Views">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "spreadsheet"}
-            className={`tab-btn ${activeTab === "spreadsheet" ? "active" : ""}`}
-            onClick={() => setActiveTab("spreadsheet")}
-          >
-            Spreadsheet
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "board"}
-            className={`tab-btn ${activeTab === "board" ? "active" : ""}`}
-            onClick={() => setActiveTab("board")}
-          >
-            Board
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "deployments"}
-            className={`tab-btn ${activeTab === "deployments" ? "active" : ""}`}
-            onClick={() => setActiveTab("deployments")}
-          >
-            Deployments
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "timeline"}
-            className={`tab-btn ${activeTab === "timeline" ? "active" : ""}`}
-            onClick={() => setActiveTab("timeline")}
-          >
-            Timeline
-          </button>
-        </div>
-
-        <div className="dashboard-control-actions">
-          <button type="button" className="subtle-action-btn">
-            <span aria-hidden>⊞</span> Widgets
-          </button>
-          <button type="button" className="subtle-action-btn">
-            <span aria-hidden>⚙</span> Filter
-          </button>
-        </div>
-      </div>
-
-      {/* Lower Section: Kanban Board View or Tabbed Views */}
-      {activeTab === "board" ? (
-        <div className="board-container">
-          {/* Column 1: Backlog */}
-          <div className="board-column">
-            <div className="board-col-head">
-              <div className="board-col-title">
-                <span className="col-icon" aria-hidden>📁</span>
-                <span className="col-label">Backlog</span>
-                <span className="col-count">{backlogAgents.length || 24}</span>
-              </div>
-              <button type="button" className="col-menu-btn" title="Options">⋯</button>
-            </div>
-            <div className="board-col-body">
-              <div className="task-card">
-                <div className="task-card-top">
-                  <span className="task-key">🔗 MDS-39</span>
-                  <PriorityBadge priority="urgent" />
-                </div>
-                <div className="task-title">New microdose website</div>
-                <div className="task-subtext">🌱 New Homepage</div>
-                <div className="task-due">
-                  <span aria-hidden>📅</span> Due to: July 29, &apos;24
-                </div>
-                <div className="task-footer">
-                  <AvatarStack items={[{ name: "Mox" }]} max={2} />
-                  <div className="task-meta-right">
-                    <span className="task-comments">💬 13</span>
-                    <span className="task-date">May 30, 2024</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="task-card">
-                <div className="task-card-top">
-                  <span className="task-key">🔗 MDS-56</span>
-                  <PriorityBadge priority="normal" />
-                </div>
-                <div className="task-title">Input Styleguide</div>
-                <div className="task-subtext">🪄 Contact</div>
-                <div className="task-due">
-                  <span aria-hidden>📅</span> Due to: June 2, &apos;24
-                </div>
-                <div className="task-footer">
-                  <AvatarStack items={[{ name: "Acme" }]} max={2} />
-                  <div className="task-meta-right">
-                    <span className="task-date">May 24, 2024</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Column 2: In progress */}
-          <div className="board-column">
-            <div className="board-col-head">
-              <div className="board-col-title">
-                <span className="col-icon" aria-hidden>⚡</span>
-                <span className="col-label">In progress</span>
-                <span className="col-count">{inProgressAgents.length || 4}</span>
-              </div>
-              <button type="button" className="col-menu-btn" title="Options">⋯</button>
-            </div>
-            <div className="board-col-body">
-              <div className="task-card task-card-elevated">
-                <div className="task-card-top">
-                  <span className="task-key">🔗 MDS-2</span>
-                  <PriorityBadge priority="low" />
-                </div>
-                <div className="task-title">Sales deck</div>
-                <div className="task-subtext">Marketing</div>
-                <div className="task-due">
-                  <span aria-hidden>📅</span> Due to: Sep 19, &apos;24
-                </div>
-                <div className="task-footer">
-                  <AvatarStack items={[{ name: "Sales" }, { name: "Agent" }]} max={2} />
-                  <div className="task-meta-right">
-                    <span className="task-comments">💬 7</span>
-                    <span className="task-date">May 31, 2024</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Column 3: Validation / Human Approvals */}
-          <div className="board-column">
-            <div className="board-col-head">
-              <div className="board-col-title">
-                <span className="col-icon" aria-hidden>✨</span>
-                <span className="col-label">Validation</span>
-                <span className="col-count">{validationApprovals.length || 7}</span>
-              </div>
-              <button type="button" className="col-menu-btn" title="Options">⋯</button>
-            </div>
-            <div className="board-col-body">
-              {validationApprovals.length > 0 ? (
-                validationApprovals.map((ap) => (
-                  <div key={ap.approvalId} className="task-card task-card-approval">
-                    <div className="task-card-top">
-                      <span className="task-key">🔗 GAT-{ap.approvalId.slice(-4)}</span>
-                      <PriorityBadge priority="urgent" />
-                    </div>
-                    <div className="task-title">{ap.summary || "Human Gate Approval"}</div>
-                    <div className="task-subtext">Execution Permission Gate</div>
-                    <div className="task-due">
-                      <span aria-hidden>📅</span> Action Required Now
-                    </div>
-                    <div className="task-approval-actions">
-                      <Button kind="primary" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "approved")}>
-                        Approve
-                      </Button>
-                      <Button kind="danger" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "denied")}>
-                        Deny
-                      </Button>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <>
-                  <div className="task-card">
-                    <div className="task-card-top">
-                      <span className="task-key">🔗 MDS-1</span>
-                      <PriorityBadge priority="urgent" />
-                    </div>
-                    <div className="task-title">Case studies</div>
-                    <div className="task-subtext">FinTech work</div>
-                    <div className="task-due">
-                      <span aria-hidden>📅</span> Due to: Sep 21, &apos;24
-                    </div>
-                    <div className="task-footer">
-                      <AvatarStack items={[{ name: "Fin" }]} max={2} />
-                      <div className="task-meta-right">
-                        <span className="task-comments">💬 1</span>
-                        <span className="task-date">Apr 22, 2024</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="task-card">
-                    <div className="task-card-top">
-                      <span className="task-key">🔗 MDS-12</span>
-                      <PriorityBadge priority="normal" />
-                    </div>
-                    <div className="task-title">Demo reel</div>
-                    <div className="task-subtext">🪄 Animation 2nd</div>
-                    <div className="task-due">
-                      <span aria-hidden>📅</span> Due to: Aug 2, &apos;24
-                    </div>
-                    <div className="task-footer">
-                      <AvatarStack items={[{ name: "Reel" }]} max={2} />
-                      <div className="task-meta-right">
-                        <span className="task-comments">💬 2</span>
-                        <span className="task-date">Apr 27, 2024</span>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Column 4: Done / Active Deployments */}
-          <div className="board-column">
-            <div className="board-col-head">
-              <div className="board-col-title">
-                <span className="col-icon" aria-hidden>✔</span>
-                <span className="col-label">Done</span>
-                <span className="col-count">{doneDeployments.length || 13}</span>
-              </div>
-              <button type="button" className="col-menu-btn" title="Options">⋯</button>
-            </div>
-            <div className="board-col-body">
-              <div className="task-card">
-                <div className="task-card-top">
-                  <span className="task-key">🔗 MDS-43</span>
-                  <PriorityBadge priority="low" />
-                </div>
-                <div className="task-title">Spline animated logo</div>
-                <div className="task-subtext">🪄 Logo</div>
-                <div className="task-due">
-                  <span aria-hidden>📅</span> Due to: July 13, &apos;24
-                </div>
-                <div className="task-footer">
-                  <AvatarStack items={[{ name: "Logo" }, { name: "Spline" }]} max={2} />
-                  <div className="task-meta-right">
-                    <span className="task-comments">💬 13</span>
-                    <span className="task-date">July 29, 2024</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : activeTab === "deployments" ? (
-        <Panel title="Deployments" subtitle="Recent deployment activity across dedicated VPS and sandboxes">
-          {deployments.length === 0 ? (
-            <EmptyState>No deployments yet.</EmptyState>
-          ) : (
-            <DataTable
-              head={[
-                { key: "agentId", label: "Agent", render: (r) => agentName(mox.agents, r.agentId) },
-                { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
-                { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-              ]}
-              rows={deployments.slice(0, 10)}
-            />
-          )}
-        </Panel>
-      ) : activeTab === "spreadsheet" ? (
-        <Panel title="Spreadsheet Overview" subtitle="Operational metrics & roster summary">
-          <DataTable
-            head={[
-              { key: "agentId", label: "Agent ID", render: (r) => r.agentId },
-              { key: "displayName", label: "Name", render: (r) => r.definition.identity.displayName },
-              { key: "model", label: "Model", render: (r) => r.definition.model.modelId },
-              { key: "status", label: "Status", render: (r) => <Badge tone={statusTone(r.runtimeStatus)}>{humanState(r.runtimeStatus ?? r.status)}</Badge> },
-            ]}
-            rows={agents}
-          />
         </Panel>
       ) : (
-        <Panel title="Usage & Timeline" subtitle="This billing period consumption">
+        <div className="ops-split">
+          <Panel title="Needs attention" subtitle="Only real blockers from this workspace.">
+            {attention.length === 0 ? (
+              <EmptyState title="Nothing urgent">No failed deployments, degraded servers, or pending approvals.</EmptyState>
+            ) : (
+              <div className="attention-list">
+                {attention.map((item) => (
+                  <Link key={item.id} to={item.href} className="attention-item">
+                    <div>
+                      <strong>{item.title}</strong>
+                      <span>{item.detail}</span>
+                    </div>
+                    <Badge tone={item.tone}>{item.tone === "bad" ? "Action" : "Review"}</Badge>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </Panel>
+          <Panel title="Active work" subtitle="Agents currently on the roster.">
+            {agents.length === 0 ? (
+              <EmptyState title="No agents" action={<Link to="/agents"><Button kind="primary" size="sm">Create agent</Button></Link>}>
+                Create an agent to start autonomous work.
+              </EmptyState>
+            ) : (
+              <div className="work-list">
+                {agents.slice(0, 6).map((agent) => (
+                  <div className="work-row" key={agent.agentId}>
+                    <Avatar slug={agent.agentId} name={agent.definition.identity.displayName} size={32} />
+                    <div className="meta">
+                      <div className="name">{agent.definition.identity.displayName}</div>
+                      <div className="muted">{agent.modelBadge || agent.definition.model.modelId}</div>
+                    </div>
+                    <Badge tone={statusTone(agent.runtimeStatus || agent.deploymentState)}>{humanState(agent.runtimeStatus || agent.deploymentState || agent.status)}</Badge>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Panel>
+        </div>
+      )}
+
+      <div className="ops-split">
+        <Panel title="Recent deployments" actions={<Link to="/deployments"><Button size="sm">Open</Button></Link>}>
+          <DataTable
+            head={[
+              { key: "agentId", label: "Agent", render: (r) => agentName(agents, r.agentId) },
+              { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+              { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
+            ]}
+            rows={deployments.slice(0, 8)}
+            empty="No deployments yet."
+          />
+        </Panel>
+        <Panel title="Usage this period" actions={<Link to="/usage"><Button size="sm">Open</Button></Link>}>
           {usage.length === 0 ? (
-            <EmptyState>No usage recorded this period.</EmptyState>
+            <EmptyState title="No usage yet">Totals appear here once agents run. Charts are omitted until time-series data exists.</EmptyState>
           ) : (
             <DataTable
               head={[
                 { key: "metric", label: "Metric", render: (r) => humanState(r.metric) },
-                { key: "quantity", label: "Quantity", render: (r) => r.quantity.toLocaleString() },
+                { key: "quantity", label: "Used", render: (r) => r.quantity.toLocaleString() },
                 { key: "unit", label: "Unit" },
               ]}
               rows={usage}
             />
           )}
         </Panel>
-      )}
+      </div>
     </div>
   );
 }
@@ -596,7 +283,13 @@ export function RoomsView() {
     }
   };
 
-  if (!roomsAllowed) return <EmptyState>Agent Rooms are not enabled for this workspace.</EmptyState>;
+  if (!roomsAllowed) {
+    return (
+      <GatedState title="Agent Rooms require a plan entitlement">
+        This workspace does not include agent rooms. Upgrade or enable the agent_rooms entitlement to create shared rooms.
+      </GatedState>
+    );
+  }
 
   return (
     <div>
@@ -2279,11 +1972,30 @@ export function SettingsView() {
     }
   };
 
+  const [settingsTab, setSettingsTab] = useState<"profile" | "workspace" | "team" | "notifications" | "developer">(() => {
+    if (typeof window !== "undefined" && window.location.hash === "#knowledge") return "developer";
+    return "profile";
+  });
+
   return (
-    <div>
-      <PageHeader title="Settings" subtitle="Workspace capabilities, account details and developer access." />
+    <div className="settings-page">
+      <PageHeader title="Settings" subtitle="Profile, workspace, team, notifications, and developer access." />
+      <nav className="settings-tabs" aria-label="Settings sections">
+        {([
+          ["profile", "Profile"],
+          ["workspace", "Workspace"],
+          ["team", "Team"],
+          ["notifications", "Notifications"],
+          ["developer", "Developer"],
+        ] as const).map(([id, label]) => (
+          <button key={id} type="button" className={settingsTab === id ? "active" : ""} onClick={() => setSettingsTab(id)}>
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div hidden={settingsTab !== "profile"}>
       <div className="settings-grid">
-        <Panel title="Workspace" subtitle="Identity and residency">
+        <Panel title="Profile" subtitle="Signed-in identity">
           {mox.me ? (
             <>
               <p><strong>Organization:</strong> {mox.me.orgDisplayName}</p>
@@ -2294,7 +2006,10 @@ export function SettingsView() {
             <p className="muted">Workspace identity available after sign-in.</p>
           )}
         </Panel>
-        <Panel title="Capabilities" subtitle={ents?.commerciallyEntitled ? "Entitlements for this workspace" : "Commercial access is currently denied"}>
+      </div>
+      </div>
+      <div hidden={settingsTab !== "workspace"}>
+        <Panel title="Workspace capabilities" subtitle={ents?.commerciallyEntitled ? "Entitlements for this workspace" : "Commercial access is currently denied"}>
           {!ents?.commerciallyEntitled ? (
             <EmptyState>
               {ents?.commerciallyEntitled === false
@@ -2313,6 +2028,7 @@ export function SettingsView() {
         </Panel>
       </div>
 
+      <div hidden={settingsTab !== "team"}>
       <Panel
         id="team"
         title="Team Members & Collaboration"
@@ -2436,7 +2152,9 @@ export function SettingsView() {
           />
         )}
       </Panel>
+      </div>
 
+      <div hidden={settingsTab !== "notifications"}>
       <Panel
         id="notifications"
         title="Notification Preferences"
@@ -2524,7 +2242,9 @@ export function SettingsView() {
           />
         )}
       </Panel>
- 
+      </div>
+
+      <div hidden={settingsTab !== "developer"}>
       <Panel
         id="knowledge"
         title="Knowledge Sources & Storage"
@@ -2637,6 +2357,7 @@ export function SettingsView() {
           </pre>
         </div>
       </Panel>
+      </div>
     </div>
   );
 }

@@ -197,6 +197,7 @@ describe("Canonical Customer Routing & Surface Isolation", () => {
     expect(canSupportNote(["support.ticket.write"])).toBe(true);
 
     const readOnlySections = visibleSupportSections(["support.customer.lookup"]);
+    expect(readOnlySections).toContain("overview");
     expect(readOnlySections).toContain("lookup");
     expect(readOnlySections).toContain("diagnostics");
     expect(readOnlySections).toContain("activity");

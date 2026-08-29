@@ -49,8 +49,8 @@ describe("staff-surface capability gating (Prompt 03)", () => {
     expect(SUPPORT_SECTION_CAPABILITY.escalation).toBe("support.escalate");
     expect(SUPPORT_SECTION_LABEL.diagnostics).toBe("Diagnostics");
 
-    expect(visibleSupportSections(SUPPORT_AGENT)).toEqual(["lookup", "diagnostics", "notes", "activity"]);
-    expect(visibleSupportSections(SUPPORT_MANAGER)).toEqual(["lookup", "diagnostics", "notes", "activity", "escalation"]);
+    expect(visibleSupportSections(SUPPORT_AGENT)).toEqual(["overview", "lookup", "diagnostics", "notes", "activity"]);
+    expect(visibleSupportSections(SUPPORT_MANAGER)).toEqual(["overview", "lookup", "diagnostics", "notes", "activity", "escalation"]);
     expect(visibleSupportSections(PLATFORM_ADMIN)).toEqual([]);
   });
 
