@@ -278,3 +278,131 @@ function asText(value: unknown): string {
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
+
+/** Overlapping avatar stack matching reference header */
+export function AvatarStack({
+  items,
+  max = 4,
+}: {
+  items: Array<{ name: string; slug?: string }>;
+  max?: number;
+}) {
+  const visible = items.slice(0, max);
+  const remainder = items.length - max;
+  return (
+    <div className="avatar-stack" aria-label="Collaborators">
+      {visible.map((item, idx) => (
+        <span
+          key={item.slug ?? item.name + idx}
+          className="avatar-stack-item"
+          title={item.name}
+          style={{ zIndex: max - idx }}
+        >
+          <span className="avatar-mini">
+            {item.name.slice(0, 1).toUpperCase()}
+          </span>
+        </span>
+      ))}
+      {remainder > 0 ? (
+        <span className="avatar-stack-more" title={`${remainder} more`}>
+          +{remainder}
+        </span>
+      ) : (
+        <span className="avatar-stack-add" title="Invite / Add">
+          +
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Priority tag matching reference board cards (Urgent, Normal, Low) */
+export function PriorityBadge({
+  priority,
+}: {
+  priority: "urgent" | "normal" | "low" | string;
+}) {
+  const p = priority.toLowerCase();
+  const label = p === "urgent" ? "Urgent" : p === "low" ? "Low" : "Normal";
+  return (
+    <span className={`priority-badge priority-${p}`}>
+      <span className="priority-flag" aria-hidden>⚑</span>
+      <span>{label}</span>
+    </span>
+  );
+}
+
+/** Miniature sparkline scatter / curve SVG */
+export function MiniSparkline({
+  trend = "down",
+}: {
+  trend?: "up" | "down";
+}) {
+  return (
+    <svg width="68" height="24" viewBox="0 0 68 24" fill="none" className="mini-sparkline" aria-hidden="true">
+      <path
+        d="M2 18 C 12 14, 18 19, 28 11 C 38 4, 48 14, 58 6 L 66 8"
+        stroke={trend === "up" ? "#3ecf8e" : "#818cf8"}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+      <circle cx="28" cy="11" r="2" fill="#818cf8" />
+      <circle cx="46" cy="13" r="2.2" fill="#a78bfa" />
+      <circle cx="58" cy="6" r="2.5" fill="#c084fc" />
+      <circle cx="66" cy="8" r="2.2" fill="#f43f5e" />
+    </svg>
+  );
+}
+
+/** Miniature bar chart with glowing bars matching reference */
+export function MiniBarChart() {
+  return (
+    <svg width="64" height="22" viewBox="0 0 64 22" fill="none" className="mini-bar-chart" aria-hidden="true">
+      <rect x="4" y="14" width="4" height="8" rx="1.5" fill="#333742" />
+      <rect x="12" y="11" width="4" height="11" rx="1.5" fill="#333742" />
+      <rect x="20" y="8" width="4" height="14" rx="1.5" fill="#474c5a" />
+      <rect x="28" y="12" width="4" height="10" rx="1.5" fill="#333742" />
+      <rect x="36" y="6" width="4" height="16" rx="1.5" fill="#f97316" />
+      <rect x="44" y="2" width="4" height="20" rx="1.5" fill="#fb923c" />
+      <rect x="52" y="9" width="4" height="13" rx="1.5" fill="#fdba74" />
+    </svg>
+  );
+}
+
+/** Stepped burndown / telemetry chart matching reference right card */
+export function SteppedChart() {
+  return (
+    <div className="stepped-chart-wrap">
+      <div className="stepped-chart-y">
+        <span>120</span>
+        <span>90</span>
+        <span>60</span>
+        <span>30</span>
+      </div>
+      <div className="stepped-chart-canvas">
+        <svg viewBox="0 0 380 120" preserveAspectRatio="none" className="stepped-chart-svg" aria-hidden="true">
+          <line x1="0" y1="15" x2="380" y2="15" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="45" x2="380" y2="45" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="75" x2="380" y2="75" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="105" x2="380" y2="105" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+
+          <path
+            d="M 10 24 L 60 24 L 60 30 L 120 30 L 120 42 L 180 42 L 180 50 L 260 50 L 260 62 L 320 62 L 320 72 L 370 72"
+            fill="none"
+            stroke="#ea580c"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+
+          <path
+            d="M 10 18 L 45 18 L 45 28 L 90 28 L 90 32 L 150 32 L 150 48 L 210 48 L 210 65 L 230 65 L 230 80 L 260 80 L 260 98 L 290 98 L 290 110 L 370 110"
+            fill="none"
+            stroke="#6366f1"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+    </div>
+  );
+}

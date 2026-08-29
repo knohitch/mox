@@ -14,15 +14,20 @@ import { SidebarToggleIcon } from "../ui/primitives.js";
  */
 
 function Brand({ showText = true }: { showText?: boolean }) {
+  const { me } = useMox();
   return (
-    <div className="brand" aria-hidden>
+    <div className="brand" aria-label="Mox">
+      <div className="brand-logo-pill" aria-hidden>
+        <span className="brand-logo-glyph">M</span>
+      </div>
       {showText ? (
-        <>
-          M<span>ox</span>
-        </>
-      ) : (
-        <span>M</span>
-      )}
+        <div className="brand-text-col">
+          <span className="brand-title">Mox <em>cloud</em></span>
+          <span className="brand-subtitle">
+            {me?.orgDisplayName ? `${me.orgDisplayName.toLowerCase().replace(/[^a-z0-9]/g, "")}.studio` : "mox.studio"}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -38,6 +43,9 @@ function SidebarContent({
   onToggleCollapse?: () => void;
   onNavigate: () => void;
 }) {
+  const { me, agents } = useMox();
+  const { navigate } = useRoute();
+
   return (
     <>
       <div className="sidebar-head">
@@ -50,29 +58,86 @@ function SidebarContent({
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             onClick={onToggleCollapse}
           >
-            <SidebarToggleIcon collapsed={collapsed} />
+            <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
         ) : null}
       </div>
       <nav className="nav-scroll" aria-label="Main navigation">
         {CUSTOMER_NAV.map((group) => (
           <div className="nav-group" key={group.label}>
-            <div className="section-label">{group.label}</div>
-            {group.entries.map((entry) => (
-              <Link
-                key={entry.to}
-                to={entry.to}
-                className={`nav-item ${active === entry.to ? "active" : ""}`}
-                onClick={onNavigate}
-                aria-current={active === entry.to ? "page" : undefined}
-              >
-                {entry.icon ? <span className="nav-icon" aria-hidden>{entry.icon}</span> : null}
-                <span className="nav-label">{collapsed ? "" : entry.label}</span>
-              </Link>
-            ))}
+            <div className="section-label">
+              <span>{group.label}</span>
+              <span className="section-chevron" aria-hidden>▾</span>
+            </div>
+            {group.entries.map((entry) => {
+              const isAgents = entry.to === "/agents";
+              const isRooms = entry.to === "/rooms";
+              const isDeployments = entry.to === "/deployments";
+              const badgeCount = isAgents ? agents.length : isRooms ? 2 : isDeployments ? 4 : undefined;
+
+              return (
+                <Link
+                  key={entry.to}
+                  to={entry.to}
+                  className={`nav-item ${active === entry.to ? "active" : ""}`}
+                  onClick={onNavigate}
+                  aria-current={active === entry.to ? "page" : undefined}
+                >
+                  {entry.icon ? <span className="nav-icon" aria-hidden>{entry.icon}</span> : null}
+                  <span className="nav-label">{collapsed ? "" : entry.label}</span>
+                  {!collapsed && badgeCount !== undefined && badgeCount > 0 ? (
+                    <span className={`nav-badge ${isAgents ? "nav-badge-accent" : ""}`}>{badgeCount}</span>
+                  ) : null}
+                </Link>
+              );
+            })}
           </div>
         ))}
       </nav>
+
+      {/* Sidebar Footer matching reference bottom links & user profile card */}
+      <div className="sidebar-footer">
+        {!collapsed ? (
+          <div className="sidebar-secondary-links">
+            <Link to="/settings" className="sidebar-sublink" onClick={onNavigate}>
+              <span className="nav-icon" aria-hidden>⚙</span>
+              <span>Settings</span>
+            </Link>
+            <a
+              href="https://github.com/knohitch/mox"
+              target="_blank"
+              rel="noreferrer"
+              className="sidebar-sublink"
+            >
+              <span className="nav-icon" aria-hidden>↗</span>
+              <span>Documentation</span>
+            </a>
+          </div>
+        ) : null}
+
+        {me ? (
+          <div
+            className="sidebar-user-card"
+            onClick={() => navigate("/settings")}
+            title="Account & Settings"
+            role="button"
+            tabIndex={0}
+          >
+            <span className="sidebar-user-avatar" aria-hidden>
+              {me.displayName ? me.displayName.slice(0, 1).toUpperCase() : "M"}
+            </span>
+            {!collapsed ? (
+              <div className="sidebar-user-info">
+                <span className="sidebar-user-name">{me.displayName || "Mox User"}</span>
+                <span className="sidebar-user-sub">{me.email || "user@mox.studio"}</span>
+              </div>
+            ) : null}
+            {!collapsed ? (
+              <span className="sidebar-user-opt" aria-hidden>↕</span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </>
   );
 }
@@ -186,6 +251,23 @@ function ProfileMenu() {
   );
 }
 
+function getPageName(path: string): string {
+  const entry = CUSTOMER_NAV.flatMap((g) => g.entries).find((e) => e.to === path);
+  if (entry) return entry.label;
+  if (path.startsWith("/agents")) return "Agents";
+  if (path.startsWith("/rooms")) return "Agent Rooms";
+  if (path.startsWith("/deployments")) return "Deployments";
+  if (path.startsWith("/servers")) return "Servers";
+  if (path.startsWith("/models")) return "Models";
+  if (path.startsWith("/integrations")) return "Apps & Integrations";
+  if (path.startsWith("/channels")) return "Channels";
+  if (path.startsWith("/usage")) return "Usage";
+  if (path.startsWith("/billing")) return "Billing";
+  if (path.startsWith("/backups")) return "Backups";
+  if (path.startsWith("/settings")) return "Settings";
+  return "Dashboard";
+}
+
 export function CustomerShell({
   children,
   activePath,
@@ -201,7 +283,9 @@ export function CustomerShell({
   const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
   const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const { me } = useMox();
+  const { navigate } = useRoute();
 
   // Escape key closes the mobile drawer.
   useEffect(() => {
@@ -212,6 +296,8 @@ export function CustomerShell({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [drawerOpen]);
+
+  const pageTitle = getPageName(activePath);
 
   return (
     <div className={`app${collapsed ? " sidebar-collapsed" : ""}`}>
@@ -241,6 +327,7 @@ export function CustomerShell({
       </aside>
 
       <div className="shell-body">
+        {/* Modern Topbar matching reference image */}
         <header className="topbar-customer">
           <button
             type="button"
@@ -257,16 +344,77 @@ export function CustomerShell({
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             onClick={toggleCollapse}
           >
-            <SidebarToggleIcon collapsed={collapsed} size={18} />
+            <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
-          <div className="topbar-left">
-            {me ? <OrgSwitcher me={me} /> : <span className="muted">Workspace</span>}
+
+          {/* Left Breadcrumbs trail */}
+          <div className="topbar-breadcrumb">
+            <Link to="/dashboard" className="breadcrumb-back" title="Back to Dashboard">
+              ←
+            </Link>
+            <div className="breadcrumb-pill">
+              <span className="breadcrumb-icon" aria-hidden>📁</span>
+              <span className="breadcrumb-text">{me?.orgDisplayName || "Workspace"}</span>
+            </div>
+            <span className="breadcrumb-sep" aria-hidden>&gt;</span>
+            <div className="breadcrumb-pill active">
+              <span className="breadcrumb-icon" aria-hidden>📄</span>
+              <span className="breadcrumb-text">{pageTitle}</span>
+            </div>
           </div>
-          <div className="topbar-right">
+
+          {/* Center Search bar with keyboard shortcut */}
+          <div className="topbar-search">
+            <span className="search-icon" aria-hidden>🔍</span>
+            <input
+              type="text"
+              placeholder="Search agents, runs, servers..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="Global search"
+            />
+            <span className="search-kbd" aria-hidden>⌘K</span>
+          </div>
+
+          {/* Right Action buttons */}
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="topbar-action-btn"
+              onClick={() => navigate("/deployments")}
+              title="Manage deployments"
+            >
+              <span className="action-icon" aria-hidden>📋</span>
+              <span className="action-label">Manage</span>
+            </button>
+
+            <button
+              type="button"
+              className="topbar-action-btn"
+              onClick={() => {
+                if (typeof navigator !== "undefined" && navigator.clipboard) {
+                  void navigator.clipboard.writeText(window.location.href);
+                }
+              }}
+              title="Copy shareable link"
+            >
+              <span className="action-icon" aria-hidden>🔗</span>
+              <span className="action-label">Share</span>
+            </button>
+
             <NotificationBell />
-            <ProfileMenu />
+
+            <button
+              type="button"
+              className="topbar-cta-btn"
+              onClick={() => navigate("/agents")}
+              title="Create new autonomous agent"
+            >
+              + Create agent
+            </button>
           </div>
         </header>
+
         <main className="main">{children}</main>
       </div>
     </div>
