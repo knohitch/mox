@@ -1064,8 +1064,8 @@ export class HttpMoxApi implements MoxApi {
 
   // ---- Computer + files/logs -----------------------------------------------------------
 
-  async computerSnapshot(_agentId: string): Promise<ComputerSnapshot | undefined> {
-    throw new ApiUnavailableError("computer gateway is not configured on this deployment");
+  async computerSnapshot(agentId: string): Promise<ComputerSnapshot | undefined> {
+    return this.call(`/api/computer/${encodeURIComponent(agentId)}/snapshot`);
   }
 
   async computerTakeover(agentId: string, take: boolean, takenBy: string): Promise<ComputerSnapshot> {
@@ -1080,8 +1080,8 @@ export class HttpMoxApi implements MoxApi {
     throw new ApiUnavailableError("computer gateway is not configured on this deployment");
   }
 
-  async listFiles(_agentId: string): Promise<Array<{ path: string; sizeBytes: number; updatedAt: string }>> {
-    throw new ApiUnavailableError("workspace file access is not configured on this deployment");
+  async listFiles(agentId: string): Promise<Array<{ path: string; sizeBytes: number; updatedAt: string }>> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/files`);
   }
 
   async filePreview(_agentId: string, _path: string): Promise<string> {
@@ -1095,7 +1095,7 @@ export class HttpMoxApi implements MoxApi {
     });
   }
 
-  async getLogs(_agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>> {
-    throw new ApiUnavailableError("log streaming is not configured on this deployment");
+  async getLogs(agentId: string): Promise<Array<{ at: string; level: "info" | "warn" | "error"; line: string }>> {
+    return this.call(`/api/agents/${encodeURIComponent(agentId)}/logs`);
   }
 }

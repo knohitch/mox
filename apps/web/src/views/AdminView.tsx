@@ -20,7 +20,7 @@ import type {
 import { Badge, Card, EmptyState } from "../ui/primitives.js";
 import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, isAdminTabKey, visibleAdminTabs } from "../concepts/staffNav.js";
 import { useStaffSection } from "../shell/staffSection.js";
-import { humanizeLabel } from "../domain/labels.js";
+import { formatDisplayValue, humanizeLabel } from "../domain/labels.js";
 
 
 type AdminTab = "dashboard" | "customers" | "plans" | "payments" | "compute" | "intelligence" | "runtime" | "notifications" | "operations" | "contracts" | "staff";
@@ -46,7 +46,7 @@ function toneFor(value: string): "neutral" | "good" | "warn" | "bad" | "accent" 
 }
 
 function renderAdminCell(column: string, val: unknown): ReactNode {
-  const str = asString(val);
+  const str = formatDisplayValue(val);
   if (!str) return "";
   const lower = str.toLowerCase();
   const stateColumns = ["state", "status", "lifecycle", "nodehealth", "runtimehealth", "deliverystate", "deploymentstate", "health"];

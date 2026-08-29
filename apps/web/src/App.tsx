@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import { Component, useEffect, useState } from "react";
+import type { ErrorInfo, FormEvent, ReactNode } from "react";
 import { MoxProvider, useMox } from "./api/store.js";
 import { resolveParams, useRoute } from "./router.js";
 import { CustomerShell } from "./shell/CustomerShell.js";
@@ -22,7 +22,7 @@ import {
   type SupportSectionKey,
 } from "./concepts/staffNav.js";
 import { StaffSectionProvider, useStaffSection } from "./shell/staffSection.js";
-import { humanizeLabel } from "./domain/labels.js";
+import { formatDisplayValue, humanizeLabel } from "./domain/labels.js";
 import type { SupportCustomer, SupportCustomerDetail } from "./api/types.js";
 import {
   BackupsView,
@@ -640,7 +640,7 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
   const asString = (value: unknown): string => {
     if (value === null || value === undefined) return "";
     if (value instanceof Date) return value.toISOString();
-    if (typeof value === "object") return JSON.stringify(value);
+    if (typeof value === "object") return formatDisplayValue(value);
     return String(value);
   };
   const renderCell = (column: string, val: unknown): ReactNode => {
@@ -806,9 +806,11 @@ function safeReturnToStaff(target: string, kind: "admin" | "support"): string {
 
 export function App() {
   return (
-    <MoxProvider>
-      <SurfaceRouter />
-    </MoxProvider>
+    <AppRenderBoundary>
+      <MoxProvider>
+        <SurfaceRouter />
+      </MoxProvider>
+    </AppRenderBoundary>
   );
 }
 
@@ -824,3 +826,35 @@ export function SurfaceRouter() {
 
 // WorkTab is re-exported for potential embedding in room panes later.
 export { WorkTab };
+
+class AppRenderBoundary extends Component<{ children: ReactNode }, { message: string | null }> {
+  state: { message: string | null } = { message: null };
+
+  static getDerivedStateFromError(error: Error): { message: string } {
+    return { message: safeRenderError(error) };
+  }
+
+  componentDidCatch(error: Error, _info: ErrorInfo): void {
+    void error;
+  }
+
+  render(): ReactNode {
+    if (!this.state.message) return this.props.children;
+    return (
+      <main className="main">
+        <div className="backend-error" role="alert" data-route-render-error>
+          <h1>Application render error</h1>
+          <p>
+            This route failed before it could render its page landmark.
+            {import.meta.env.DEV ? ` ${this.state.message}` : " Refresh the page or contact support if this continues."}
+          </p>
+        </div>
+      </main>
+    );
+  }
+}
+
+function safeRenderError(error: unknown): string {
+  const text = error instanceof Error ? error.message || error.name : String(error);
+  return text.replace(/(api[_-]?key|secret|token|password|cookie|authorization)=?[^\s,;]*/gi, "[redacted]");
+}

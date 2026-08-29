@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
+import { formatDisplayValue } from "../domain/labels.js";
 import { avatarHue, initials, STATUS_LABEL } from "../domain/roster.js";
 import type { AgentStatus } from "../domain/roster.js";
 
@@ -297,10 +298,7 @@ export function DataTable<T extends object>({
 }
 
 function asText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
+  return formatDisplayValue(value);
 }
 
 /** Overlapping avatar stack matching reference header */

@@ -73,4 +73,29 @@ describe("Phase 05: Admin Surface Parity (Navigation & Gating)", () => {
     // Compute orders
     expect(typeof api.adminComputeOrderAction).toBe("function");
   });
+
+  it("HttpMoxApi routes runtime-adjacent reads through the control plane", async () => {
+    const calls: string[] = [];
+    const api = new HttpMoxApi({
+      baseUrl: "http://localhost:3000",
+      fetchImpl: async (input) => {
+        calls.push(String(input));
+        const url = String(input);
+        const body = url.includes("/files") || url.includes("/logs")
+          ? []
+          : { sessionId: "cs_test", state: "active", humanControl: false, url: "https://example.test", frameLabel: "test", capturedAt: "2026-08-29T00:00:00.000Z" };
+        return new Response(JSON.stringify(body), { status: 200 });
+      },
+    });
+
+    await api.computerSnapshot("agent one");
+    await api.listFiles("agent one");
+    await api.getLogs("agent one");
+
+    expect(calls).toEqual([
+      "http://localhost:3000/api/computer/agent%20one/snapshot",
+      "http://localhost:3000/api/agents/agent%20one/files",
+      "http://localhost:3000/api/agents/agent%20one/logs",
+    ]);
+  });
 });

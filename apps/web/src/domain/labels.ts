@@ -45,3 +45,37 @@ export function humanizeLabel(key: string): string {
     .replace(/[_-]+/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
+
+function primitiveDisplay(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.length === 0 ? "none" : `${value.length} items`;
+  if (typeof value === "object") return "details available";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value);
+}
+
+/** Human-readable cell value for normal UI tables; never exposes raw JSON. */
+export function formatDisplayValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "none";
+    if (value.every((item) => typeof item !== "object" || item === null)) {
+      return value.map(primitiveDisplay).filter(Boolean).join(", ");
+    }
+    return `${value.length} items`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== null && entryValue !== undefined && entryValue !== "")
+      .slice(0, 4);
+    if (entries.length === 0) return "";
+    const summary = entries
+      .map(([key, entryValue]) => `${humanizeLabel(key)}: ${primitiveDisplay(entryValue)}`)
+      .join(" · ");
+    const suffix = Object.keys(value as Record<string, unknown>).length > entries.length ? " · more" : "";
+    return `${summary}${suffix}`;
+  }
+  return primitiveDisplay(value);
+}
