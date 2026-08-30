@@ -99,10 +99,6 @@ function SidebarContent({
       <div className="sidebar-footer">
         {!collapsed ? (
           <div className="sidebar-secondary-links">
-            <Link to="/settings" className="sidebar-sublink" onClick={onNavigate}>
-              <span className="nav-icon" aria-hidden>⚙</span>
-              <span>Settings</span>
-            </Link>
             <a
               href="https://github.com/knohitch/mox"
               target="_blank"
