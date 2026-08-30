@@ -1,19 +1,19 @@
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@700;800;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@700&display=swap');
 
 :root {
-  /* Vercel-inspired black / graphite surface system */
-  --bg: #000000;
-  --bg-sidebar: #050505;
-  --bg-rail: #0a0a0a;
-  --bg-card: #000000;
-  --bg-card-elevated: #0a0a0a;
-  --bg-raise: #111111;
-  --bg-rock: #000000;
-  --bg-hover: #141414;
-  --bg-active: #262626;
-  --line: #262626;
-  --line-hover: #333333;
-  --line-soft: #222222;
+  /* Premium Charcoal Surface System */
+  --bg: #1e1f24;
+  --bg-sidebar: #191a1e;
+  --bg-rail: #191a1e;
+  --bg-card: #232529;
+  --bg-card-elevated: #2a2c31;
+  --bg-raise: #232529;
+  --bg-rock: #1e1f24;
+  --bg-hover: #2a2c31;
+  --bg-active: #35383f;
+  --line: rgba(255, 255, 255, 0.06);
+  --line-hover: rgba(255, 255, 255, 0.12);
+  --line-soft: rgba(255, 255, 255, 0.03);
 
   /* Typography clarity */
   --text: #fafafa;
@@ -2907,8 +2907,9 @@ small {
 .ops-detail-row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 24px; }
 .ops-card {
   background: var(--bg-card);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   padding: 24px;
   display: flex;
   flex-direction: column;
@@ -3003,9 +3004,11 @@ small {
 }
 .dashboard-work-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 32px; }
 .work-list { display: flex; flex-direction: column; gap: 16px; }
-.work-row { display: flex; align-items: center; gap: 16px; padding: 16px; background: var(--bg-card-elevated); border: 1px solid var(--line-soft); border-radius: var(--r-md); transition: border-color 0.15s ease; }
+.work-row { display: flex; align-items: center; gap: 16px; padding: 16px; background: var(--bg-card-elevated); border: 1px solid var(--line-soft); border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease; }
 .work-row:hover {
   border-color: var(--line-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.4);
 }
 .work-row .meta {
   flex: 1;
