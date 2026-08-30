@@ -5,15 +5,15 @@
   --bg: #000000;
   --bg-sidebar: #050505;
   --bg-rail: #0a0a0a;
-  --bg-card: #111111;
-  --bg-card-elevated: #141414;
-  --bg-raise: #171717;
+  --bg-card: #000000;
+  --bg-card-elevated: #0a0a0a;
+  --bg-raise: #111111;
   --bg-rock: #000000;
-  --bg-hover: #1a1a1a;
+  --bg-hover: #141414;
   --bg-active: #262626;
   --line: #262626;
   --line-hover: #333333;
-  --line-soft: #1d1d1d;
+  --line-soft: #222222;
 
   /* Typography clarity */
   --text: #fafafa;
