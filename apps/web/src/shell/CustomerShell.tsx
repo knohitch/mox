@@ -60,6 +60,11 @@ function SidebarContent({
             <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
         ) : null}
+        {!collapsed && me ? (
+          <div className="sidebar-org-wrap">
+            <OrgSwitcher me={me} />
+          </div>
+        ) : null}
       </div>
       <nav className="nav-scroll" aria-label="Main navigation">
         {CUSTOMER_NAV.map((group) => (
@@ -332,8 +337,6 @@ export function CustomerShell({
 
 
           <div className="topbar-breadcrumb">
-            {me ? <OrgSwitcher me={me} /> : <span className="topbar-page-title">Workspace</span>}
-            <span className="breadcrumb-sep" aria-hidden>/</span>
             <span className="topbar-page-title">{pageTitle}</span>
           </div>
 
