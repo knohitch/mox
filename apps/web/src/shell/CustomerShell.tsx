@@ -356,15 +356,7 @@ export function CustomerShell({
           >
             ☰
           </button>
-          <button
-            type="button"
-            className="sidebar-toggle-btn"
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={toggleCollapse}
-          >
-            <SidebarToggleIcon collapsed={collapsed} size={16} />
-          </button>
+
 
           <div className="topbar-breadcrumb">
             {me ? <OrgSwitcher me={me} /> : <span className="topbar-page-title">Workspace</span>}

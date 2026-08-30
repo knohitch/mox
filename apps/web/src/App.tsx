@@ -343,15 +343,7 @@ function StaffShellFrame({
           >
             ☰
           </button>
-          <button
-            type="button"
-            className="sidebar-toggle-btn"
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            onClick={toggleCollapse}
-          >
-            <SidebarToggleIcon collapsed={collapsed} size={18} />
-          </button>
+
           <div className="topbar-left">
             <span className={`surface-badge surface-${surface}`}>
               {surface === "support" ? "Mox Support" : "Mox Admin"}
