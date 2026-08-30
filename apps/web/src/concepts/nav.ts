@@ -31,31 +31,31 @@ export const CUSTOMER_NAV: readonly NavGroup[] = [
   {
     label: "Build",
     entries: [
-      { to: "/agents", label: "Agents", icon: "◈" },
-      { to: "/rooms", label: "Agent Rooms", icon: "☰" },
-      { to: "/deployments", label: "Deployments", icon: "⬆" },
+      { to: "/agents", label: "Agents", icon: "✦" },
+      { to: "/rooms", label: "Agent Rooms", icon: "⊞" },
+      { to: "/deployments", label: "Deployments", icon: "⇪" },
     ],
   },
   {
     label: "Infrastructure",
     entries: [
-      { to: "/servers", label: "Servers", icon: "▣" },
-      { to: "/models", label: "Models", icon: "◆" },
+      { to: "/servers", label: "Servers", icon: "⛁" },
+      { to: "/models", label: "Models", icon: "⎔" },
     ],
   },
   {
     label: "Connect",
     entries: [
-      { to: "/integrations", label: "Apps & Integrations", icon: "⌁" },
-      { to: "/channels", label: "Channels", icon: "➤" },
+      { to: "/integrations", label: "Apps & Integrations", icon: "⧉" },
+      { to: "/channels", label: "Channels", icon: "⌁" },
     ],
   },
   {
     label: "Account",
     entries: [
       { to: "/usage", label: "Usage", icon: "∑" },
-      { to: "/billing", label: "Billing", icon: "¢" },
-      { to: "/backups", label: "Backups", icon: "◫" },
+      { to: "/billing", label: "Billing", icon: "◈" },
+      { to: "/backups", label: "Backups", icon: "⎘" },
       { to: "/settings", label: "Settings", icon: "⚙" },
     ],
   },
