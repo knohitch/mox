@@ -164,183 +164,166 @@ export function HomeView() {
         <ErrorState message={`Some summary data is unavailable right now: ${loadError}`} onRetry={() => window.location.reload()} />
       ) : null}
 
-      {/* LEVEL 2: Asymmetric Operational Overview (Inspired by Reference Layout) */}
-      <section className="dashboard-overview-grid" aria-label="Operational overview">
-        {/* Left Top Panel (~36%): Workspace Status */}
-        <div className="ops-card ops-status-panel">
-          <div className="ops-card-head">
-            <div className="ops-card-title">
-              <span className="ops-icon-dot" aria-hidden>●</span>
-              <span>Workspace Status</span>
-            </div>
-            <span className="ops-cluster-badge">
-              <StatusIndicator status={isHealthy ? "good" : "warn"} pulse={!isHealthy} />
-              <span>{isHealthy ? "Operational" : "Degraded"}</span>
-            </span>
-          </div>
+      {/* LEVEL 2: Operational Overview */}
+      <section className="dashboard-overview" aria-label="Operational overview">
 
-          <div className="ops-stat-grid">
-            <div className="ops-stat-tile">
-              <div className="ops-stat-num">{snapshot.agentCount}</div>
-              <div className="ops-stat-meta">
-                <span className="ops-stat-label">Agents</span>
-                <span className="ops-stat-hint">{snapshot.runningAgents} active</span>
-              </div>
-            </div>
-            <div className="ops-stat-tile">
-              <div className="ops-stat-num">{snapshot.deploymentCount}</div>
-              <div className="ops-stat-meta">
-                <span className="ops-stat-label">Deployments</span>
-                <span className={`ops-stat-hint ${snapshot.failedDeployments ? "hint-bad" : ""}`}>
-                  {snapshot.failedDeployments ? `${snapshot.failedDeployments} failed` : "healthy"}
-                </span>
-              </div>
-            </div>
-            <div className="ops-stat-tile">
-              <div className="ops-stat-num">{snapshot.serverCount}</div>
-              <div className="ops-stat-meta">
-                <span className="ops-stat-label">Servers</span>
-                <span className="ops-stat-hint">{snapshot.healthyServers} healthy</span>
-              </div>
-            </div>
-            <div className="ops-stat-tile">
-              <div className="ops-stat-num">{snapshot.openApprovals}</div>
-              <div className="ops-stat-meta">
-                <span className="ops-stat-label">Approvals</span>
-                <span className={`ops-stat-hint ${snapshot.openApprovals ? "hint-warn" : ""}`}>
-                  {snapshot.openApprovals ? "waiting" : "all clear"}
-                </span>
-              </div>
+        {/* ROW 1: Four separate stat cards */}
+        <div className="ops-kpi-row">
+          <div className="ops-card ops-kpi-card">
+            <div className="ops-kpi-num">{snapshot.agentCount}</div>
+            <div className="ops-kpi-label">Agents</div>
+            <div className="ops-kpi-hint">{snapshot.runningAgents} active</div>
+          </div>
+          <div className="ops-card ops-kpi-card">
+            <div className="ops-kpi-num">{snapshot.deploymentCount}</div>
+            <div className="ops-kpi-label">Deployments</div>
+            <div className={`ops-kpi-hint ${snapshot.failedDeployments ? "hint-bad" : ""}`}>
+              {snapshot.failedDeployments ? `${snapshot.failedDeployments} failed` : "healthy"}
             </div>
           </div>
-
-          <div className="ops-health-row">
-            <div className="ops-health-meta">
-              <span>Cluster Availability</span>
-              <span className="ops-health-pct mono">{clusterAvailability}%</span>
-            </div>
-            <div className="ops-health-track">
-              <div
-                className={`ops-health-bar ${isHealthy ? "bar-good" : "bar-warn"}`}
-                style={{ width: `${clusterAvailability}%` }}
-              />
+          <div className="ops-card ops-kpi-card">
+            <div className="ops-kpi-num">{snapshot.serverCount}</div>
+            <div className="ops-kpi-label">Servers</div>
+            <div className="ops-kpi-hint">{snapshot.healthyServers} healthy</div>
+          </div>
+          <div className="ops-card ops-kpi-card">
+            <div className="ops-kpi-num">{snapshot.openApprovals}</div>
+            <div className="ops-kpi-label">Approvals</div>
+            <div className={`ops-kpi-hint ${snapshot.openApprovals ? "hint-warn" : ""}`}>
+              {snapshot.openApprovals ? "waiting" : "all clear"}
             </div>
           </div>
         </div>
 
-        {/* Middle Top (~24%): Two Stacked Panels */}
-        <div className="ops-stacked-column">
-          {/* Card 1: AI Usage / Credits */}
-          <div className="ops-card ops-mini-card ops-usage-card">
+        {/* ROW 2: Infrastructure Health (wide left) + AI Usage / Needs Attention (stacked right) */}
+        <div className="ops-detail-row">
+          {/* Left: Infrastructure Health */}
+          <div className="ops-card ops-infra-panel">
             <div className="ops-card-head">
-              <span className="ops-mini-label">AI Usage</span>
-              <span className="ops-mini-tag">Tokens</span>
+              <div className="ops-card-title">
+                <span className="ops-icon-dot" aria-hidden>🖥</span>
+                <span>Infrastructure Health</span>
+              </div>
+              <Link to="/servers" className="ops-card-action">
+                View servers →
+              </Link>
             </div>
-            <div className="ops-usage-body">
-              <div className="ops-usage-value mono">{primaryUsageValue}</div>
-              <div className="ops-usage-name">{primaryUsageLabel}</div>
-            </div>
-            <div className="ops-usage-context muted">{secondaryUsageContext}</div>
-          </div>
 
-          {/* Card 2: Needs Attention */}
-          <div className="ops-card ops-mini-card ops-attention-card">
-            <div className="ops-card-head">
-              <span className="ops-mini-label">Needs Attention</span>
-              {attention.length > 0 ? (
-                <span className="attention-badge attention-active">{attention.length} Action</span>
+            <div className="ops-infra-content">
+              {servers.length === 0 ? (
+                <div className="ops-infra-empty-state">
+                  <p className="muted">No servers provisioned for this workspace.</p>
+                  <Link to="/servers">
+                    <Button size="sm">Provision Server</Button>
+                  </Link>
+                </div>
               ) : (
-                <span className="attention-badge attention-clear">✓ Normal</span>
+                <div className="ops-infra-node-list">
+                  {servers.slice(0, 2).map((srv) => (
+                    <div key={srv.serverId} className="ops-infra-node-row">
+                      <div className="node-primary-col">
+                        <div className="node-title-wrap">
+                          <strong className="node-name">{srv.displayName || srv.serverId}</strong>
+                          <Badge tone={statusTone(srv.state)}>{humanState(srv.state)}</Badge>
+                        </div>
+                        <div className="node-meta-line muted">
+                          <span>{srv.computeClass || srv.kind}</span>
+                          <span>·</span>
+                          <span>{srv.region}</span>
+                          {srv.agentsRunning !== null && srv.agentsRunning !== undefined ? (
+                            <>
+                              <span>·</span>
+                              <span>{srv.agentsRunning} running</span>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="node-telemetry-col">
+                        <span className="telemetry-tag">Telemetry</span>
+                        <span className="telemetry-value mono">
+                          {srv.cpuPct !== null && srv.memPct !== null
+                            ? `${srv.cpuPct}% CPU · ${srv.memPct}% RAM`
+                            : "Unavailable"}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
-            </div>
-            {attention.length > 0 ? (
-              <div className="ops-attention-body">
-                <div className="ops-attention-items">
-                  {attention.slice(0, 2).map((item) => (
-                    <Link key={item.id} to={item.href} className="ops-attention-row">
-                      <span className={`attention-dot dot-${item.tone}`} />
-                      <span className="ops-attention-text">{item.title}</span>
-                      <span className="ops-attention-arrow">→</span>
-                    </Link>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="ops-attention-body ops-attention-empty">
-                <span className="clear-icon" aria-hidden>✓</span>
-                <span className="clear-text">All systems operational</span>
-              </div>
-            )}
-          </div>
-        </div>
 
-        {/* Right Top (~40%): Large Operational Visual Panel — Infrastructure Health */}
-        <div className="ops-card ops-infra-panel">
-          <div className="ops-card-head">
-            <div className="ops-card-title">
-              <span className="ops-icon-dot" aria-hidden>🖥</span>
-              <span>Infrastructure Health</span>
-            </div>
-            <Link to="/servers" className="ops-card-action">
-              View servers →
-            </Link>
-          </div>
-
-          <div className="ops-infra-content">
-            {servers.length === 0 ? (
-              <div className="ops-infra-empty-state">
-                <p className="muted">No servers provisioned for this workspace.</p>
-                <Link to="/servers">
-                  <Button size="sm">Provision Server</Button>
-                </Link>
-              </div>
-            ) : (
-              <div className="ops-infra-node-list">
-                {servers.slice(0, 2).map((srv) => (
-                  <div key={srv.serverId} className="ops-infra-node-row">
-                    <div className="node-primary-col">
-                      <div className="node-title-wrap">
-                        <strong className="node-name">{srv.displayName || srv.serverId}</strong>
-                        <Badge tone={statusTone(srv.state)}>{humanState(srv.state)}</Badge>
-                      </div>
-                      <div className="node-meta-line muted">
-                        <span>{srv.computeClass || srv.kind}</span>
-                        <span>·</span>
-                        <span>{srv.region}</span>
-                        {srv.agentsRunning !== null && srv.agentsRunning !== undefined ? (
-                          <>
-                            <span>·</span>
-                            <span>{srv.agentsRunning} running</span>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="node-telemetry-col">
-                      <span className="telemetry-tag">Telemetry</span>
-                      <span className="telemetry-value mono">
-                        {srv.cpuPct !== null && srv.memPct !== null
-                          ? `${srv.cpuPct}% CPU · ${srv.memPct}% RAM`
-                          : "Unavailable"}
+              <div className="ops-infra-footer-strip">
+                <span className="footer-strip-label">Model Providers:</span>
+                {modelConnections.length > 0 ? (
+                  <div className="footer-strip-items">
+                    {modelConnections.slice(0, 3).map((conn) => (
+                      <span key={conn.providerId} className="model-chip">
+                        <span className={`status-dot status-${conn.status === "connected" ? "healthy" : "offline"}`} />
+                        <span>{conn.displayName}</span>
                       </span>
-                    </div>
+                    ))}
                   </div>
-                ))}
+                ) : (
+                  <span className="muted footer-strip-hint">No external model connections configured</span>
+                )}
               </div>
-            )}
+            </div>
 
-            <div className="ops-infra-footer-strip">
-              <span className="footer-strip-label">Model Providers:</span>
-              {modelConnections.length > 0 ? (
-                <div className="footer-strip-items">
-                  {modelConnections.slice(0, 3).map((conn) => (
-                    <span key={conn.providerId} className="model-chip">
-                      <span className={`status-dot status-${conn.status === "connected" ? "healthy" : "offline"}`} />
-                      <span>{conn.displayName}</span>
-                    </span>
-                  ))}
+            <div className="ops-health-row">
+              <div className="ops-health-meta">
+                <span>Cluster Availability</span>
+                <span className="ops-health-pct mono">{clusterAvailability}%</span>
+              </div>
+              <div className="ops-health-track">
+                <div
+                  className={`ops-health-bar ${isHealthy ? "bar-good" : "bar-warn"}`}
+                  style={{ width: `${clusterAvailability}%` }}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Right: AI Usage + Needs Attention stacked */}
+          <div className="ops-stacked-column">
+            {/* Card: AI Usage / Credits */}
+            <div className="ops-card ops-mini-card ops-usage-card">
+              <div className="ops-card-head">
+                <span className="ops-mini-label">AI Usage</span>
+                <span className="ops-mini-tag">Tokens</span>
+              </div>
+              <div className="ops-usage-body">
+                <div className="ops-usage-value mono">{primaryUsageValue}</div>
+                <div className="ops-usage-name">{primaryUsageLabel}</div>
+              </div>
+              <div className="ops-usage-context muted">{secondaryUsageContext}</div>
+            </div>
+
+            {/* Card: Needs Attention */}
+            <div className="ops-card ops-mini-card ops-attention-card">
+              <div className="ops-card-head">
+                <span className="ops-mini-label">Needs Attention</span>
+                {attention.length > 0 ? (
+                  <span className="attention-badge attention-active">{attention.length} Action</span>
+                ) : (
+                  <span className="attention-badge attention-clear">✓ Normal</span>
+                )}
+              </div>
+              {attention.length > 0 ? (
+                <div className="ops-attention-body">
+                  <div className="ops-attention-items">
+                    {attention.slice(0, 2).map((item) => (
+                      <Link key={item.id} to={item.href} className="ops-attention-row">
+                        <span className={`attention-dot dot-${item.tone}`} />
+                        <span className="ops-attention-text">{item.title}</span>
+                        <span className="ops-attention-arrow">→</span>
+                      </Link>
+                    ))}
+                  </div>
                 </div>
               ) : (
-                <span className="muted footer-strip-hint">No external model connections configured</span>
+                <div className="ops-attention-body ops-attention-empty">
+                  <span className="clear-icon" aria-hidden>✓</span>
+                  <span className="clear-text">All systems operational</span>
+                </div>
               )}
             </div>
           </div>

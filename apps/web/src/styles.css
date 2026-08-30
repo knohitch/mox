@@ -2898,7 +2898,13 @@ small {
 
 
 /* Dashboard Vercel-inspired CSS */
-.dashboard-overview-grid { display: grid; grid-template-columns: 1fr 1fr 1.5fr; gap: 24px; margin-bottom: 32px; }
+.dashboard-overview { display: flex; flex-direction: column; gap: 24px; margin-bottom: 32px; }
+.ops-kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
+.ops-kpi-card { padding: 24px; text-align: left; }
+.ops-kpi-num { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; color: var(--text); line-height: 1.1; margin-bottom: 8px; }
+.ops-kpi-label { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px; }
+.ops-kpi-hint { font-size: 12px; color: var(--text-faint); }
+.ops-detail-row { display: grid; grid-template-columns: 1.6fr 1fr; gap: 24px; }
 .ops-card {
   background: var(--bg-card);
   border: 1px solid var(--line);
