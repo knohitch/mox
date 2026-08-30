@@ -65,11 +65,11 @@ export function AgentsView() {
   }, [recentThreads, search]);
 
   const gradients = [
-    "linear-gradient(135deg, rgba(59, 130, 246, 0.5), rgba(139, 92, 246, 0.5))",
-    "linear-gradient(135deg, rgba(245, 158, 11, 0.5), rgba(239, 68, 68, 0.5))",
-    "linear-gradient(135deg, rgba(16, 185, 129, 0.5), rgba(59, 130, 246, 0.5))",
-    "linear-gradient(135deg, rgba(236, 72, 153, 0.5), rgba(139, 92, 246, 0.5))",
-    "linear-gradient(135deg, rgba(6, 182, 212, 0.5), rgba(59, 130, 246, 0.5))",
+    "linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(139, 92, 246, 0.2))",
+    "linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(239, 68, 68, 0.2))",
+    "linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(59, 130, 246, 0.2))",
+    "linear-gradient(135deg, rgba(236, 72, 153, 0.2), rgba(139, 92, 246, 0.2))",
+    "linear-gradient(135deg, rgba(6, 182, 212, 0.2), rgba(59, 130, 246, 0.2))",
   ];
 
   return (
@@ -1667,6 +1667,7 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
     </div>
   );
 }
+
 
 
 
