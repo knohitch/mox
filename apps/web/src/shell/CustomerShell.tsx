@@ -49,7 +49,6 @@ function SidebarContent({
   return (
     <>
       <div className="sidebar-head">
-        <Brand showText={!collapsed} />
         {onToggleCollapse ? (
           <button
             type="button"
@@ -61,6 +60,7 @@ function SidebarContent({
             <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
         ) : null}
+        <Brand showText={!collapsed} />
       </div>
       <nav className="nav-scroll" aria-label="Main navigation">
         {CUSTOMER_NAV.map((group) => (
