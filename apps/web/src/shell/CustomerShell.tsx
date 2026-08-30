@@ -102,7 +102,7 @@ function SidebarContent({
               href="https://github.com/knohitch/mox"
               target="_blank"
               rel="noreferrer"
-              className="sidebar-sublink"
+              className="nav-item"
             >
               <span className="nav-icon" aria-hidden>↗</span>
               <span>Documentation</span>
