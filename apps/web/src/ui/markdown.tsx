@@ -27,9 +27,18 @@ function renderBlocks(text: string): ReactNode[] {
       }
       i += 1; // closing fence
       out.push(
-        <pre key={key++} data-lang={lang}>
-          <code>{buf.join("\n")}</code>
-        </pre>,
+        <div className="aw-code-block" key={key++}>
+          <div className="aw-code-header">
+            <span>{lang || "Code"}</span>
+            <button className="aw-copy-btn" onClick={() => navigator.clipboard.writeText(buf.join("\n"))}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              Copy
+            </button>
+          </div>
+          <pre data-lang={lang}>
+            <code>{buf.join("\n")}</code>
+          </pre>
+        </div>,
       );
       continue;
     }

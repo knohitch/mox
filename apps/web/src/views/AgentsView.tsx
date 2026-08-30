@@ -27,45 +27,192 @@ export function AgentsView() {
   const mox = useMox();
   const entitlements = useEntitlements();
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [search, setSearch] = useState("");
+  const [recentThreads, setRecentThreads] = useState<Array<{ threadId: string; title?: string; agentId: string; agentName: string; }>>([]);
+  
   const selected = useMemo(
     () => mox.agents.find((a) => a.agentId === selectedId) ?? null,
     [mox.agents, selectedId],
   );
 
-  // max_agents: a non-positive value (-1) means unlimited (the canonical
-  // convention); absent value on demo means no limit.
+  const syncAllThreads = useCallback(async () => {
+    const all = await Promise.all(mox.agents.map(async (a) => {
+      const list = await mox.api.listThreads(a.agentId);
+      return list.map(t => ({ ...t, agentId: a.agentId, agentName: a.definition.identity.displayName }));
+    }));
+    setRecentThreads(all.flat());
+  }, [mox.agents, mox.api]);
+
+  useEffect(() => {
+    void syncAllThreads();
+  }, [syncAllThreads]);
+
   const maxAgents = limitOf(entitlements, "max_agents", Infinity);
   const atAgentLimit = maxAgents > 0 && mox.agents.length >= maxAgents;
-  const drafts = mox.agents.filter((a) => a.status === "draft").length;
+
+  const filteredAgents = useMemo(() => {
+    if (!search) return mox.agents;
+    const lower = search.toLowerCase();
+    return mox.agents.filter((a) => a.definition.identity.displayName.toLowerCase().includes(lower) || a.definition.slug.toLowerCase().includes(lower));
+  }, [mox.agents, search]);
+
+  const filteredThreads = useMemo(() => {
+    if (!search) return recentThreads;
+    const lower = search.toLowerCase();
+    return recentThreads.filter((t) => (t.title || "New chat").toLowerCase().includes(lower) || t.agentName.toLowerCase().includes(lower));
+  }, [recentThreads, search]);
+
+  const gradients = [
+    "linear-gradient(135deg, rgba(59, 130, 246, 0.5), rgba(139, 92, 246, 0.5))",
+    "linear-gradient(135deg, rgba(245, 158, 11, 0.5), rgba(239, 68, 68, 0.5))",
+    "linear-gradient(135deg, rgba(16, 185, 129, 0.5), rgba(59, 130, 246, 0.5))",
+    "linear-gradient(135deg, rgba(236, 72, 153, 0.5), rgba(139, 92, 246, 0.5))",
+    "linear-gradient(135deg, rgba(6, 182, 212, 0.5), rgba(59, 130, 246, 0.5))",
+  ];
 
   return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
-        <div style={{ flex: 1 }}>
-          <h1 style={{ margin: 0 }}>Agents</h1>
-          <p className="page-sub" style={{ margin: "4px 0 0" }}>
-            {mox.agents.length} agent{mox.agents.length === 1 ? "" : "s"}
-            {drafts ? ` · ${drafts} draft${drafts === 1 ? "" : "s"} unpublished` : ""}
-          </p>
+    <div className="aw-workspace">
+      {/* Left Rail */}
+      <div className="aw-sidebar">
+        <div className="aw-sidebar-header">
+          <div className="aw-sidebar-title">Mox Agents</div>
+          <button className="aw-sidebar-new" onClick={() => setShowNew(true)} title="New Agent" disabled={atAgentLimit}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
         </div>
-        <Button kind="primary" onClick={() => setShowNew(true)} disabled={atAgentLimit} title={atAgentLimit ? `Your plan allows ${maxAgents} agents.` : undefined}>
-          + New Agent
-        </Button>
-      </div>
-      <div className="agent-layout">
-        <div className="agent-list">
-          {mox.agents.map((a) => (
-            <AgentRow
-              key={a.agentId}
-              summary={a}
-              active={a.agentId === selectedId}
-              onSelect={() => setSelectedId(a.agentId)}
-            />
-          ))}
+        <div className="aw-search-box">
+          <svg className="aw-search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input
+            type="text"
+            className="aw-search-input"
+            placeholder="Search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
-        <div>{selected ? <AgentDetail summary={selected} /> : <Card>Select an agent to open its workspace.</Card>}</div>
+        <div className="aw-sidebar-list">
+          {recentThreads.length > 0 && (
+            <div className="aw-rail-section">
+              <div className="aw-rail-heading">Recent</div>
+              {filteredThreads.map((t) => (
+                <div
+                  key={t.threadId}
+                  className={`aw-thread-row ${t.agentId === selectedId && t.threadId === selectedThreadId ? "active" : ""}`}
+                  onClick={() => { setSelectedId(t.agentId); setSelectedThreadId(t.threadId); }}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="aw-thread-row-title">{t.title || "New chat"}</div>
+                  <div className="aw-thread-row-sub">{t.agentName}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="aw-rail-section">
+            <div className="aw-rail-heading">Agents</div>
+            {filteredAgents.map((a, i) => (
+              <div
+                key={a.agentId}
+                className={`aw-agent-row ${a.agentId === selectedId && !selectedThreadId ? "active" : ""}`}
+                onClick={() => { setSelectedId(a.agentId); setSelectedThreadId(null); }}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="aw-agent-row-icon" style={{ background: gradients[i % gradients.length] }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+                </div>
+                <div className="aw-agent-row-content">
+                  <div className="aw-agent-row-top">
+                    <span className="aw-agent-row-title">{a.definition.identity.displayName}</span>
+                  </div>
+                  <div className="aw-agent-row-sub">{a.status === "draft" ? "Draft" : "Active"}</div>
+                </div>
+              </div>
+            ))}
+            {filteredAgents.length === 0 && (
+              <div className="muted" style={{ padding: "20px", textAlign: "center", fontSize: 12 }}>
+                No agents found.
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="aw-sidebar-footer">
+          <div className="aw-rail-section" style={{ paddingBottom: 0 }}>
+            <div className="aw-rail-heading">Workspace</div>
+            <Link to="/rooms" className="aw-sidebar-footer-item">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+              Agent Rooms
+            </Link>
+            <a href="#" className="aw-sidebar-footer-item" onClick={(e) => { e.preventDefault(); setShowNew(true); }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              Create Agent
+            </a>
+          </div>
+        </div>
       </div>
+
+      {/* Main Area */}
+      <div className="aw-main">
+        {selected ? (
+          <AgentDetail 
+            summary={selected} 
+            threadId={selectedThreadId}
+            onThreadChange={setSelectedThreadId}
+            onNewChat={async () => {
+               const created = await mox.api.createThread({ agentId: selected.agentId, title: "New chat" });
+               await syncAllThreads();
+               setSelectedThreadId(created.threadId);
+            }}
+            onBack={() => { setSelectedId(null); setSelectedThreadId(null); }} 
+          />
+        ) : (
+          <div className="aw-hub">
+            <div className="aw-hub-title">MOX WORKSPACE</div>
+            <div className="aw-hub-heading">Start a new conversation</div>
+
+            <div className="aw-composer-wrapper">
+              <textarea
+                className="aw-composer"
+                placeholder="Ask anything..."
+                disabled
+              />
+              <button className="aw-composer-submit" disabled>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              </button>
+            </div>
+            
+
+            {mox.agents.length > 0 ? (
+              <div className="aw-explore-section">
+                <div className="aw-explore-heading">Explore agents</div>
+                <div className="aw-agent-grid">
+                  {mox.agents.map((a, i) => (
+                    <div
+                      key={a.agentId}
+                      className="aw-agent-card"
+                      onClick={() => setSelectedId(a.agentId)}
+                      style={{ background: gradients[i % gradients.length] }}
+                    >
+                      <div className="aw-agent-card-inner">
+                        <div className="aw-agent-card-title">{a.definition.identity.displayName}</div>
+                        <div className="aw-agent-card-desc">{a.definition.instructions.text || "Help with everyday work using clear, concise, and accurate responses."}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: "center", color: "#94a3b8", marginTop: 40 }}>
+                <p>No agents available in this workspace.</p>
+                <Button kind="primary" onClick={() => setShowNew(true)}>Create your first agent</Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {showNew && <NewAgentModal onDone={async (agentId) => { await mox.refreshAgents(); setSelectedId(agentId ?? mox.agents[0]?.agentId ?? null); }} onClose={() => setShowNew(false)} />}
     </div>
   );
@@ -290,84 +437,21 @@ function NewAgentModal({ onDone, onClose }: { onDone: (agentId?: string) => void
   );
 }
 
-function AgentRow({
-  summary,
-  active,
-  onSelect,
-}: {
-  summary: AgentSummary;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  const status = agentStatus(summary);
-  const d = summary.definition;
-  const isDraft = summary.status === "draft";
-  return (
-    <div className={`agent-row ${active ? "active" : ""}`} onClick={onSelect} role="button" tabIndex={0}>
-      <Avatar slug={d.slug} name={d.identity.displayName} status={isDraft ? undefined : status} />
-      <div className="meta">
-        <div className="name">
-          <span>{d.identity.displayName}</span>
-          {isDraft ? <Badge tone="warn">draft</Badge> : summary.currentVersion ? <Badge tone="accent">v{summary.currentVersion}</Badge> : null}
-          {summary.hasUnread && <span className="unread-dot" />}
-        </div>
-        <div className="role">{isDraft ? "Unpublished draft" : (d.identity.title ?? d.identity.role ?? STATUS_LABEL[status])}</div>
-      </div>
-    </div>
-  );
-}
 
 const TABS = ["chat", "work", "computer", "files", "terminal", "logs", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
-function AgentDetail({ summary }: { summary: AgentSummary }) {
+function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat }: { summary: AgentSummary; threadId: string | null; onBack?: () => void; onThreadChange: (id: string) => void; onNewChat: () => Promise<void> }) {
   const mox = useMox();
   const terminalAllowed = useTerminal();
   const computerAllowed = useBrowser();
   const [tab, setTab] = useState<Tab>("chat");
-  // The summary's `agentId` is the server-authoritative row id — the SAME id
-  // the hosted thread routes address agents by (see AgentSummary doc). Never
-  // fall back to `definition.agentId` (engine-facing, ≠ row id on hosted).
   const agentId = summary.agentId;
-  // Real hosted thread lifecycle (Phase 02 §D): the server is the authority for
-  // thread identity — no synthetic `t_<agentId>` ids.
-  const [threads, setThreads] = useState<Array<{ threadId: string; title?: string }>>([]);
-  const [threadId, setThreadId] = useState<string | null>(null);
+  
+  
   const [creating, setCreating] = useState(false);
 
-  const syncThreads = useCallback(
-    async (prefer?: string) => {
-      const list = await mox.api.listThreads(agentId);
-      setThreads(list);
-      if (list.length === 0) {
-        setThreadId(null);
-      } else {
-        const chosen = prefer && list.some((t) => t.threadId === prefer) ? prefer : list[0]!.threadId;
-        setThreadId(chosen);
-      }
-    },
-    [mox, agentId],
-  );
-
-  useEffect(() => {
-    void syncThreads();
-  }, [agentId, syncThreads]);
-
-  useEffect(() => {
-    if (threadId) void mox.loadThread(agentId, threadId);
-  }, [agentId, threadId, mox]);
-
-  const newChat = async () => {
-    setCreating(true);
-    try {
-      const created = await mox.api.createThread({ agentId, title: "New chat" });
-      await syncThreads(created.threadId);
-      setTab("chat");
-    } finally {
-      setCreating(false);
-    }
-  };
-
+  
   const enabled: Record<Tab, boolean> = {
     chat: true,
     work: true,
@@ -382,121 +466,182 @@ function AgentDetail({ summary }: { summary: AgentSummary }) {
   const d = summary.definition;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-      <header style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-        <Avatar slug={d.slug} name={d.identity.displayName} size={44} status={status} />
-        <div>
-          <h2 style={{ margin: 0 }}>{d.identity.displayName}</h2>
-          <div className="muted">
-            {d.identity.title} · {STATUS_LABEL[status]}
-            {d.deployment.kind === "customer-vps" ? " · customer VPS" : " · Mox cloud"}
+    <div className="agent-layout">
+      <header className="aw-chat-header">
+        <div className="aw-chat-title">
+          {onBack && (
+            <button className="aw-back-btn" onClick={onBack}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
+            </button>
+          )}
+          <Avatar slug={d.slug} name={d.identity.displayName} size={32} status={status} />
+          <h2>{d.identity.displayName}</h2>
+        </div>
+        <div className="aw-chat-actions">
+          <button className="aw-action-btn" onClick={onNewChat} disabled={creating}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            Task
+          </button>
+          
+          {summary.modelBadge && (
+            <div className="aw-model-badge">
+              {summary.modelBadge}
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </div>
+          )}
+
+          <div className="aw-action-icons">
+            <button className={`aw-icon-btn ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab("chat")} title="Chat">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            </button>
+            {enabled.work && (
+              <button className={`aw-icon-btn ${tab === 'work' ? 'active' : ''}`} onClick={() => setTab("work")} title="Work">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>
+              </button>
+            )}
+            {enabled.computer && (
+              <button className={`aw-icon-btn ${tab === 'computer' ? 'active' : ''}`} onClick={() => setTab("computer")} title="Computer">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              </button>
+            )}
+            {enabled.files && (
+              <button className={`aw-icon-btn ${tab === 'files' ? 'active' : ''}`} onClick={() => setTab("files")} title="Files">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+              </button>
+            )}
+            {enabled.terminal && (
+              <button className={`aw-icon-btn ${tab === 'terminal' ? 'active' : ''}`} onClick={() => setTab("terminal")} title="Terminal">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              </button>
+            )}
+            {enabled.logs && (
+              <button className={`aw-icon-btn ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab("logs")} title="Logs">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+              </button>
+            )}
+            {enabled.settings && (
+              <button className={`aw-icon-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab("settings")} title="Settings">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0 .33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              </button>
+            )}
           </div>
         </div>
-        <div className="spacer" />
-        {summary.modelBadge && <Badge tone="accent">{summary.modelBadge}</Badge>}
-        <button className="primary" onClick={newChat} disabled={creating}>
-          {creating ? "Starting…" : "+ New Chat"}
-        </button>
       </header>
 
-      <nav className="tabs" aria-label="Agent sections">
-        {TABS.map((t) => (
-          <button key={t} disabled={!enabled[t]} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-            {t[0]?.toUpperCase()}
-            {t.slice(1)}
-            {!enabled[t] ? " 🔒" : ""}
-          </button>
-        ))}
-      </nav>
+      <div className="aw-chat-container">
 
-      {(tab === "chat" || tab === "work") && (
-        <nav className="thread-list" aria-label="Threads">
-          {(threadId ? threads : []).length === 0 ? (
-            <span className="muted">No conversations yet.</span>
-          ) : (
-            threads.map((t) => (
-              <button
-                key={t.threadId}
-                className={t.threadId === threadId ? "active" : ""}
-                onClick={() => setThreadId(t.threadId)}
-              >
-                {t.title ?? "Chat"}
-              </button>
-            ))
-          )}
-        </nav>
-      )}
-
-      <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
-        {tab === "chat" &&
-          (threadId ? (
-            <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} />
-          ) : (
-            <div className="empty" style={{ padding: 24 }}>
-              <p>No conversation yet. Start a new chat to begin.</p>
-              <button className="primary" onClick={newChat} disabled={creating}>
-                {creating ? "Starting…" : "New Chat"}
-              </button>
-            </div>
-          ))}
-        {tab === "work" && threadId && <WorkTab subjectId={threadId} />}
-        {tab === "computer" && <ComputerTab agentId={agentId} />}
-        {tab === "files" && <FilesTab agentId={agentId} />}
-        {tab === "terminal" && <TerminalTab agentId={agentId} />}
-        {tab === "logs" && <LogsTab agentId={agentId} />}
-        {tab === "settings" && <SettingsTab summary={summary} />}
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {tab === "chat" &&
+            (threadId ? (
+              <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} summary={summary} />
+            ) : (
+              <div className="aw-empty-thread">
+                <Avatar slug={d.slug} name={d.identity.displayName} size={64} status={status} />
+                <h2>{d.identity.displayName}</h2>
+                <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
+                <div className="aw-suggestions">
+                  <button onClick={() => void 0}>Research a market</button>
+                  <button onClick={() => void 0}>Analyze a document</button>
+                  <button onClick={() => void 0}>Compare competitors</button>
+                  <button onClick={() => void 0}>Build a research brief</button>
+                </div>
+              </div>
+            ))}
+          {tab === "work" && threadId && <WorkTab subjectId={threadId} />}
+          {tab === "computer" && <ComputerTab agentId={agentId} />}
+          {tab === "files" && <FilesTab agentId={agentId} />}
+          {tab === "terminal" && <TerminalTab agentId={agentId} />}
+          {tab === "logs" && <LogsTab agentId={agentId} />}
+          {tab === "settings" && <SettingsTab summary={summary} />}
+        </div>
       </div>
     </div>
   );
 }
 
-function ChatTab({ agentId, threadId, name }: { agentId: string; threadId: string; name: string }) {
+function ChatTab({ agentId, threadId, name, summary }: { agentId: string; threadId: string; name: string; summary?: AgentSummary }) {
   const mox = useMox();
   const messages = mox.messages(threadId);
   const runId = mox.activeRun(threadId);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages]);
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    if (!isScrolledUp) {
+      scrollRef.current.scrollTo({ top: scrollHeight });
+    }
+  }, [messages, isScrolledUp]);
+
+  const handleScroll = () => {
+    if (!scrollRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
+    const isUp = scrollHeight - scrollTop - clientHeight > 50;
+    setIsScrolledUp(isUp);
+  };
 
   const submit = () => {
     const text = draft.trim();
     if (!text || runId) return;
     setDraft("");
+    setIsScrolledUp(false); // force scroll to bottom on send
     void mox.send(agentId, threadId, text);
   };
 
   return (
     <div className="chat">
-      <div className="chat-scroll" ref={scrollRef}>
+      <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
+        {messages.length === 0 && summary && (
+          <div className="aw-empty-thread">
+            <Avatar slug={summary.definition.slug} name={summary.definition.identity.displayName} size={64} status={agentStatus(summary)} />
+            <h2>{summary.definition.identity.displayName}</h2>
+            <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
+            <div className="aw-suggestions">
+              <button onClick={() => { setDraft("Research a market"); }}>Research a market</button>
+              <button onClick={() => { setDraft("Analyze a document"); }}>Analyze a document</button>
+              <button onClick={() => { setDraft("Compare competitors"); }}>Compare competitors</button>
+              <button onClick={() => { setDraft("Build a research brief"); }}>Build a research brief</button>
+            </div>
+          </div>
+        )}
         {messages.map((m) => (
           <MessageBubble key={m.messageId} msg={m} agentName={name} onRetry={() => void mox.send(agentId, threadId, m.text)} />
         ))}
         {mox.approvals.length > 0 && <ApprovalCards />}
       </div>
-      <div className="composer">
-        <textarea
-          value={draft}
-          placeholder={`Message ${name}…`}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
-        />
-        {runId ? (
-          <button className="danger" onClick={() => mox.cancel(runId)}>
-            Stop
-          </button>
-        ) : (
-          <button className="primary" onClick={submit} disabled={!draft.trim()}>
-            Send
-          </button>
-        )}
+      <div className="aw-composer-container">
+        <div className="aw-composer-wrapper active-composer">
+          <textarea
+            className="aw-composer"
+            value={draft}
+            placeholder={`Message ${name}…`}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+          <div className="aw-composer-toolbar">
+            <div className="aw-composer-tools">
+              <button className="aw-icon-btn" title="Add context">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+              </button>
+            </div>
+            {runId ? (
+              <button className="aw-composer-stop" onClick={() => mox.cancel(runId)}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"></rect></svg>
+              </button>
+            ) : (
+              <button className="aw-composer-submit" onClick={submit} disabled={!draft.trim()}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1522,4 +1667,10 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
     </div>
   );
 }
+
+
+
+
+
+
 

@@ -402,20 +402,41 @@ export function SteppedChart() {
         <span>30</span>
       </div>
       <div className="stepped-chart-canvas">
-        <svg viewBox="0 0 380 120" preserveAspectRatio="none" className="stepped-chart-svg" aria-hidden="true">
-          <line x1="0" y1="15" x2="380" y2="15" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
-          <line x1="0" y1="45" x2="380" y2="45" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
-          <line x1="0" y1="75" x2="380" y2="75" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
-          <line x1="0" y1="105" x2="380" y2="105" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+        <svg viewBox="0 0 380 115" preserveAspectRatio="none" className="stepped-chart-svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="burn-grad-orange" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#ea580c" stopOpacity="0.12" />
+              <stop offset="100%" stopColor="#ea580c" stopOpacity="0" />
+            </linearGradient>
+            <linearGradient id="burn-grad-indigo" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#6366f1" stopOpacity="0.16" />
+              <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+            </linearGradient>
+          </defs>
 
+          <line x1="0" y1="12" x2="380" y2="12" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="42" x2="380" y2="42" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="72" x2="380" y2="72" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+          <line x1="0" y1="102" x2="380" y2="102" stroke="rgba(255, 255, 255, 0.05)" strokeDasharray="3 3" />
+
+          {/* Stepped orange curve area and stroke */}
+          <path
+            d="M 10 24 L 60 24 L 60 30 L 120 30 L 120 42 L 180 42 L 180 50 L 260 50 L 260 62 L 320 62 L 320 72 L 370 72 L 370 115 L 10 115 Z"
+            fill="url(#burn-grad-orange)"
+          />
           <path
             d="M 10 24 L 60 24 L 60 30 L 120 30 L 120 42 L 180 42 L 180 50 L 260 50 L 260 62 L 320 62 L 320 72 L 370 72"
             fill="none"
             stroke="#ea580c"
-            strokeWidth="1.8"
+            strokeWidth="2"
             strokeLinecap="round"
           />
 
+          {/* Stepped purple/indigo curve area and stroke */}
+          <path
+            d="M 10 18 L 45 18 L 45 28 L 90 28 L 90 32 L 150 32 L 150 48 L 210 48 L 210 65 L 230 65 L 230 80 L 260 80 L 260 98 L 290 98 L 290 110 L 370 110 L 370 115 L 10 115 Z"
+            fill="url(#burn-grad-indigo)"
+          />
           <path
             d="M 10 18 L 45 18 L 45 28 L 90 28 L 90 32 L 150 32 L 150 48 L 210 48 L 210 65 L 230 65 L 230 80 L 260 80 L 260 98 L 290 98 L 290 110 L 370 110"
             fill="none"

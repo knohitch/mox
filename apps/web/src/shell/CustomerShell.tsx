@@ -279,12 +279,32 @@ export function CustomerShell({
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
-  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const [internalCollapsed, setInternalCollapsed] = useState(() => {
+    if (typeof window !== "undefined") {
+      const stored = sessionStorage.getItem("mox.sidebar.collapsed");
+      if (stored !== null) return stored === "true";
+      if (activePath === "/agents" && window.innerWidth >= 1024) return true;
+    }
+    return false;
+  });
   const collapsed = externalCollapsed !== undefined ? externalCollapsed : internalCollapsed;
-  const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => !v));
+  const toggleCollapse = externalOnToggleCollapse ?? (() => setInternalCollapsed((v) => {
+    const next = !v;
+    if (typeof window !== "undefined") sessionStorage.setItem("mox.sidebar.collapsed", String(next));
+    return next;
+  }));
   const [drawerOpen, setDrawerOpen] = useState(false);
   const { me } = useMox();
   const { navigate } = useRoute();
+
+  useEffect(() => {
+    if (activePath === "/agents" && typeof window !== "undefined" && window.innerWidth >= 1024) {
+      if (sessionStorage.getItem("mox.sidebar.collapsed") === null && !internalCollapsed) {
+        setInternalCollapsed(true);
+        sessionStorage.setItem("mox.sidebar.collapsed", "true");
+      }
+    }
+  }, [activePath, internalCollapsed]);
 
   // Escape key closes the mobile drawer.
   useEffect(() => {

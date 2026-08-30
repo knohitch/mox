@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useMox } from "../api/store.js";
 import { useAgentRooms, useModelConnections, useEntitlements } from "../api/store.js";
 import { CANONICAL_ENTITLEMENT_KEYS } from "../api/entitlement.js";
-import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, GatedState, KpiCard, LoadingState, PageHeader, Panel } from "../ui/primitives.js";
+import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, GatedState, KpiCard, LoadingState, PageHeader, Panel, StatusIndicator } from "../ui/primitives.js";
 import { Link } from "../router.js";
 import { buildAttentionItems, buildOpsSnapshot, isNewWorkspace } from "../domain/ops-dashboard.js";
 import { resolveWebConfig } from "../config.js";
@@ -69,14 +69,22 @@ export function HomeView() {
   const [servers, setServers] = useState<Awaited<ReturnType<typeof mox.api.listServers>>>([]);
   const [deployments, setDeployments] = useState<AgentDeployment[]>([]);
   const [usage, setUsage] = useState<Awaited<ReturnType<typeof mox.api.getUsage>>>([]);
+  const [modelConnections, setModelConnections] = useState<ModelConnectionRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"overview" | "agents" | "deployments" | "infrastructure" | "approvals">("overview");
 
   useEffect(() => {
-    void Promise.all([mox.api.listServers(), mox.api.listDeployments(), mox.api.getUsage()])
-      .then(([s, d, u]) => {
+    void Promise.all([
+      mox.api.listServers(),
+      mox.api.listDeployments(),
+      mox.api.getUsage(),
+      mox.api.listModelConnections().catch(() => [] as ModelConnectionRow[]),
+    ])
+      .then(([s, d, u, m]) => {
         setServers(s);
         setDeployments(d);
         setUsage(u);
+        setModelConnections(m);
       })
       .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
   }, [mox.api]);
@@ -94,111 +102,545 @@ export function HomeView() {
     failedDeploymentLabels: deployments.filter((d) => /fail|error/i.test(d.state ?? "")).map((d) => d.agentId ?? d.deploymentId),
     degradedServerLabels: servers.filter((row) => /fail|error|degrad|stop|offline/i.test(row.state ?? "")).map((row) => row.displayName || row.serverId),
   });
+
   const fresh = isNewWorkspace(snapshot);
-  const workspace = mox.me?.orgDisplayName || "Workspace";
+  const workspaceName = mox.me?.orgDisplayName || "Workspace";
+  const userGreeting = greeting();
+  const userName = mox.me?.displayName || "Operator";
+
+  // Calculate cluster health
+  const totalNodes = snapshot.serverCount;
+  const healthyNodes = snapshot.healthyServers;
+  const clusterAvailability = totalNodes > 0
+    ? Math.round((healthyNodes / totalNodes) * 100)
+    : 100;
+  const isHealthy = snapshot.failedDeployments === 0 && snapshot.degradedServers === 0;
+
+  // Authoritative AI Usage primary & secondary metrics
+  const tokenRow = usage.find((r) => /input token/i.test(r.metric)) || usage.find((r) => /token/i.test(r.metric)) || usage[0];
+  const primaryUsageValue = tokenRow
+    ? tokenRow.quantity >= 1_000_000
+      ? `${(tokenRow.quantity / 1_000_000).toFixed(2)}M`
+      : tokenRow.quantity >= 1_000
+      ? `${(tokenRow.quantity / 1_000).toFixed(1)}K`
+      : String(tokenRow.quantity)
+    : "0";
+  const primaryUsageLabel = tokenRow ? humanState(tokenRow.metric) : "Tokens Used";
+
+  const secondaryUsageTokens = usage.filter((r) => r !== tokenRow);
+  const secondaryUsageContext = secondaryUsageTokens.length > 0
+    ? secondaryUsageTokens.map((r) => `${r.quantity >= 1_000 ? `${Math.round(r.quantity / 1000)}k` : r.quantity} ${r.unit}`).join(" · ")
+    : "Current billing period";
+
+  const validationApprovals = mox.approvals;
 
   return (
-    <div className="ops-page home-dashboard">
-      <header className="ops-hero">
-        <div>
-          <h1>{workspace}</h1>
-          <p className="page-sub">What is running, what needs you, and what to do next.</p>
+    <div className="home-dashboard">
+      {/* LEVEL 1: Primary Workspace Header */}
+      <header className="dashboard-header">
+        <div className="dashboard-header-main">
+          <h1>{userGreeting}, {userName}</h1>
+          <p className="dashboard-header-sub">
+            <span className="workspace-name">{workspaceName}</span>
+            <span className="sub-separator">·</span>
+            {mox.entitlements?.commerciallyEntitled ? (
+              <span className="plan-badge plan-badge-active">Enterprise Tier</span>
+            ) : (
+              <span className="plan-badge plan-badge-standard">Standard Plan</span>
+            )}
+          </p>
         </div>
-        <div className="ops-hero-actions">
-          <Link to="/agents"><Button kind="primary">Create agent</Button></Link>
-          <Link to="/servers"><Button>Provision server</Button></Link>
-          <Link to="/models"><Button>Connect model</Button></Link>
+        <div className="dashboard-header-actions">
+          <Link to="/agents">
+            <Button kind="primary">+ Create Agent</Button>
+          </Link>
+          <Link to="/servers">
+            <Button kind="ghost">Provision Server</Button>
+          </Link>
         </div>
       </header>
 
       {loadError ? (
-        <ErrorState message={loadError} onRetry={() => window.location.reload()} />
+        <ErrorState message={`Some summary data is unavailable right now: ${loadError}`} onRetry={() => window.location.reload()} />
       ) : null}
 
-      <section className="ops-kpis" aria-label="Operational summary">
-        <KpiCard label="Agents" value={snapshot.agentCount} hint={`${snapshot.runningAgents} active`} tone={snapshot.agentCount ? "good" : "neutral"} />
-        <KpiCard label="Deployments" value={snapshot.deploymentCount} hint={snapshot.failedDeployments ? `${snapshot.failedDeployments} failed` : "healthy"} tone={snapshot.failedDeployments ? "bad" : "neutral"} />
-        <KpiCard label="Servers" value={snapshot.serverCount} hint={`${snapshot.healthyServers} healthy`} tone={snapshot.degradedServers ? "warn" : "neutral"} />
-        <KpiCard label="Approvals" value={snapshot.openApprovals} hint="waiting on you" tone={snapshot.openApprovals ? "warn" : "neutral"} />
-      </section>
-
-      {fresh ? (
-        <Panel title="Get started" subtitle="This workspace has no agents or infrastructure yet.">
-          <div className="getting-started">
-            <Link to="/agents"><strong>Create an agent</strong><small>Define instructions, model, and tools.</small></Link>
-            <Link to="/models"><strong>Connect a model</strong><small>Bring your own provider key.</small></Link>
-            <Link to="/servers"><strong>Provision a server</strong><small>Give agents a runtime target.</small></Link>
+      {/* LEVEL 2: Asymmetric Operational Overview (Inspired by Reference Layout) */}
+      <section className="dashboard-overview-grid" aria-label="Operational overview">
+        {/* Left Top Panel (~36%): Workspace Status */}
+        <div className="ops-card ops-status-panel">
+          <div className="ops-card-head">
+            <div className="ops-card-title">
+              <span className="ops-icon-dot" aria-hidden>●</span>
+              <span>Workspace Status</span>
+            </div>
+            <span className="ops-cluster-badge">
+              <StatusIndicator status={isHealthy ? "good" : "warn"} pulse={!isHealthy} />
+              <span>{isHealthy ? "Operational" : "Degraded"}</span>
+            </span>
           </div>
-        </Panel>
-      ) : (
-        <div className="ops-split">
-          <Panel title="Needs attention" subtitle="Only real blockers from this workspace.">
-            {attention.length === 0 ? (
-              <EmptyState title="Nothing urgent">No failed deployments, degraded servers, or pending approvals.</EmptyState>
+
+          <div className="ops-stat-grid">
+            <div className="ops-stat-tile">
+              <div className="ops-stat-num">{snapshot.agentCount}</div>
+              <div className="ops-stat-meta">
+                <span className="ops-stat-label">Agents</span>
+                <span className="ops-stat-hint">{snapshot.runningAgents} active</span>
+              </div>
+            </div>
+            <div className="ops-stat-tile">
+              <div className="ops-stat-num">{snapshot.deploymentCount}</div>
+              <div className="ops-stat-meta">
+                <span className="ops-stat-label">Deployments</span>
+                <span className={`ops-stat-hint ${snapshot.failedDeployments ? "hint-bad" : ""}`}>
+                  {snapshot.failedDeployments ? `${snapshot.failedDeployments} failed` : "healthy"}
+                </span>
+              </div>
+            </div>
+            <div className="ops-stat-tile">
+              <div className="ops-stat-num">{snapshot.serverCount}</div>
+              <div className="ops-stat-meta">
+                <span className="ops-stat-label">Servers</span>
+                <span className="ops-stat-hint">{snapshot.healthyServers} healthy</span>
+              </div>
+            </div>
+            <div className="ops-stat-tile">
+              <div className="ops-stat-num">{snapshot.openApprovals}</div>
+              <div className="ops-stat-meta">
+                <span className="ops-stat-label">Approvals</span>
+                <span className={`ops-stat-hint ${snapshot.openApprovals ? "hint-warn" : ""}`}>
+                  {snapshot.openApprovals ? "waiting" : "all clear"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div className="ops-health-row">
+            <div className="ops-health-meta">
+              <span>Cluster Availability</span>
+              <span className="ops-health-pct mono">{clusterAvailability}%</span>
+            </div>
+            <div className="ops-health-track">
+              <div
+                className={`ops-health-bar ${isHealthy ? "bar-good" : "bar-warn"}`}
+                style={{ width: `${clusterAvailability}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Middle Top (~24%): Two Stacked Panels */}
+        <div className="ops-stacked-column">
+          {/* Card 1: AI Usage / Credits */}
+          <div className="ops-card ops-mini-card ops-usage-card">
+            <div className="ops-card-head">
+              <span className="ops-mini-label">AI Usage</span>
+              <span className="ops-mini-tag">Tokens</span>
+            </div>
+            <div className="ops-usage-body">
+              <div className="ops-usage-value mono">{primaryUsageValue}</div>
+              <div className="ops-usage-name">{primaryUsageLabel}</div>
+            </div>
+            <div className="ops-usage-context muted">{secondaryUsageContext}</div>
+          </div>
+
+          {/* Card 2: Needs Attention */}
+          <div className="ops-card ops-mini-card ops-attention-card">
+            <div className="ops-card-head">
+              <span className="ops-mini-label">Needs Attention</span>
+              {attention.length > 0 ? (
+                <span className="attention-badge attention-active">{attention.length} Action</span>
+              ) : (
+                <span className="attention-badge attention-clear">✓ Normal</span>
+              )}
+            </div>
+            {attention.length > 0 ? (
+              <div className="ops-attention-body">
+                <div className="ops-attention-items">
+                  {attention.slice(0, 2).map((item) => (
+                    <Link key={item.id} to={item.href} className="ops-attention-row">
+                      <span className={`attention-dot dot-${item.tone}`} />
+                      <span className="ops-attention-text">{item.title}</span>
+                      <span className="ops-attention-arrow">→</span>
+                    </Link>
+                  ))}
+                </div>
+              </div>
             ) : (
-              <div className="attention-list">
-                {attention.map((item) => (
-                  <Link key={item.id} to={item.href} className="attention-item">
-                    <div>
-                      <strong>{item.title}</strong>
-                      <span>{item.detail}</span>
-                    </div>
-                    <Badge tone={item.tone}>{item.tone === "bad" ? "Action" : "Review"}</Badge>
-                  </Link>
-                ))}
+              <div className="ops-attention-body ops-attention-empty">
+                <span className="clear-icon" aria-hidden>✓</span>
+                <span className="clear-text">All systems operational</span>
               </div>
             )}
-          </Panel>
-          <Panel title="Active work" subtitle="Agents currently on the roster.">
-            {agents.length === 0 ? (
-              <EmptyState title="No agents" action={<Link to="/agents"><Button kind="primary" size="sm">Create agent</Button></Link>}>
-                Create an agent to start autonomous work.
-              </EmptyState>
+          </div>
+        </div>
+
+        {/* Right Top (~40%): Large Operational Visual Panel — Infrastructure Health */}
+        <div className="ops-card ops-infra-panel">
+          <div className="ops-card-head">
+            <div className="ops-card-title">
+              <span className="ops-icon-dot" aria-hidden>🖥</span>
+              <span>Infrastructure Health</span>
+            </div>
+            <Link to="/servers" className="ops-card-action">
+              View servers →
+            </Link>
+          </div>
+
+          <div className="ops-infra-content">
+            {servers.length === 0 ? (
+              <div className="ops-infra-empty-state">
+                <p className="muted">No servers provisioned for this workspace.</p>
+                <Link to="/servers">
+                  <Button size="sm">Provision Server</Button>
+                </Link>
+              </div>
             ) : (
-              <div className="work-list">
-                {agents.slice(0, 6).map((agent) => (
-                  <div className="work-row" key={agent.agentId}>
-                    <Avatar slug={agent.agentId} name={agent.definition.identity.displayName} size={32} />
-                    <div className="meta">
-                      <div className="name">{agent.definition.identity.displayName}</div>
-                      <div className="muted">{agent.modelBadge || agent.definition.model.modelId}</div>
+              <div className="ops-infra-node-list">
+                {servers.slice(0, 2).map((srv) => (
+                  <div key={srv.serverId} className="ops-infra-node-row">
+                    <div className="node-primary-col">
+                      <div className="node-title-wrap">
+                        <strong className="node-name">{srv.displayName || srv.serverId}</strong>
+                        <Badge tone={statusTone(srv.state)}>{humanState(srv.state)}</Badge>
+                      </div>
+                      <div className="node-meta-line muted">
+                        <span>{srv.computeClass || srv.kind}</span>
+                        <span>·</span>
+                        <span>{srv.region}</span>
+                        {srv.agentsRunning !== null && srv.agentsRunning !== undefined ? (
+                          <>
+                            <span>·</span>
+                            <span>{srv.agentsRunning} running</span>
+                          </>
+                        ) : null}
+                      </div>
                     </div>
-                    <Badge tone={statusTone(agent.runtimeStatus || agent.deploymentState)}>{humanState(agent.runtimeStatus || agent.deploymentState || agent.status)}</Badge>
+                    <div className="node-telemetry-col">
+                      <span className="telemetry-tag">Telemetry</span>
+                      <span className="telemetry-value mono">
+                        {srv.cpuPct !== null && srv.memPct !== null
+                          ? `${srv.cpuPct}% CPU · ${srv.memPct}% RAM`
+                          : "Unavailable"}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
             )}
-          </Panel>
-        </div>
-      )}
 
-      <div className="ops-split">
-        <Panel title="Recent deployments" actions={<Link to="/deployments"><Button size="sm">Open</Button></Link>}>
-          <DataTable
-            head={[
-              { key: "agentId", label: "Agent", render: (r) => agentName(agents, r.agentId) },
-              { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-              { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
-            ]}
-            rows={deployments.slice(0, 8)}
-            empty="No deployments yet."
-          />
-        </Panel>
-        <Panel title="Usage this period" actions={<Link to="/usage"><Button size="sm">Open</Button></Link>}>
-          {usage.length === 0 ? (
-            <EmptyState title="No usage yet">Totals appear here once agents run. Charts are omitted until time-series data exists.</EmptyState>
+            <div className="ops-infra-footer-strip">
+              <span className="footer-strip-label">Model Providers:</span>
+              {modelConnections.length > 0 ? (
+                <div className="footer-strip-items">
+                  {modelConnections.slice(0, 3).map((conn) => (
+                    <span key={conn.providerId} className="model-chip">
+                      <span className={`status-dot status-${conn.status === "connected" ? "healthy" : "offline"}`} />
+                      <span>{conn.displayName}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className="muted footer-strip-hint">No external model connections configured</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* LEVEL 3: Primary Dashboard Work Area */}
+      <div className="dashboard-subnav-row">
+        <div className="subnav-tabs" role="tablist" aria-label="Dashboard sections">
+          <button
+            type="button"
+            className={`subnav-btn ${activeTab === "overview" ? "active" : ""}`}
+            onClick={() => setActiveTab("overview")}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            className={`subnav-btn ${activeTab === "agents" ? "active" : ""}`}
+            onClick={() => setActiveTab("agents")}
+          >
+            Agents ({snapshot.agentCount})
+          </button>
+          <button
+            type="button"
+            className={`subnav-btn ${activeTab === "deployments" ? "active" : ""}`}
+            onClick={() => setActiveTab("deployments")}
+          >
+            Deployments ({snapshot.deploymentCount})
+          </button>
+          <button
+            type="button"
+            className={`subnav-btn ${activeTab === "infrastructure" ? "active" : ""}`}
+            onClick={() => setActiveTab("infrastructure")}
+          >
+            Infrastructure ({snapshot.serverCount})
+          </button>
+          <button
+            type="button"
+            className={`subnav-btn ${activeTab === "approvals" ? "active" : ""}`}
+            onClick={() => setActiveTab("approvals")}
+          >
+            Approvals ({snapshot.openApprovals})
+          </button>
+        </div>
+        <div className="subnav-actions">
+          <Link to="/agents">
+            <Button size="sm" kind="primary">+ Create Agent</Button>
+          </Link>
+        </div>
+      </div>
+
+      {/* Sub-nav Tab Content */}
+      {activeTab === "overview" ? (
+        fresh ? (
+          <Panel title="Get started" subtitle="This workspace has no agents or infrastructure yet.">
+            <div className="getting-started">
+              <Link to="/agents"><strong>Create an agent</strong><small>Define instructions, model, and tools.</small></Link>
+              <Link to="/models"><strong>Connect a model</strong><small>Bring your own provider key.</small></Link>
+              <Link to="/servers"><strong>Provision a server</strong><small>Give agents a runtime target.</small></Link>
+            </div>
+          </Panel>
+        ) : (
+          <div className="dashboard-work-grid">
+            {/* Active Agents */}
+            <Panel
+              title="Active Agents"
+              subtitle="Roster agents ready for work or currently executing."
+              actions={<Link to="/agents" className="panel-action-link">View all agents →</Link>}
+            >
+              {agents.length === 0 ? (
+                <EmptyState title="No agents" action={<Link to="/agents"><Button kind="primary" size="sm">Create agent</Button></Link>}>
+                  Create an agent to start autonomous work.
+                </EmptyState>
+              ) : (
+                <div className="work-list">
+                  {agents.slice(0, 5).map((agent) => (
+                    <div className="work-row" key={agent.agentId}>
+                      <Avatar slug={agent.agentId} name={agent.definition.identity.displayName} size={32} />
+                      <div className="meta">
+                        <div className="name">{agent.definition.identity.displayName}</div>
+                        <div className="muted">{agent.modelBadge || agent.definition.model.modelId}</div>
+                      </div>
+                      <Badge tone={statusTone(agent.runtimeStatus || agent.deploymentState)}>
+                        {humanState(agent.runtimeStatus || agent.deploymentState || agent.status)}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Panel>
+
+            {/* Recent Deployments */}
+            <Panel
+              title="Recent Deployments"
+              subtitle="Deployment states across dedicated VPS and sandboxes."
+              actions={<Link to="/deployments" className="panel-action-link">View deployments →</Link>}
+            >
+              {deployments.length === 0 ? (
+                <EmptyState title="No deployments yet">Deploy an agent to track deployment status.</EmptyState>
+              ) : (
+                <DataTable
+                  head={[
+                    { key: "agentId", label: "Agent", render: (r) => agentName(agents, r.agentId) },
+                    { key: "revision", label: "Version", render: (r) => humanState(r.versionId) },
+                    { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
+                    { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+                    { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—" },
+                  ]}
+                  rows={deployments.slice(0, 5)}
+                />
+              )}
+            </Panel>
+
+            {/* Infrastructure Nodes */}
+            <Panel
+              title="Infrastructure Telemetry"
+              subtitle="Cluster compute classes and runtime target health."
+              actions={<Link to="/servers" className="panel-action-link">Manage servers →</Link>}
+            >
+              {servers.length === 0 ? (
+                <EmptyState title="No servers">Provision a server to host dedicated agent sandboxes.</EmptyState>
+              ) : (
+                <DataTable
+                  head={[
+                    { key: "name", label: "Server", render: (r) => r.displayName || r.serverId },
+                    { key: "computeClass", label: "Compute Class", render: (r) => r.computeClass || r.kind },
+                    { key: "state", label: "Status", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU · ${r.memPct}% RAM` : "Unavailable" },
+                  ]}
+                  rows={servers.slice(0, 4)}
+                />
+              )}
+            </Panel>
+
+            {/* Pending Approvals & Actionable Items */}
+            <Panel
+              title="Approvals & Attention"
+              subtitle="Execution gates and permission requests waiting for your decision."
+            >
+              {validationApprovals.length === 0 && attention.length === 0 ? (
+                <div className="approvals-all-clear">
+                  <span className="approvals-check-icon">✓</span>
+                  <div>
+                    <strong>No approvals waiting</strong>
+                    <p className="muted">All current agent actions can proceed without human intervention.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="approvals-work-list">
+                  {validationApprovals.map((ap) => (
+                    <div key={ap.approvalId} className="approval-card">
+                      <div className="approval-head">
+                        <strong>{ap.summary || "Human Gate Approval"}</strong>
+                        <Badge tone="warn">Action Required</Badge>
+                      </div>
+                      <p className="approval-desc muted">{ap.summary || "An agent requires human authorization to proceed."}</p>
+                      <div className="approval-actions">
+                        <Button kind="primary" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "approved")}>
+                          Approve
+                        </Button>
+                        <Button kind="danger" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "denied")}>
+                          Deny
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                  {attention.filter(item => item.id !== "approvals").map((item) => (
+                    <Link key={item.id} to={item.href} className="attention-item">
+                      <div>
+                        <strong>{item.title}</strong>
+                        <span>{item.detail}</span>
+                      </div>
+                      <Badge tone={item.tone}>{item.tone === "bad" ? "Action" : "Review"}</Badge>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </Panel>
+          </div>
+        )
+      ) : activeTab === "agents" ? (
+        <Panel
+          title="Agent Roster"
+          subtitle="All autonomous agents configured in this workspace."
+          actions={<Link to="/agents"><Button kind="primary" size="sm">+ Create Agent</Button></Link>}
+        >
+          {agents.length === 0 ? (
+            <EmptyState title="No agents">Create an agent to get started.</EmptyState>
           ) : (
             <DataTable
               head={[
-                { key: "metric", label: "Metric", render: (r) => humanState(r.metric) },
-                { key: "quantity", label: "Used", render: (r) => r.quantity.toLocaleString() },
-                { key: "unit", label: "Unit" },
+                { key: "agent", label: "Agent", render: (r) => (
+                  <div className="agent-table-cell" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Avatar slug={r.agentId} name={r.definition.identity.displayName} size={28} />
+                    <span>{r.definition.identity.displayName}</span>
+                  </div>
+                )},
+                { key: "model", label: "Model", render: (r) => r.modelBadge || r.definition.model.modelId },
+                { key: "status", label: "Status", render: (r) => <Badge tone={statusTone(r.runtimeStatus || r.deploymentState)}>{humanState(r.runtimeStatus || r.deploymentState || r.status)}</Badge> },
+                { key: "version", label: "Version", render: (r) => `rev ${r.currentVersion}` },
+                { key: "actions", label: "", render: (r) => <Link to={`/agents?agentId=${r.agentId}`} className="linklike">Open →</Link> },
               ]}
-              rows={usage}
+              rows={agents}
             />
           )}
         </Panel>
-      </div>
+      ) : activeTab === "deployments" ? (
+        <Panel
+          title="Deployments"
+          subtitle="Release revisions deployed to sandboxes and production infrastructure."
+          actions={<Link to="/deployments"><Button size="sm">Manage Deployments</Button></Link>}
+        >
+          {deployments.length === 0 ? (
+            <EmptyState title="No deployments">No deployments have been created yet.</EmptyState>
+          ) : (
+            <DataTable
+              head={[
+                { key: "agentId", label: "Agent", render: (r) => agentName(agents, r.agentId) },
+                { key: "revision", label: "Revision", render: (r) => humanState(r.versionId) },
+                { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
+                { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+                { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleString() : "—" },
+              ]}
+              rows={deployments}
+            />
+          )}
+        </Panel>
+      ) : activeTab === "infrastructure" ? (
+        <Panel
+          title="Infrastructure & Models"
+          subtitle="Provisioned servers, BYOK model providers, and compute classes."
+          actions={<Link to="/servers"><Button size="sm">Provision Server</Button></Link>}
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <div>
+              <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#94a3b8" }}>Server Clusters</h4>
+              {servers.length === 0 ? (
+                <EmptyState title="No servers">No servers provisioned.</EmptyState>
+              ) : (
+                <DataTable
+                  head={[
+                    { key: "name", label: "Server Node", render: (r) => r.displayName || r.serverId },
+                    { key: "kind", label: "Provider / Kind", render: (r) => r.provider || r.kind },
+                    { key: "computeClass", label: "Compute Class", render: (r) => r.computeClass || "—" },
+                    { key: "region", label: "Region", render: (r) => r.region },
+                    { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
+                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU · ${r.memPct}% RAM` : "Unavailable" },
+                  ]}
+                  rows={servers}
+                />
+              )}
+            </div>
+            {modelConnections.length > 0 ? (
+              <div>
+                <h4 style={{ margin: "0 0 8px", fontSize: 13, color: "#94a3b8" }}>Model Connections</h4>
+                <DataTable
+                  head={[
+                    { key: "provider", label: "Provider", render: (r) => r.displayName },
+                    { key: "status", label: "Status", render: (r) => <Badge tone={r.status === "connected" ? "good" : "bad"}>{r.status}</Badge> },
+                    { key: "byok", label: "Mode", render: (r) => r.kind === "byok" ? "BYOK Key" : "Managed" },
+                  ]}
+                  rows={modelConnections}
+                />
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+      ) : (
+        <Panel
+          title="Approvals & Governance"
+          subtitle="Execution authorization gates and security checkpoints."
+        >
+          {validationApprovals.length === 0 ? (
+            <EmptyState title="No approvals waiting">
+              All agent runs are currently authorized to proceed.
+            </EmptyState>
+          ) : (
+            <div className="approvals-work-list">
+              {validationApprovals.map((ap) => (
+                <div key={ap.approvalId} className="approval-card">
+                  <div className="approval-head">
+                    <strong>{ap.summary || "Approval Gate"}</strong>
+                    <Badge tone="warn">Pending</Badge>
+                  </div>
+                  <p className="approval-desc muted">{ap.summary || "Execution permission is required."}</p>
+                  <div className="approval-actions">
+                    <Button kind="primary" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "approved")}>
+                      Approve
+                    </Button>
+                    <Button kind="danger" size="sm" onClick={() => void mox.resolveApproval(ap.approvalId, "denied")}>
+                      Deny
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+      )}
     </div>
   );
 }
