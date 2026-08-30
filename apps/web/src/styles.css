@@ -2999,6 +2999,7 @@ small {
   padding: 12px 0;
   cursor: pointer;
   border-bottom: 2px solid transparent;
+  border-radius: 0;
 }
 .subnav-btn:hover {
   color: var(--text);
