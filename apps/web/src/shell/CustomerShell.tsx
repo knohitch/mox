@@ -60,7 +60,6 @@ function SidebarContent({
             <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
         ) : null}
-        <Brand showText={!collapsed} />
       </div>
       <nav className="nav-scroll" aria-label="Main navigation">
         {CUSTOMER_NAV.map((group) => (
@@ -111,31 +110,9 @@ function SidebarContent({
           </div>
         ) : null}
 
-        {me ? (
-          <div
-            className="sidebar-user-card"
-            onClick={() => navigate("/settings")}
-            title="Account & Settings"
-            role="button"
-            tabIndex={0}
-          >
-            <span className="sidebar-user-avatar" aria-hidden>
-              {me.displayName ? me.displayName.slice(0, 1).toUpperCase() : "M"}
-            </span>
-            {!collapsed ? (
-              <div className="sidebar-user-info">
-                <span className="sidebar-user-name">{me.displayName || "Mox User"}</span>
-                <span className="sidebar-user-sub">{me.email || "user@mox.studio"}</span>
-              </div>
-            ) : null}
-            {!collapsed ? (
-              <span className="sidebar-user-opt" aria-hidden>↕</span>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-    </>
-  );
+        </div>
+      </>
+    );
 }
 
 function OrgSwitcher({ me }: { me: MeResponse }) {
