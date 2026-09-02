@@ -71,6 +71,8 @@ function readStudioLocation(): StudioUrlState {
   return parseStudioSearch(window.location.search);
 }
 
+import { useTheme } from "../ui/theme.js";
+
 function commitStudioState(next: StudioUrlState, mode: "push" | "replace"): void {
   if (typeof window === "undefined") return;
   const href = studioLocation(next);
@@ -83,6 +85,7 @@ function commitStudioState(next: StudioUrlState, mode: "push" | "replace"): void
 export function UiStudioView() {
   const [studio, setStudio] = useState<StudioUrlState>(readStudioLocation);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { setTheme } = useTheme();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -93,6 +96,13 @@ export function UiStudioView() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
+
+  useEffect(() => {
+    if (studio.theme) {
+      // @ts-ignore
+      setTheme(studio.theme);
+    }
+  }, [studio.theme, setTheme]);
 
   const updateStudio = (next: StudioUrlState, mode: "push" | "replace" = "push") => {
     commitStudioState(next, mode);
@@ -263,6 +273,20 @@ export function UiStudioView() {
               </select>
             </div>
           ) : null}
+
+          <div className="ui-studio-group" role="group" aria-label="Theme">
+            <span className="ui-studio-group-label">Theme</span>
+            <select
+              className="ui-studio-select"
+              value={studio.theme || "system"}
+              onChange={(e) => updateStudio({ ...studio, theme: e.target.value })}
+              aria-label="Studio Theme"
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
 
           {studio.surface === "admin" ? (
             <>

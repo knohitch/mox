@@ -1,10 +1,11 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { ThemeProvider } from "./ui/theme.js";
 import "./styles.css";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("#root missing");
-createRoot(rootEl).render(<App />);
+createRoot(rootEl).render(<ThemeProvider><App /></ThemeProvider>);
 
 if (import.meta.env.DEV) {
   window.setTimeout(() => {

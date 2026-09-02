@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Canonical UI Studio URL state. Production routing is unchanged: Studio
  * never leaves `/__ui`. Product Link/navigate calls are rewritten onto
  * shareable query params so refresh and history work.
@@ -33,6 +33,7 @@ export interface StudioUrlState {
   page: string;
   previewState: StudioPreviewState;
   role: string;
+  theme?: string;
 }
 
 export const STUDIO_PATH = "/__ui";
@@ -90,7 +91,10 @@ export function parseStudioSearch(search: string): StudioUrlState {
   const previewState = parsePreviewState(params.get("state"));
   const role = parseRole(surface, params.get("role"));
   const page = parsePage(surface, params.get("page"));
-  return { surface, page, previewState, role };
+  const theme = params.get("theme");
+  const state: StudioUrlState = { surface, page, previewState, role };
+  if (theme) state.theme = theme;
+  return state;
 }
 
 export function serializeStudioSearch(state: StudioUrlState): string {
@@ -99,11 +103,12 @@ export function serializeStudioSearch(state: StudioUrlState): string {
   params.set("page", state.page);
   params.set("state", state.previewState);
   if (state.surface !== "customer") params.set("role", state.role);
-  return params.toString();
+  if (state.theme) params.set("theme", state.theme);
+  return `?${params.toString()}`;
 }
 
 export function studioLocation(state: StudioUrlState): string {
-  return `${STUDIO_PATH}?${serializeStudioSearch(state)}`;
+  return `${STUDIO_PATH}${serializeStudioSearch(state)}`;
 }
 
 export function logicalPathFor(state: StudioUrlState): string {
@@ -198,3 +203,4 @@ function parsePage(surface: StudioSurface, raw: string | null): string {
   if (surface === "support") return isSupportSectionKey(raw) ? raw : defaultPageFor("support");
   return resolveCustomerPage(raw) ?? defaultPageFor("customer");
 }
+

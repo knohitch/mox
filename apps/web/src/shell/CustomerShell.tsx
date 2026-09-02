@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { MeResponse } from "@mox/control-plane-contracts";
 import { useMox } from "../api/store.js";
+import { useTheme } from "../ui/theme.js";
 import { Link, useRoute } from "../router.js";
 import { CUSTOMER_NAV } from "../concepts/nav.js";
 import { NotificationBell } from "../views/NotificationCenter.js";
@@ -175,6 +176,7 @@ function OrgSwitcher({ me }: { me: MeResponse }) {
 
 function ProfileMenu() {
   const { me, signOut } = useMox();
+  const { theme, setTheme } = useTheme();
   const { navigate } = useRoute();
   const [open, setOpen] = useState(false);
   if (!me) return null;
@@ -211,6 +213,37 @@ function ProfileMenu() {
               Settings
             </button>
           </li>
+          <li className="menu-divider" aria-hidden></li>
+          <li className="menu-theme">
+            <span className="menu-label">Theme</span>
+            <div className="menu-theme-actions">
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'system' ? 'active' : ''}`}
+                title="System Theme"
+                onClick={() => setTheme('system')}
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'light' ? 'active' : ''}`}
+                title="Light Theme"
+                onClick={() => setTheme('light')}
+              >
+                Light
+              </button>
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'dark' ? 'active' : ''}`}
+                title="Dark Theme"
+                onClick={() => setTheme('dark')}
+              >
+                Dark
+              </button>
+            </div>
+          </li>
+          <li className="menu-divider" aria-hidden></li>
           <li>
             <button
               type="button"
