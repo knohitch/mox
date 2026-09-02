@@ -21,7 +21,7 @@ import { simpleInputFromDefinition, slugFromName } from "../domain/authoring.js"
 import { projectWorkView } from "../domain/work-view.js";
 import { EMPTY_THREAD_SUGGESTIONS, startConversation } from "../domain/first-message.js";
 import { archiveCurrentConversation } from "../domain/thread-actions.js";
-import { Avatar, Badge, Button, Card, EmptyState, ErrorState } from "../ui/primitives.js";
+import { Avatar, Badge, Button, Card, DataTable, EmptyState, ErrorState, Modal } from "../ui/primitives.js";
 import { Markdown } from "../ui/markdown.js";
 
 export function AgentsView() {
@@ -574,102 +574,103 @@ function NewAgentModal({ onDone, onClose }: { onDone: (agentId?: string) => void
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <div className="modal" role="dialog" aria-modal="true" aria-label="New Agent" onClick={(e) => e.stopPropagation()}>
-        <header className="modal-head">
-          <h3>New Agent</h3>
-          <Button kind="ghost" size="sm" onClick={onClose}>✕</Button>
-        </header>
-        <nav className="tabs" aria-label="Authoring mode">
-          <button className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>Simple</button>
-          <button
-            className={mode === "developer" ? "active" : ""}
-            disabled={!developerMode}
-            onClick={() => setMode("developer")}
-            title={developerMode ? undefined : "Developer mode is not enabled on your plan"}
-          >
-            Developer{!developerMode ? " 🔒" : ""}
-          </button>
-        </nav>
-
-        {mode === "simple" ? (
-          <div className="form-grid">
-            <label className="form-field">
-              Name
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Research assistant" autoFocus />
-            </label>
-            <label className="form-field">
-              Role
-              <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Analyst" />
-            </label>
-            <label className="form-field form-field-wide">
-              Instructions
-              <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={3} placeholder="What should the agent do?" />
-            </label>
-            <label className="form-field">
-              Model
-              <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {models.map((m) => (
-                  <option key={m.modelId} value={`${m.providerId}/${m.modelId}`} disabled={!m.available}>
-                    {m.displayName}
-                    {!m.available ? " (not configured)" : m.byok ? " — BYOK" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              Tools
-              <span className="tool-grid">
-                {TOOL_OPTIONS.map((t) => (
-                  <label key={t.toolName} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                    <input type="checkbox" checked={tools.has(t.toolName)} onChange={() => setTools((prev) => { const next = new Set(prev); if (next.has(t.toolName)) next.delete(t.toolName); else next.add(t.toolName); return next; })} />
-                    {t.label}
-                  </label>
-                ))}
-              </span>
-            </label>
-            <label className="form-field">
-              Permission preset
-              <select value={preset} onChange={(e) => setPreset(e.target.value as SimpleAgentInput["permissionsPreset"])}>
-                {PERMISSION_PRESET_OPTIONS.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label} · {p.hint}</option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              Target
-              <select value={target} onChange={(e) => setTarget(e.target.value as typeof target)}>
-                <option value="sandbox">Sandbox</option>
-                <option value="mox-cloud">Mox cloud</option>
-                <option value="customer-vps">Customer VPS</option>
-              </select>
-            </label>
-            <label className="form-field" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-              <input type="checkbox" checked={browser} onChange={(e) => setBrowser(e.target.checked)} />
-              Enable browser / computer use
-            </label>
-          </div>
-        ) : (
-          <div>
-            <p className="muted" style={{ fontSize: 12.5 }}>
-              Paste a canonical <span className="mono">AgentDefinition</span>. Fields are validated by the server — org{" "}
-              <span className="mono">orgId</span>, <span className="mono">agentId</span> seeds and timestamps are minted
-              server-side. Slug is taken from the definition.
-            </p>
-            <textarea className="mono dev-editor" value={raw} onChange={(e) => setRaw(e.target.value)} rows={14} spellCheck={false} />
-          </div>
-        )}
-
-        {error ? <ErrorState message={error} /> : null}
-        <footer className="modal-foot">
+    <Modal
+      isOpen={true}
+      onClose={onClose}
+      title="New Agent"
+      width={550}
+      footer={
+        <>
           <span className="muted" style={{ fontSize: 12.5 }}>Drafts are compiled but stay unpublished until you click Publish.</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <Button onClick={onClose} disabled={busy}>Cancel</Button>
             <Button kind="primary" onClick={() => void submit()} disabled={busy}>{busy ? "Saving…" : "Create draft"}</Button>
           </div>
-        </footer>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <nav className="tabs" aria-label="Authoring mode">
+        <button className={mode === "simple" ? "active" : ""} onClick={() => setMode("simple")}>Simple</button>
+        <button
+          className={mode === "developer" ? "active" : ""}
+          disabled={!developerMode}
+          onClick={() => setMode("developer")}
+          title={developerMode ? undefined : "Developer mode is not enabled on your plan"}
+        >
+          Developer{!developerMode ? " 🔒" : ""}
+        </button>
+      </nav>
+
+      {mode === "simple" ? (
+        <div className="form-grid">
+          <label className="form-field">
+            Name
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Research assistant" autoFocus />
+          </label>
+          <label className="form-field">
+            Role
+            <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="e.g. Analyst" />
+          </label>
+          <label className="form-field form-field-wide">
+            Instructions
+            <textarea value={instructions} onChange={(e) => setInstructions(e.target.value)} rows={3} placeholder="What should the agent do?" />
+          </label>
+          <label className="form-field">
+            Model
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              {models.map((m) => (
+                <option key={m.modelId} value={`${m.providerId}/${m.modelId}`} disabled={!m.available}>
+                  {m.displayName}
+                  {!m.available ? " (not configured)" : m.byok ? " — BYOK" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="form-field">
+            Tools
+            <span className="tool-grid">
+              {TOOL_OPTIONS.map((t) => (
+                <label key={t.toolName} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                  <input type="checkbox" checked={tools.has(t.toolName)} onChange={() => setTools((prev) => { const next = new Set(prev); if (next.has(t.toolName)) next.delete(t.toolName); else next.add(t.toolName); return next; })} />
+                  {t.label}
+                </label>
+              ))}
+            </span>
+          </label>
+          <label className="form-field">
+            Permission preset
+            <select value={preset} onChange={(e) => setPreset(e.target.value as SimpleAgentInput["permissionsPreset"])}>
+              {PERMISSION_PRESET_OPTIONS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label} · {p.hint}</option>
+              ))}
+            </select>
+          </label>
+          <label className="form-field">
+            Target
+            <select value={target} onChange={(e) => setTarget(e.target.value as typeof target)}>
+              <option value="sandbox">Sandbox</option>
+              <option value="mox-cloud">Mox cloud</option>
+              <option value="customer-vps">Customer VPS</option>
+            </select>
+          </label>
+          <label className="form-field" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <input type="checkbox" checked={browser} onChange={(e) => setBrowser(e.target.checked)} />
+            Enable browser / computer use
+          </label>
+        </div>
+      ) : (
+        <div>
+          <p className="muted" style={{ fontSize: 12.5 }}>
+            Paste a canonical <span className="mono">AgentDefinition</span>. Fields are validated by the server — org{" "}
+            <span className="mono">orgId</span>, <span className="mono">agentId</span> seeds and timestamps are minted
+            server-side. Slug is taken from the definition.
+          </p>
+          <textarea className="mono dev-editor" value={raw} onChange={(e) => setRaw(e.target.value)} rows={14} spellCheck={false} />
+        </div>
+      )}
+
+      {error ? <ErrorState message={error} /> : null}
+    </Modal>
   );
 }
 
@@ -1195,26 +1196,14 @@ function FilesTab({ agentId }: { agentId: string }) {
       {files.length === 0 ? (
         <EmptyState>No synced files.</EmptyState>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Path</th>
-              <th>Size</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {files.map((f) => (
-              <tr key={f.path}>
-                <td className="mono">{f.path}</td>
-                <td>{Math.ceil(f.sizeBytes / 102.4) / 10} KB</td>
-                <td>
-                  <button onClick={() => void mox.api.filePreview(agentId, f.path).then(setPreview)}>Preview</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <DataTable
+          head={[
+            { key: "path", label: "Path", render: (f) => <span className="mono">{f.path}</span> },
+            { key: "size", label: "Size", render: (f) => `${Math.ceil(f.sizeBytes / 102.4) / 10} KB` },
+            { key: "actions", label: "", render: (f) => <button onClick={() => void mox.api.filePreview(agentId, f.path).then(setPreview)}>Preview</button> }
+          ]}
+          rows={files}
+        />
       )}
       {preview !== null && (
         <pre style={{ marginTop: 12 }}>
@@ -1575,30 +1564,20 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
         {versions.length === 0 ? (
           <EmptyState>No published versions yet. Publish to make the current definition live.</EmptyState>
         ) : (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr><th>Rev</th><th>Changelog</th><th>By</th><th>At</th><th /></tr>
-              </thead>
-              <tbody>
-                {[...versions].reverse().map((v, i) => (
-                  <tr key={v.revision}>
-                    <td><Badge tone={v.revision === summary.currentVersion ? "good" : "neutral"}>v{v.revision}</Badge></td>
-                    <td>{v.changelog ?? "—"}</td>
-                    <td className="mono">{v.createdBy}</td>
-                    <td className="muted">{new Date(v.createdAt).toLocaleString()}</td>
-                    <td>
-                      {v.revision !== summary.currentVersion ? (
-                        <Button size="sm" disabled={busy} onClick={() => void rollback(v.revision)}>Rollback</Button>
-                      ) : (
-                        <span className="muted">live</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            head={[
+              { key: "revision", label: "Rev", render: (v) => <Badge tone={v.revision === summary.currentVersion ? "good" : "neutral"}>v{v.revision}</Badge> },
+              { key: "changelog", label: "Changelog", render: (v) => v.changelog ?? "—" },
+              { key: "createdBy", label: "By", render: (v) => <span className="mono">{v.createdBy}</span> },
+              { key: "createdAt", label: "At", render: (v) => <span className="muted">{new Date(v.createdAt).toLocaleString()}</span> },
+              { key: "actions", label: "", render: (v) => v.revision !== summary.currentVersion ? (
+                <Button size="sm" disabled={busy} onClick={() => void rollback(v.revision)}>Rollback</Button>
+              ) : (
+                <span className="muted">live</span>
+              ) }
+            ]}
+            rows={[...versions].reverse()}
+          />
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
           <input
@@ -1919,7 +1898,7 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
         <p className="muted" style={{ fontSize: 13, margin: "0 0 10px" }}>
           Control memory isolation and contextual persistence across conversation turns.
         </p>
-        <div className="notice" style={{ borderLeft: "3px solid var(--warn, #e6a23c)", marginBottom: 12 }}>
+        <div className="notice notice-warn" style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
             <Badge tone="warn">Configuration Stored Only</Badge>
             <strong>Runtime Memory Engine Inactive</strong>
@@ -2026,7 +2005,7 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
 
       {/* Phase 04 §E: Honest NOT_PRODUCTIZED_BLOCKED Local Device Card */}
       <Card title="Deployment Target: Local Device">
-        <div className="notice" style={{ borderLeft: "3px solid var(--accent-bad)" }}>
+        <div className="notice notice-error">
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
             <Badge tone="bad">NOT_PRODUCTIZED_BLOCKED</Badge>
             <strong>Local device deployment blocked</strong>

@@ -7,6 +7,8 @@ import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
 import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./views/AuthPages.js";
 import { Badge, BrandLogo, Card, EmptyState, SidebarToggleIcon } from "./ui/primitives.js";
+import { ToastProvider } from "./ui/toast.js";
+import { CommandPalette } from "./ui/CommandPalette.js";
 import { UiStudioView } from "./views/UiStudioView.js";
 import {
   ADMIN_NAV_GROUPS,
@@ -800,7 +802,10 @@ export function App() {
   return (
     <AppRenderBoundary>
       <MoxProvider>
-        <SurfaceRouter />
+        <ToastProvider>
+          <SurfaceRouter />
+          <CommandPalette />
+        </ToastProvider>
       </MoxProvider>
     </AppRenderBoundary>
   );

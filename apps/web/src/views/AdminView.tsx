@@ -17,7 +17,7 @@ import type {
   AdminStaff,
   CreatedStaffInvite,
 } from "../api/types.js";
-import { Badge, Card, EmptyState } from "../ui/primitives.js";
+import { Badge, Card, DataTable, EmptyState } from "../ui/primitives.js";
 import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, isAdminTabKey, visibleAdminTabs } from "../concepts/staffNav.js";
 import { useStaffSection } from "../shell/staffSection.js";
 import { formatDisplayValue, humanizeLabel } from "../domain/labels.js";
@@ -57,26 +57,9 @@ function renderAdminCell(column: string, val: unknown): ReactNode {
   return str;
 }
 
-function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: Array<Record<string, unknown>>; empty?: string }) {
-  if (rows.length === 0) return <EmptyState>{empty}</EmptyState>;
-  return (
-    <div className="admin-table-wrap">
-      <table className="admin-table">
-        <thead>
-          <tr>{columns.map((column) => <th key={column}>{humanizeLabel(column)}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={asString(row.id ?? row.key ?? row.code ?? row.providerName ?? row.slug ?? index)}>
-              {columns.map((column) => (
-                <td key={column}>{renderAdminCell(column, row[column])}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+function AdminDataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: Array<Record<string, unknown>>; empty?: string }) {
+  const head = columns.map((c) => ({ key: c, label: humanizeLabel(c), render: (row: any) => renderAdminCell(c, row[c]) }));
+  return <DataTable head={head} rows={rows} empty={empty} />;
 }
 
 function Metric({ label, value, detail }: { label: string; value: ReactNode; detail?: ReactNode }) {
@@ -212,45 +195,39 @@ function StaffPanel({ staff, onRefresh }: { staff?: AdminStaff; onRefresh: () =>
     <>
       <div className="grid grid-2">
         <Card title={`Platform staff (${staff.members.length})`}>
-          <div className="admin-table-wrap">
-            <table className="admin-table">
-              <thead>
-                <tr><th>Display name</th><th>Email</th><th>Role</th><th>Surface</th><th>Status</th><th>Granted at</th><th /></tr>
-              </thead>
-              <tbody>
-                {staff.members.map((member) => (
-                  <tr key={`${member.userId}:${member.role}`}>
-                    <td>{member.displayName}</td>
-                    <td>{member.email}</td>
-                    <td>{member.role}</td>
-                    <td>{member.surface}</td>
-                    <td>{member.revokedAt ? "revoked" : member.enabled ? "active" : "disabled"}</td>
-                    <td>{member.createdAt}</td>
-                    <td className="admin-actions-cell">
-                      {!member.revokedAt && !member.enabled && (
-                        <button type="button" onClick={() => void confirmAnd(async () => {
-                          await api.adminStaffAction(member.userId, member.role, "enable");
-                          await onRefresh();
-                        })}>Enable</button>
-                      )}
-                      {!member.revokedAt && member.enabled && (
-                        <>
-                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
-                            await api.adminStaffAction(member.userId, member.role, "disable", "admin_console");
-                            await onRefresh();
-                          })}>Disable</button>
-                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
-                            await api.adminStaffAction(member.userId, member.role, "revoke", "admin_console");
-                            await onRefresh();
-                          })}>Revoke</button>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            head={[
+              { key: "displayName", label: "Display name" },
+              { key: "email", label: "Email" },
+              { key: "role", label: "Role" },
+              { key: "surface", label: "Surface" },
+              { key: "status", label: "Status", render: (member) => member.revokedAt ? "revoked" : member.enabled ? "active" : "disabled" },
+              { key: "createdAt", label: "Granted at" },
+              { key: "actions", label: "", render: (member) => (
+                <div className="admin-actions-cell">
+                  {!member.revokedAt && !member.enabled && (
+                    <button type="button" onClick={() => void confirmAnd(async () => {
+                      await api.adminStaffAction(member.userId, member.role, "enable");
+                      await onRefresh();
+                    })}>Enable</button>
+                  )}
+                  {!member.revokedAt && member.enabled && (
+                    <>
+                      <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                        await api.adminStaffAction(member.userId, member.role, "disable", "admin_console");
+                        await onRefresh();
+                      })}>Disable</button>
+                      <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                        await api.adminStaffAction(member.userId, member.role, "revoke", "admin_console");
+                        await onRefresh();
+                      })}>Revoke</button>
+                    </>
+                  )}
+                </div>
+              )}
+            ]}
+            rows={staff.members}
+          />
         </Card>
         <div>
           <Card title="Invite staff">
@@ -293,30 +270,26 @@ function StaffPanel({ staff, onRefresh }: { staff?: AdminStaff; onRefresh: () =>
             ) : null}
           </Card>
           <Card title={`Pending invites (${staff.invites.length})`}>
-            <div className="admin-table-wrap">
-              <table className="admin-table">
-                <thead><tr><th>Email</th><th>Role</th><th>Surface</th><th>Expires</th><th>Status</th><th /></tr></thead>
-                <tbody>
-                  {staff.invites.map((inviteRow) => (
-                    <tr key={inviteRow.invitationId}>
-                      <td>{inviteRow.email}</td>
-                      <td>{inviteRow.role}</td>
-                      <td>{inviteRow.surface}</td>
-                      <td>{inviteRow.expiresAt}</td>
-                      <td>{inviteRow.revokedAt ? "revoked" : inviteRow.consumedAt ? "consumed" : "pending"}</td>
-                      <td className="admin-actions-cell">
-                        {!inviteRow.revokedAt && !inviteRow.consumedAt && (
-                          <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
-                            await api.adminRevokeStaffInvite(inviteRow.invitationId);
-                            await onRefresh();
-                          })}>Revoke</button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              head={[
+                { key: "email", label: "Email" },
+                { key: "role", label: "Role" },
+                { key: "surface", label: "Surface" },
+                { key: "expiresAt", label: "Expires" },
+                { key: "status", label: "Status", render: (inviteRow) => inviteRow.revokedAt ? "revoked" : inviteRow.consumedAt ? "consumed" : "pending" },
+                { key: "actions", label: "", render: (inviteRow) => (
+                  <div className="admin-actions-cell">
+                    {!inviteRow.revokedAt && !inviteRow.consumedAt && (
+                      <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                        await api.adminRevokeStaffInvite(inviteRow.invitationId);
+                        await onRefresh();
+                      })}>Revoke</button>
+                    )}
+                  </div>
+                )}
+              ]}
+              rows={staff.invites}
+            />
           </Card>
         </div>
       </div>
@@ -352,13 +325,13 @@ function DashboardPanel({ overview }: { overview?: AdminOverview }) {
       </div>
       <div className="grid grid-3">
         <Card title="Provider incidents">
-          <DataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={overview.incidents} />
+          <AdminDataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={overview.incidents} />
         </Card>
         <Card title="Recent notification jobs">
-          <DataTable columns={["id", "audienceType", "status", "fanoutDone", "fanoutTotal"]} rows={overview.notifications} />
+          <AdminDataTable columns={["id", "audienceType", "status", "fanoutDone", "fanoutTotal"]} rows={overview.notifications} />
         </Card>
         <Card title="Open abuse">
-          <DataTable columns={["id", "orgId", "category", "severity", "status"]} rows={overview.abuse} />
+          <AdminDataTable columns={["id", "orgId", "category", "severity", "status"]} rows={overview.abuse} />
         </Card>
       </div>
     </>
@@ -403,12 +376,12 @@ function CustomersPanel({ customers, onRefresh }: { customers: AdminCustomer[]; 
                 </label>
                 <button type="button" onClick={() => void api.adminCustomerAction(selected.orgId, "reactivate").then(onRefresh)}>Reactivate</button>
               </div>
-              <DataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
+              <AdminDataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
             </Card>
             <Card title="Subscriptions, servers and agents">
-              <DataTable columns={["id", "plan", "tier", "state", "failedRenewals"]} rows={selected.subscriptions} />
-              <DataTable columns={["id", "hostname", "providerName", "regionCode", "state", "lastError"]} rows={selected.servers} />
-              <DataTable columns={["agentId", "displayName", "status", "currentVersion"]} rows={selected.agents} />
+              <AdminDataTable columns={["id", "plan", "tier", "state", "failedRenewals"]} rows={selected.subscriptions} />
+              <AdminDataTable columns={["id", "hostname", "providerName", "regionCode", "state", "lastError"]} rows={selected.servers} />
+              <AdminDataTable columns={["agentId", "displayName", "status", "currentVersion"]} rows={selected.agents} />
             </Card>
             <Card title="Support notes">
               <form className="admin-inline-form" onSubmit={(event) => {
@@ -422,7 +395,7 @@ function CustomersPanel({ customers, onRefresh }: { customers: AdminCustomer[]; 
                 <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add a support note" />
                 <button type="submit">Add note</button>
               </form>
-              <DataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
+              <AdminDataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
             </Card>
           </>
         )}
@@ -445,15 +418,15 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
     <>
       <div className="grid grid-2">
         <Card title="Plan versions">
-          <DataTable columns={["id", "productId", "version", "status", "activatedAt"]} rows={plans.planVersions} />
+          <AdminDataTable columns={["id", "productId", "version", "status", "activatedAt"]} rows={plans.planVersions} />
         </Card>
         <Card title="Entitlement Definitions">
-          <DataTable columns={["key", "valueType", "description", "defaultValue"]} rows={plans.entitlementDefinitions} />
+          <AdminDataTable columns={["key", "valueType", "description", "defaultValue"]} rows={plans.entitlementDefinitions} />
         </Card>
       </div>
 
       <Card title="Plan Entitlement Values">
-        <DataTable columns={["planVersionId", "key", "value"]} rows={plans.entitlementValues} />
+        <AdminDataTable columns={["planVersionId", "key", "value"]} rows={plans.entitlementValues} />
         <form className="admin-inline-form" onSubmit={(e) => {
           e.preventDefault();
           if (!entDraft.planVersionId || !entDraft.key) return;
@@ -477,7 +450,7 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
       </Card>
 
       <Card title="Regional price books">
-        <DataTable columns={["id", "productId", "pricingRegion", "mode", "baseCurrency", "baseAmountMinor", "fxRateScaled"]} rows={plans.priceBooks} />
+        <AdminDataTable columns={["id", "productId", "pricingRegion", "mode", "baseCurrency", "baseAmountMinor", "fxRateScaled"]} rows={plans.priceBooks} />
         <form className="admin-inline-form" onSubmit={(event) => {
           event.preventDefault();
           void api.adminUpsertPriceBook(priceDraft).then(onRefresh);
@@ -500,10 +473,10 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
 
       <div className="grid grid-2">
         <Card title="Price Versions & Effective Dates">
-          <DataTable columns={["priceBookId", "version", "amountMinor", "currency", "effectiveFrom"]} rows={plans.priceVersions} />
+          <AdminDataTable columns={["priceBookId", "version", "amountMinor", "currency", "effectiveFrom"]} rows={plans.priceVersions} />
         </Card>
         <Card title="Pricing Regions">
-          <DataTable columns={["code", "name", "defaultCurrency"]} rows={plans.pricingRegions} />
+          <AdminDataTable columns={["code", "name", "defaultCurrency"]} rows={plans.pricingRegions} />
         </Card>
       </div>
 
@@ -518,10 +491,10 @@ function PlansPanel({ plans, onRefresh }: { plans?: AdminPlans; onRefresh: () =>
             <input type="number" value={exponent} onChange={(event) => setExponent(Number(event.target.value))} />
             <button type="submit">Save currency</button>
           </form>
-          <DataTable columns={["code", "displayName", "exponent"]} rows={plans.currencies} />
+          <AdminDataTable columns={["code", "displayName", "exponent"]} rows={plans.currencies} />
         </Card>
         <Card title="Add-ons">
-          <DataTable columns={["code", "displayName", "consumable", "unit"]} rows={plans.addons} />
+          <AdminDataTable columns={["code", "displayName", "consumable", "unit"]} rows={plans.addons} />
           <form className="admin-inline-form" onSubmit={(e) => {
             e.preventDefault();
             if (!addonDraft.code || !addonDraft.displayName) return;
@@ -626,7 +599,7 @@ function ComputePanel({ compute, onRefresh }: { compute?: AdminCompute; onRefres
             <input value={account.credentialRefId} onChange={(event) => setAccount({ ...account, credentialRefId: event.target.value })} placeholder="Credential ref id" />
             <button type="submit">Save account</button>
           </form>
-          <DataTable columns={["providerName", "accountLabel", "regionCode", "commercialStatus", "healthScore", "enabled", "hasCredentialRef"]} rows={compute.accounts} />
+          <AdminDataTable columns={["providerName", "accountLabel", "regionCode", "commercialStatus", "healthScore", "enabled", "hasCredentialRef"]} rows={compute.accounts} />
         </Card>
         <Card title="Compute classes">
           <form className="admin-inline-form" onSubmit={(event) => {
@@ -640,53 +613,34 @@ function ComputePanel({ compute, onRefresh }: { compute?: AdminCompute; onRefres
             <input value={cls.skuMap} onChange={(event) => setCls({ ...cls, skuMap: event.target.value })} />
             <button type="submit">Save class</button>
           </form>
-          <DataTable columns={["code", "displayName", "minVcpu", "minRamGb", "active"]} rows={compute.classes} />
+          <AdminDataTable columns={["code", "displayName", "minVcpu", "minRamGb", "active"]} rows={compute.classes} />
         </Card>
       </div>
       <Card title="Orders and lifecycle">
-        <div className="admin-table-wrap">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Org</th>
-                <th>Hostname</th>
-                <th>Provider</th>
-                <th>Region</th>
-                <th>SKU</th>
-                <th>State</th>
-                <th>Error</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {compute.orders.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: "center", padding: "16px" }}>No compute orders.</td></tr>
-              ) : (
-                compute.orders.map((order) => (
-                  <tr key={asString(order.id)}>
-                    <td><code>{asString(order.id).slice(0, 8)}</code></td>
-                    <td><code>{asString(order.orgId).slice(0, 8)}</code></td>
-                    <td>{asString(order.hostname)}</td>
-                    <td>{asString(order.providerName)}</td>
-                    <td>{asString(order.regionCode)}</td>
-                    <td>{asString(order.providerSku)}</td>
-                    <td><Badge tone={toneFor(asString(order.state))}>{asString(order.state)}</Badge></td>
-                    <td>{asString(order.lastError)}</td>
-                    <td className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
-                      <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "restart").then(onRefresh)}>Restart</button>
-                      <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "redeploy").then(onRefresh)}>Redeploy</button>
-                      <button type="button" className="danger" onClick={() => void api.adminComputeOrderAction(asString(order.id), "cancel").then(onRefresh)}>Cancel</button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          head={[
+            { key: "id", label: "ID", render: (order) => <code>{asString(order.id).slice(0, 8)}</code> },
+            { key: "orgId", label: "Org", render: (order) => <code>{asString(order.orgId).slice(0, 8)}</code> },
+            { key: "hostname", label: "Hostname", render: (order) => asString(order.hostname) },
+            { key: "providerName", label: "Provider", render: (order) => asString(order.providerName) },
+            { key: "regionCode", label: "Region", render: (order) => asString(order.regionCode) },
+            { key: "providerSku", label: "SKU", render: (order) => asString(order.providerSku) },
+            { key: "state", label: "State", render: (order) => <Badge tone={toneFor(asString(order.state))}>{asString(order.state)}</Badge> },
+            { key: "lastError", label: "Error", render: (order) => asString(order.lastError) },
+            { key: "actions", label: "Actions", render: (order) => (
+              <div className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
+                <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "restart").then(onRefresh)}>Restart</button>
+                <button type="button" onClick={() => void api.adminComputeOrderAction(asString(order.id), "redeploy").then(onRefresh)}>Redeploy</button>
+                <button type="button" className="danger" onClick={() => void api.adminComputeOrderAction(asString(order.id), "cancel").then(onRefresh)}>Cancel</button>
+              </div>
+            )}
+          ]}
+          rows={compute.orders}
+          empty="No compute orders."
+        />
       </Card>
       <Card title="Mox Node health">
-        <DataTable columns={["nodeId", "orgId", "orderId", "version", "status", "lastHeartbeatAt"]} rows={compute.nodes} />
+        <AdminDataTable columns={["nodeId", "orgId", "orderId", "version", "status", "lastHeartbeatAt"]} rows={compute.nodes} />
       </Card>
     </>
   );
@@ -760,27 +714,23 @@ function RuntimePanel({ runtime, onRefresh }: { runtime: AdminRuntimeAgent[]; on
   const { api } = useMox();
   return (
     <Card title={`Agent runtime (${runtime.length})`}>
-      <div className="admin-table-wrap">
-        <table className="admin-table">
-          <thead><tr><th>Agent</th><th>Status</th><th>Deployment</th><th>Version</th><th>Server</th><th>Failures</th><th /></tr></thead>
-          <tbody>
-            {runtime.map((agent) => (
-              <tr key={agent.agentId}>
-                <td>{agent.displayName}</td>
-                <td><Badge tone={toneFor(agent.status)}>{agent.status}</Badge></td>
-                <td>{agent.deploymentState}</td>
-                <td>{agent.runtimeVersion ?? ""}</td>
-                <td>{agent.serverPlacement ?? ""}</td>
-                <td>{agent.failures.join(", ")}</td>
-                <td className="admin-actions-cell">
-                  <button type="button" onClick={() => void api.adminRuntimeAction(agent.agentId, "restart").then(onRefresh)}>Restart</button>
-                  <button type="button" onClick={() => void api.adminRuntimeAction(agent.agentId, "redeploy").then(onRefresh)}>Redeploy</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        head={[
+          { key: "displayName", label: "Agent" },
+          { key: "status", label: "Status", render: (agent) => <Badge tone={toneFor(agent.status)}>{agent.status}</Badge> },
+          { key: "deploymentState", label: "Deployment" },
+          { key: "runtimeVersion", label: "Version", render: (agent) => agent.runtimeVersion ?? "" },
+          { key: "serverPlacement", label: "Server", render: (agent) => agent.serverPlacement ?? "" },
+          { key: "failures", label: "Failures", render: (agent) => agent.failures.join(", ") },
+          { key: "actions", label: "", render: (agent) => (
+            <div className="admin-actions-cell">
+              <button type="button" onClick={() => void api.adminRuntimeAction(agent.agentId, "restart").then(onRefresh)}>Restart</button>
+              <button type="button" onClick={() => void api.adminRuntimeAction(agent.agentId, "redeploy").then(onRefresh)}>Redeploy</button>
+            </div>
+          )}
+        ]}
+        rows={runtime}
+      />
     </Card>
   );
 }
@@ -856,46 +806,29 @@ function NotificationsPanel({ jobs, onRefresh }: { jobs?: AdminNotificationJobs;
       )}
 
       <Card title="Notification jobs" actions={jobs ? <Badge tone="accent">{jobs.stats.scheduled} scheduled</Badge> : null}>
-        <div className="admin-table-wrap">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Audience</th>
-                <th>Title</th>
-                <th>Status</th>
-                <th>Fanout</th>
-                <th>Scheduled At</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(jobs?.jobs ?? []).length === 0 ? (
-                <tr><td colSpan={7} style={{ textAlign: "center", padding: "16px" }}>No notification jobs.</td></tr>
-              ) : (
-                (jobs?.jobs ?? []).map((job) => (
-                  <tr key={asString(job.id)}>
-                    <td><code>{asString(job.id).slice(0, 8)}</code></td>
-                    <td>{asString(job.audienceType)}</td>
-                    <td>{asString(job.title)}</td>
-                    <td><Badge tone={toneFor(asString(job.status))}>{asString(job.status)}</Badge></td>
-                    <td>{asString(job.fanoutDone)} / {asString(job.fanoutTotal)}</td>
-                    <td>{asString(job.scheduledAt) || "Immediate"}</td>
-                    <td className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
-                      <button type="button" onClick={async () => {
-                        const details = await api.adminGetNotificationJob(asString(job.id));
-                        setInspectJob(details);
-                      }}>Inspect</button>
-                      {job.status === "scheduled" && (
-                        <button type="button" className="danger" onClick={() => void api.adminCancelNotificationJob(asString(job.id)).then(onRefresh)}>Cancel</button>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <DataTable
+          head={[
+            { key: "id", label: "ID", render: (job) => <code>{asString(job.id).slice(0, 8)}</code> },
+            { key: "audienceType", label: "Audience", render: (job) => asString(job.audienceType) },
+            { key: "title", label: "Title", render: (job) => asString(job.title) },
+            { key: "status", label: "Status", render: (job) => <Badge tone={toneFor(asString(job.status))}>{asString(job.status)}</Badge> },
+            { key: "fanout", label: "Fanout", render: (job) => `${asString(job.fanoutDone)} / ${asString(job.fanoutTotal)}` },
+            { key: "scheduledAt", label: "Scheduled At", render: (job) => asString(job.scheduledAt) || "Immediate" },
+            { key: "actions", label: "Actions", render: (job) => (
+              <div className="admin-actions-cell" style={{ display: "flex", gap: "6px" }}>
+                <button type="button" onClick={async () => {
+                  const details = await api.adminGetNotificationJob(asString(job.id));
+                  setInspectJob(details);
+                }}>Inspect</button>
+                {job.status === "scheduled" && (
+                  <button type="button" className="danger" onClick={() => void api.adminCancelNotificationJob(asString(job.id)).then(onRefresh)}>Cancel</button>
+                )}
+              </div>
+            )}
+          ]}
+          rows={jobs?.jobs ?? []}
+          empty="No notification jobs."
+        />
       </Card>
     </>
   );
@@ -931,22 +864,17 @@ function OperationsPanel({ operations, onRefresh }: { operations?: AdminOperatio
             <input value={flagDraft.rollout} onChange={(e) => setFlagDraft({ ...flagDraft, rollout: e.target.value })} placeholder='Rollout JSON' />
             <button type="submit">Save flag</button>
           </form>
-          <div className="admin-table-wrap" style={{ marginTop: "12px" }}>
-            <table className="admin-table">
-              <thead><tr><th>Key</th><th>Org</th><th>Enabled</th><th>Actions</th></tr></thead>
-              <tbody>
-                {operations.featureFlags.length === 0 ? <tr><td colSpan={4} style={{ textAlign: "center", padding: "12px" }}>No flags set.</td></tr> : operations.featureFlags.map((flag) => (
-                  <tr key={asString(flag.key)}>
-                    <td><code>{asString(flag.key)}</code></td>
-                    <td>{asString(flag.orgId).slice(0, 8)}</td>
-                    <td><Badge tone={asString(flag.enabled) === "true" ? "good" : "bad"}>{asString(flag.enabled)}</Badge></td>
-                    <td>
-                      <button type="button" className="danger" onClick={() => void api.adminDeleteFeatureFlag(asString(flag.key)).then(onRefresh)}>Delete</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ marginTop: "12px" }}>
+            <DataTable
+              head={[
+                { key: "key", label: "Key", render: (flag) => <code>{asString(flag.key)}</code> },
+                { key: "orgId", label: "Org", render: (flag) => asString(flag.orgId).slice(0, 8) },
+                { key: "enabled", label: "Enabled", render: (flag) => <Badge tone={asString(flag.enabled) === "true" ? "good" : "bad"}>{asString(flag.enabled)}</Badge> },
+                { key: "actions", label: "Actions", render: (flag) => <button type="button" className="danger" onClick={() => void api.adminDeleteFeatureFlag(asString(flag.key)).then(onRefresh)}>Delete</button> }
+              ]}
+              rows={operations.featureFlags}
+              empty="No flags set."
+            />
           </div>
         </Card>
 
@@ -962,35 +890,30 @@ function OperationsPanel({ operations, onRefresh }: { operations?: AdminOperatio
             <input value={backupOrg} onChange={(e) => setBackupOrg(e.target.value)} placeholder="Target Org ID" required />
             <button type="submit">Trigger tenant backup</button>
           </form>
-          <div className="admin-table-wrap" style={{ marginTop: "12px" }}>
-            <table className="admin-table">
-              <thead><tr><th>ID</th><th>Org</th><th>Location</th><th>Actions</th></tr></thead>
-              <tbody>
-                {operations.backups.length === 0 ? <tr><td colSpan={4} style={{ textAlign: "center", padding: "12px" }}>No backups.</td></tr> : operations.backups.map((bkp) => (
-                  <tr key={asString(bkp.id)}>
-                    <td><code>{asString(bkp.id).slice(0, 8)}</code></td>
-                    <td>{asString(bkp.orgId).slice(0, 8)}</td>
-                    <td>{asString(bkp.location)}</td>
-                    <td>
-                      <button type="button" onClick={() => void api.adminRestoreTest(asString(bkp.id)).then(() => setRestoreStatus(`Verified ${asString(bkp.id).slice(0, 8)}`))}>Test Restore</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ marginTop: "12px" }}>
+            <DataTable
+              head={[
+                { key: "id", label: "ID", render: (bkp) => <code>{asString(bkp.id).slice(0, 8)}</code> },
+                { key: "orgId", label: "Org", render: (bkp) => asString(bkp.orgId).slice(0, 8) },
+                { key: "location", label: "Location", render: (bkp) => asString(bkp.location) },
+                { key: "actions", label: "Actions", render: (bkp) => <button type="button" onClick={() => void api.adminRestoreTest(asString(bkp.id)).then(() => setRestoreStatus(`Verified ${asString(bkp.id).slice(0, 8)}`))}>Test Restore</button> }
+              ]}
+              rows={operations.backups}
+              empty="No backups."
+            />
           </div>
         </Card>
       </div>
 
       <div className="grid grid-2">
-        <Card title="Jobs and queues"><DataTable columns={["id", "kind", "state", "attempts", "lastError"]} rows={[...operations.queues, ...operations.jobs]} /></Card>
-        <Card title="Incidents"><DataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={operations.incidents} /></Card>
-        <Card title="Abuse"><DataTable columns={["id", "orgId", "category", "severity", "status"]} rows={operations.abuse} /></Card>
-        <Card title="Cost and margin ledger"><DataTable columns={["entryId", "kind", "category", "amountMinor", "currency", "providerName", "at"]} rows={operations.costLedger} /></Card>
+        <Card title="Jobs and queues"><AdminDataTable columns={["id", "kind", "state", "attempts", "lastError"]} rows={[...operations.queues, ...operations.jobs]} /></Card>
+        <Card title="Incidents"><AdminDataTable columns={["incidentId", "kind", "severity", "status", "title"]} rows={operations.incidents} /></Card>
+        <Card title="Abuse"><AdminDataTable columns={["id", "orgId", "category", "severity", "status"]} rows={operations.abuse} /></Card>
+        <Card title="Cost and margin ledger"><AdminDataTable columns={["entryId", "kind", "category", "amountMinor", "currency", "providerName", "at"]} rows={operations.costLedger} /></Card>
       </div>
 
       <Card title="Audit Log">
-        <DataTable columns={["at", "actorType", "actorId", "action", "resourceType", "resourceId", "result"]} rows={operations.audit} />
+        <AdminDataTable columns={["at", "actorType", "actorId", "action", "resourceType", "resourceId", "result"]} rows={operations.audit} />
       </Card>
     </>
   );
@@ -1019,44 +942,24 @@ function ContractsPanel({ contracts, onRefresh }: { contracts: AdminEnterpriseCo
   return (
     <>
       <Card title={`Enterprise Contracts (${contracts.length})`}>
-        <div className="admin-table-wrap">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>Contract Ref</th>
-                <th>Org</th>
-                <th>Status</th>
-                <th>Effective From</th>
-                <th>Effective Until</th>
-                <th>Created At</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {contracts.length === 0 ? (
-                <tr><td colSpan={7} style={{ textAlign: "center", padding: "16px" }}>No enterprise contracts found.</td></tr>
+        <DataTable
+          head={[
+            { key: "contractRef", label: "Contract Ref", render: (c) => <code>{c.contractRef}</code> },
+            { key: "orgId", label: "Org", render: (c) => c.orgName ?? c.orgId },
+            { key: "active", label: "Status", render: (c) => <Badge tone={c.active ? "good" : "bad"}>{c.active ? "Active" : "Inactive"}</Badge> },
+            { key: "effectiveFrom", label: "Effective From" },
+            { key: "effectiveUntil", label: "Effective Until", render: (c) => c.effectiveUntil ?? "Perpetual" },
+            { key: "createdAt", label: "Created At" },
+            { key: "actions", label: "Actions", render: (c) => c.active ? (
+                <button type="button" className="danger" onClick={() => void api.adminDeactivateEnterpriseContract(c.contractRef).then(onRefresh)}>Deactivate</button>
               ) : (
-                contracts.map((c) => (
-                  <tr key={c.id}>
-                    <td><code>{c.contractRef}</code></td>
-                    <td>{c.orgName ?? c.orgId}</td>
-                    <td><Badge tone={c.active ? "good" : "bad"}>{c.active ? "Active" : "Inactive"}</Badge></td>
-                    <td>{c.effectiveFrom}</td>
-                    <td>{c.effectiveUntil ?? "Perpetual"}</td>
-                    <td>{c.createdAt}</td>
-                    <td>
-                      {c.active ? (
-                        <button type="button" className="danger" onClick={() => void api.adminDeactivateEnterpriseContract(c.contractRef).then(onRefresh)}>Deactivate</button>
-                      ) : (
-                        <span style={{ color: "var(--color-muted)" }}>Deactivated</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                <span style={{ color: "var(--color-muted)" }}>Deactivated</span>
+              )
+            }
+          ]}
+          rows={contracts}
+          empty="No enterprise contracts found."
+        />
       </Card>
 
       <Card title="Author Enterprise Contract">

@@ -3,7 +3,7 @@ import { useTheme } from "../ui/theme.js";
 import { useMox } from "../api/store.js";
 import { useAgentRooms, useModelConnections, useEntitlements } from "../api/store.js";
 import { CANONICAL_ENTITLEMENT_KEYS } from "../api/entitlement.js";
-import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, GatedState, KpiCard, LoadingState, PageHeader, Panel, StatusIndicator } from "../ui/primitives.js";
+import { Avatar, Badge, Button, DataTable, EmptyState, ErrorState, GatedState, KpiCard, LoadingState, Modal, PageHeader, Panel, StatusIndicator } from "../ui/primitives.js";
 import { Link } from "../router.js";
 import { buildAttentionItems, buildOpsSnapshot, isNewWorkspace } from "../domain/ops-dashboard.js";
 import { resolveWebConfig } from "../config.js";
@@ -48,7 +48,7 @@ function humanState(state: string | undefined): string {
   return (state ?? "n/a").replace(/[_-]/g, " ");
 }
 
-/** Render telemetry that may be explicitly unavailable (Phase 01 Â§C). */
+/** Render telemetry that may be explicitly unavailable (Phase 01 §C). */
 function telemetry(value: number | null | undefined, unit?: string): string {
   if (value === null || value === undefined) return "unavailable";
   return `${String(value)}${unit ?? ""}`;
@@ -62,7 +62,7 @@ function greeting(): string {
 }
 
 // ----------------------------------------------------------------------------
-// Home â€” operational overview from authoritative API data only.
+// Home — operational overview from authoritative API data only.
 // ----------------------------------------------------------------------------
 
 export function HomeView() {
@@ -130,7 +130,7 @@ export function HomeView() {
 
   const secondaryUsageTokens = usage.filter((r) => r !== tokenRow);
   const secondaryUsageContext = secondaryUsageTokens.length > 0
-    ? secondaryUsageTokens.map((r) => `${r.quantity >= 1_000 ? `${Math.round(r.quantity / 1000)}k` : r.quantity} ${r.unit}`).join(" Â· ")
+    ? secondaryUsageTokens.map((r) => `${r.quantity >= 1_000 ? `${Math.round(r.quantity / 1000)}k` : r.quantity} ${r.unit}`).join(" · ")
     : "Current billing period";
 
   const validationApprovals = mox.approvals;
@@ -143,7 +143,7 @@ export function HomeView() {
           <h1>{userGreeting}, {userName}</h1>
           <p className="dashboard-header-sub">
             <span className="workspace-name">{workspaceName}</span>
-            <span className="sub-separator">Â·</span>
+            <span className="sub-separator">·</span>
             {mox.entitlements?.commerciallyEntitled ? (
               <span className="plan-badge plan-badge-active">Enterprise Tier</span>
             ) : (
@@ -202,11 +202,11 @@ export function HomeView() {
           <div className="ops-card ops-infra-panel">
             <div className="ops-card-head">
               <div className="ops-card-title">
-                <span className="ops-icon-dot" aria-hidden>ðŸ–¥</span>
+                <span className="ops-icon-dot" aria-hidden>🖥</span>
                 <span>Infrastructure Health</span>
               </div>
               <Link to="/servers" className="ops-card-action">
-                View servers â†’
+                View servers →
               </Link>
             </div>
 
@@ -229,11 +229,11 @@ export function HomeView() {
                         </div>
                         <div className="node-meta-line muted">
                           <span>{srv.computeClass || srv.kind}</span>
-                          <span>Â·</span>
+                          <span>·</span>
                           <span>{srv.region}</span>
                           {srv.agentsRunning !== null && srv.agentsRunning !== undefined ? (
                             <>
-                              <span>Â·</span>
+                              <span>·</span>
                               <span>{srv.agentsRunning} running</span>
                             </>
                           ) : null}
@@ -243,7 +243,7 @@ export function HomeView() {
                         <span className="telemetry-tag">Telemetry</span>
                         <span className="telemetry-value mono">
                           {srv.cpuPct !== null && srv.memPct !== null
-                            ? `${srv.cpuPct}% CPU Â· ${srv.memPct}% RAM`
+                            ? `${srv.cpuPct}% CPU · ${srv.memPct}% RAM`
                             : "Unavailable"}
                         </span>
                       </div>
@@ -305,7 +305,7 @@ export function HomeView() {
                 {attention.length > 0 ? (
                   <span className="attention-badge attention-active">{attention.length} Action</span>
                 ) : (
-                  <span className="attention-badge attention-clear">âœ“ Normal</span>
+                  <span className="attention-badge attention-clear">✓ Normal</span>
                 )}
               </div>
               {attention.length > 0 ? (
@@ -315,14 +315,14 @@ export function HomeView() {
                       <Link key={item.id} to={item.href} className="ops-attention-row">
                         <span className={`attention-dot dot-${item.tone}`} />
                         <span className="ops-attention-text">{item.title}</span>
-                        <span className="ops-attention-arrow">â†’</span>
+                        <span className="ops-attention-arrow">→</span>
                       </Link>
                     ))}
                   </div>
                 </div>
               ) : (
                 <div className="ops-attention-body ops-attention-empty">
-                  <span className="clear-icon" aria-hidden>âœ“</span>
+                  <span className="clear-icon" aria-hidden>✓</span>
                   <span className="clear-text">All systems operational</span>
                 </div>
               )}
@@ -393,7 +393,7 @@ export function HomeView() {
             <Panel
               title="Active Agents"
               subtitle="Roster agents ready for work or currently executing."
-              actions={<Link to="/agents" className="panel-action-link">View all agents â†’</Link>}
+              actions={<Link to="/agents" className="panel-action-link">View all agents →</Link>}
             >
               {agents.length === 0 ? (
                 <EmptyState title="No agents" action={<Link to="/agents"><Button kind="primary" size="sm">Create agent</Button></Link>}>
@@ -421,7 +421,7 @@ export function HomeView() {
             <Panel
               title="Recent Deployments"
               subtitle="Deployment states across dedicated VPS and sandboxes."
-              actions={<Link to="/deployments" className="panel-action-link">View deployments â†’</Link>}
+              actions={<Link to="/deployments" className="panel-action-link">View deployments →</Link>}
             >
               {deployments.length === 0 ? (
                 <EmptyState title="No deployments yet">Deploy an agent to track deployment status.</EmptyState>
@@ -432,7 +432,7 @@ export function HomeView() {
                     { key: "revision", label: "Version", render: (r) => humanState(r.versionId) },
                     { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
                     { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-                    { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "â€”" },
+                    { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—" },
                   ]}
                   rows={deployments.slice(0, 5)}
                 />
@@ -443,7 +443,7 @@ export function HomeView() {
             <Panel
               title="Infrastructure Telemetry"
               subtitle="Cluster compute classes and runtime target health."
-              actions={<Link to="/servers" className="panel-action-link">Manage servers â†’</Link>}
+              actions={<Link to="/servers" className="panel-action-link">Manage servers →</Link>}
             >
               {servers.length === 0 ? (
                 <EmptyState title="No servers">Provision a server to host dedicated agent sandboxes.</EmptyState>
@@ -453,7 +453,7 @@ export function HomeView() {
                     { key: "name", label: "Server", render: (r) => r.displayName || r.serverId },
                     { key: "computeClass", label: "Compute Class", render: (r) => r.computeClass || r.kind },
                     { key: "state", label: "Status", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU Â· ${r.memPct}% RAM` : "Unavailable" },
+                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU · ${r.memPct}% RAM` : "Unavailable" },
                   ]}
                   rows={servers.slice(0, 4)}
                 />
@@ -467,7 +467,7 @@ export function HomeView() {
             >
               {validationApprovals.length === 0 && attention.length === 0 ? (
                 <div className="approvals-all-clear">
-                  <span className="approvals-check-icon">âœ“</span>
+                  <span className="approvals-check-icon">✓</span>
                   <div>
                     <strong>No approvals waiting</strong>
                     <p className="muted">All current agent actions can proceed without human intervention.</p>
@@ -526,7 +526,7 @@ export function HomeView() {
                 { key: "model", label: "Model", render: (r) => r.modelBadge || r.definition.model.modelId },
                 { key: "status", label: "Status", render: (r) => <Badge tone={statusTone(r.runtimeStatus || r.deploymentState)}>{humanState(r.runtimeStatus || r.deploymentState || r.status)}</Badge> },
                 { key: "version", label: "Version", render: (r) => `rev ${r.currentVersion}` },
-                { key: "actions", label: "", render: (r) => <Link to={`/agents?agentId=${r.agentId}`} className="linklike">Open â†’</Link> },
+                { key: "actions", label: "", render: (r) => <Link to={`/agents?agentId=${r.agentId}`} className="linklike">Open →</Link> },
               ]}
               rows={agents}
             />
@@ -547,7 +547,7 @@ export function HomeView() {
                 { key: "revision", label: "Revision", render: (r) => humanState(r.versionId) },
                 { key: "target", label: "Target", render: (r) => humanState(r.target?.kind) },
                 { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-                { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleString() : "â€”" },
+                { key: "updatedAt", label: "Updated", render: (r) => r.updatedAt ? new Date(r.updatedAt).toLocaleString() : "—" },
               ]}
               rows={deployments}
             />
@@ -569,10 +569,10 @@ export function HomeView() {
                   head={[
                     { key: "name", label: "Server Node", render: (r) => r.displayName || r.serverId },
                     { key: "kind", label: "Provider / Kind", render: (r) => r.provider || r.kind },
-                    { key: "computeClass", label: "Compute Class", render: (r) => r.computeClass || "â€”" },
+                    { key: "computeClass", label: "Compute Class", render: (r) => r.computeClass || "—" },
                     { key: "region", label: "Region", render: (r) => r.region },
                     { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
-                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU Â· ${r.memPct}% RAM` : "Unavailable" },
+                    { key: "telemetry", label: "Telemetry", render: (r) => r.cpuPct !== null && r.memPct !== null ? `${r.cpuPct}% CPU · ${r.memPct}% RAM` : "Unavailable" },
                   ]}
                   rows={servers}
                 />
@@ -739,7 +739,7 @@ export function RoomsView() {
               </label>
             ))}
             <Button kind="primary" onClick={createRoom} disabled={creating || !newTitle.trim()}>
-              {creating ? "Creatingâ€¦" : "Create"}
+              {creating ? "Creating…" : "Create"}
             </Button>
           </div>
         )}
@@ -775,7 +775,7 @@ export function RoomsView() {
               <div className="muted" style={{ marginBottom: 8 }}>
                 Members: {selected.memberAgentIds.length ? selected.memberAgentIds.map((id) => agentName(mox.agents, id)).join(", ") : "none"} + humans.
               </div>
-              {/* Phase 02 Â§G: no canonical room-scoped thread authority exists â€”
+              {/* Phase 02 §G: no canonical room-scoped thread authority exists —
                   threads are per-agent, so a shared room thread is NOT fabricated
                   with a synthetic `room:<id>` id (that would call a guaranteed
                   failing endpoint). Render an honest unavailable state instead. */}
@@ -839,7 +839,7 @@ export function ServersView() {
   );
 }
 
-/** Per-server lifecycle actions (Â§H). The orchestration layer is authoritative. */
+/** Per-server lifecycle actions (§H). The orchestration layer is authoritative. */
 function ServerActionsCell({ server, onDone }: { server: ServerSummary; onDone: () => Promise<void> }) {
   const mox = useMox();
   const [busy, setBusy] = useState(false);
@@ -982,9 +982,9 @@ function DeploymentActionsCell({ deployment, onDone }: { deployment: AgentDeploy
       {versions !== null && (
         <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           <select value={revision} onChange={(e) => setRevision(e.target.value ? Number(e.target.value) : "")} aria-label="revision">
-            <option value="">vâ€¦</option>
+            <option value="">v…</option>
             {[...versions].reverse().filter((v) => v.revision !== (deployment as { desiredRevision?: number }).desiredRevision).map((v) => (
-              <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` Â· ${v.changelog}` : ""}</option>
+              <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` · ${v.changelog}` : ""}</option>
             ))}
           </select>
           <Button size="sm" kind="primary" disabled={busy || typeof revision !== "number"} onClick={() => void rollback()}>
@@ -997,7 +997,7 @@ function DeploymentActionsCell({ deployment, onDone }: { deployment: AgentDeploy
   );
 }
 
-/** Deploy a published revision to a target (Â§I). */
+/** Deploy a published revision to a target (§I). */
 function DeployModal({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> }) {
   const mox = useMox();
   const [agentId, setAgentId] = useState("");
@@ -1044,61 +1044,61 @@ function DeployModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
 
   const publishedOnly = mox.agents.map((a) => a).filter((a) => a.currentVersion && a.currentVersion > 0);
   return (
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <div className="modal" role="dialog" aria-modal="true" aria-label="Deploy agent" onClick={(e) => e.stopPropagation()}>
-        <header className="modal-head">
-          <h3>Deploy agent</h3>
-          <Button kind="ghost" size="sm" onClick={onClose}>âœ•</Button>
-        </header>
-        {publishedOnly.length === 0 ? (
-          <EmptyState>No published agents yet. Publish an agent from its Settings â†’ Versions first.</EmptyState>
-        ) : (
-          <div className="form-grid">
-            <label className="form-field">
-              Agent
-              <select value={agentId} onChange={(e) => pickAgent(e.target.value)}>
-                <option value="">Select agentâ€¦</option>
-                {publishedOnly.map((a) => (
-                  <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName} (v{a.currentVersion})</option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              Revision
-              <select disabled={versions === null} value={revision} onChange={(e) => setRevision(e.target.value ? Number(e.target.value) : "")}>
-                {versions === null ? (
-                  <option value="">â€”</option>
-                ) : versions.length === 0 ? (
-                  <option value="">no published revisions</option>
-                ) : (
-                  [...versions].reverse().map((v) => (
-                    <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` Â· ${v.changelog}` : ""}</option>
-                  ))
-                )}
-              </select>
-            </label>
-            <label className="form-field">
-              Target
-              <select value={target} onChange={(e) => setTarget(e.target.value as typeof target)}>
-                <option value="sandbox">Sandbox</option>
-                <option value="mox-cloud">Mox cloud</option>
-                <option value="customer-vps">Customer VPS</option>
-              </select>
-            </label>
-          </div>
-        )}
-        {error ? <ErrorState message={error} /> : null}
-        <footer className="modal-foot">
+    <Modal
+      isOpen={true}
+      onClose={onClose}
+      title="Deploy agent"
+      footer={
+        <>
           <span className="muted" style={{ fontSize: 12.5 }}>Deploying sets the desired state; the orchestrator reconciles it.</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
             <Button onClick={onClose} disabled={busy}>Cancel</Button>
             <Button kind="primary" disabled={busy || typeof revision !== "number" || !agentId} onClick={() => void deploy()}>
-              {busy ? "Deployingâ€¦" : "Deploy"}
+              {busy ? "Deploying…" : "Deploy"}
             </Button>
           </div>
-        </footer>
-      </div>
-    </div>
+        </>
+      }
+    >
+      {publishedOnly.length === 0 ? (
+        <EmptyState>No published agents yet. Publish an agent from its Settings → Versions first.</EmptyState>
+      ) : (
+        <div className="form-grid">
+          <label className="form-field">
+            Agent
+            <select value={agentId} onChange={(e) => pickAgent(e.target.value)}>
+              <option value="">Select agent…</option>
+              {publishedOnly.map((a) => (
+                <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName} (v{a.currentVersion})</option>
+              ))}
+            </select>
+          </label>
+          <label className="form-field">
+            Revision
+            <select disabled={versions === null} value={revision} onChange={(e) => setRevision(e.target.value ? Number(e.target.value) : "")}>
+              {versions === null ? (
+                <option value="">—</option>
+              ) : versions.length === 0 ? (
+                <option value="">no published revisions</option>
+              ) : (
+                [...versions].reverse().map((v) => (
+                  <option key={v.revision} value={v.revision}>v{v.revision}{v.changelog ? ` · ${v.changelog}` : ""}</option>
+                ))
+              )}
+            </select>
+          </label>
+          <label className="form-field">
+            Target
+            <select value={target} onChange={(e) => setTarget(e.target.value as typeof target)}>
+              <option value="sandbox">Sandbox</option>
+              <option value="mox-cloud">Mox cloud</option>
+              <option value="customer-vps">Customer VPS</option>
+            </select>
+          </label>
+        </div>
+      )}
+      {error ? <ErrorState message={error} /> : null}
+    </Modal>
   );
 }
 
@@ -1142,7 +1142,7 @@ export function ModelsView() {
           baseUrl: baseUrl.trim() || undefined,
         });
         load();
-        setStatus(`${active.displayName}: ${next.credentialConfigured ? "connected â€” credentials stored in your vault" : "connected â€” no credentials set"}`);
+        setStatus(`${active.displayName}: ${next.credentialConfigured ? "connected — credentials stored in your vault" : "connected — no credentials set"}`);
       } else {
         await mox.api.rotateModelConnection(active.providerId, { apiKey: apiKey.trim() });
         load();
@@ -1192,7 +1192,7 @@ export function ModelsView() {
       </Panel>
       <Panel
         title="Your connections"
-        subtitle="API keys for BYOK providers are encrypted in your workspace vault â€” never shown back."
+        subtitle="API keys for BYOK providers are encrypted in your workspace vault — never shown back."
         actions={
           <div className="row-actions">
             {connections.slice(0, 4).map((m) => (
@@ -1235,37 +1235,35 @@ export function ModelsView() {
       </Panel>
       {status ? <p className={`muted mono`} role="status">{status}</p> : null}
       {active && mode ? (
-        <div className="modal-backdrop" onClick={() => { if (!busy) { setActive(null); setMode(null); } }} role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label={mode === "connect" ? "Connect provider" : "Rotate key"} onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h3>{mode === "connect" ? `Connect ${active.displayName}` : `Rotate API key â€” ${active.displayName}`}</h3>
-              <Button kind="ghost" size="sm" onClick={() => { setActive(null); setMode(null); }}>âœ•</Button>
-            </header>
-            <div className="form-grid">
-              <label className="form-field">
-                API key
-                <input type="password" value={apiKey} placeholder={mode === "connect" ? "Paste your provider API key (optional)" : "Paste the new API key"} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
-              </label>
-              {mode === "connect" && active.baseUrlSupported ? (
-                <label className="form-field">
-                  Endpoint (optional)
-                  <input value={baseUrl} placeholder="https://api.example.com/v1 â€” leave empty for default" onChange={(e) => setBaseUrl(e.target.value)} />
-                </label>
-              ) : null}
+        <Modal
+          isOpen={true}
+          onClose={() => { if (!busy) { setActive(null); setMode(null); } }}
+          title={mode === "connect" ? `Connect ${active.displayName}` : `Rotate API key — ${active.displayName}`}
+          footer={
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <Button onClick={() => { setActive(null); setMode(null); }} disabled={busy}>Cancel</Button>
+              <Button kind="primary" disabled={busy || (mode === "rotate" && !apiKey.trim())} onClick={() => void submit()}>
+                {busy ? "Working…" : mode === "connect" ? "Connect" : "Rotate"}
+              </Button>
             </div>
-            <p className="muted" style={{ fontSize: 12.5 }}>
-              Your key is encrypted before it touches our servers and never returned by any API call.
-            </p>
-            <footer className="modal-foot">
-              <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <Button onClick={() => { setActive(null); setMode(null); }} disabled={busy}>Cancel</Button>
-                <Button kind="primary" disabled={busy || (mode === "rotate" && !apiKey.trim())} onClick={() => void submit()}>
-                  {busy ? "Workingâ€¦" : mode === "connect" ? "Connect" : "Rotate"}
-                </Button>
-              </div>
-            </footer>
+          }
+        >
+          <div className="form-grid">
+            <label className="form-field">
+              API key
+              <input type="password" value={apiKey} placeholder={mode === "connect" ? "Paste your provider API key (optional)" : "Paste the new API key"} onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
+            </label>
+            {mode === "connect" && active.baseUrlSupported ? (
+              <label className="form-field">
+                Endpoint (optional)
+                <input value={baseUrl} placeholder="https://api.example.com/v1 — leave empty for default" onChange={(e) => setBaseUrl(e.target.value)} />
+              </label>
+            ) : null}
           </div>
-        </div>
+          <p className="muted" style={{ fontSize: 12.5 }}>
+            Your key is encrypted before it touches our servers and never returned by any API call.
+          </p>
+        </Modal>
       ) : null}
     </div>
   );
@@ -1381,7 +1379,7 @@ export function IntegrationsView() {
 
   return (
     <div>
-      <PageHeader title="Apps & Integrations" subtitle="Third-party apps your agents can use â€” credentials stay in your vault." />
+      <PageHeader title="Apps & Integrations" subtitle="Third-party apps your agents can use — credentials stay in your vault." />
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       {status ? <p className="muted mono" role="status">{status}</p> : null}
@@ -1390,7 +1388,7 @@ export function IntegrationsView() {
           head={[
             { key: "displayName", label: "App" },
             { key: "kind", label: "Kind", render: (r) => kindLabel(r.kind) },
-            { key: "tools", label: "Tools", render: (r) => (r.requiresRuntimeSession ? <Badge tone="warn">needs runtime session</Badge> : r.tools.length ? r.tools.join(", ") : "â€”") },
+            { key: "tools", label: "Tools", render: (r) => (r.requiresRuntimeSession ? <Badge tone="warn">needs runtime session</Badge> : r.tools.length ? r.tools.join(", ") : "—") },
             { key: "connected", label: "Status", render: (r) => (connected(r) ? <Badge tone="good">connected</Badge> : r.credentialConfigured ? <Badge tone="warn">connecting</Badge> : <Badge>not connected</Badge>) },
             { key: "actions", label: "", render: (r) => (
               <div className="row-actions">
@@ -1411,7 +1409,7 @@ export function IntegrationsView() {
         />
       </Panel>
       {items.map((r) => connected(r) && grantFor === r.integrationId ? (
-        <Panel key={r.integrationId} title={`Tool grants â€” ${r.displayName}`} subtitle="Which agents may call this app's tools (per-tool, wildcards allowed).">
+        <Panel key={r.integrationId} title={`Tool grants — ${r.displayName}`} subtitle="Which agents may call this app's tools (per-tool, wildcards allowed).">
           {grantError ? <ErrorState message={grantError} /> : null}
           <DataTable
             head={[
@@ -1427,7 +1425,7 @@ export function IntegrationsView() {
           {grantFor === r.integrationId ? (
             <div className="row-actions" style={{ marginTop: 10 }}>
               <select aria-label="Agent" value={grantAgentId} onChange={(e) => setGrantAgentId(e.target.value)}>
-                <option value="">Select agentâ€¦</option>
+                <option value="">Select agent…</option>
                 {mox.agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName}</option>)}
               </select>
               <input aria-label="Tool pattern" value={grantPattern} placeholder="tool pattern (default *)" onChange={(e) => setGrantPattern(e.target.value)} />
@@ -1437,37 +1435,37 @@ export function IntegrationsView() {
         </Panel>
       ) : null)}
       {connectFor ? (
-        <div className="modal-backdrop" onClick={() => { if (!busy) setConnectFor(null); }} role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Connect integration" onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h3>Connect {connectFor.displayName}</h3>
-              <Button kind="ghost" size="sm" onClick={() => { setConnectFor(null); setSecretsInput({}); }}>âœ•</Button>
-            </header>
-            <div className="form-grid">
-              {connectFor.configFields.map((f) => (
-                <label className="form-field" key={f.key}>
-                  {f.label}{f.optional ? " (optional)" : ""}
-                  {f.secret ? (
-                    <input type="password" value={secretsInput[f.key] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [f.key]: e.target.value }))} />
-                  ) : (
-                    <input value={secretsInput[f.key] ?? ""} onChange={(e) => setSecretsInput((prev) => ({ ...prev, [f.key]: e.target.value }))} />
-                  )}
-                </label>
-              ))}
-              {connectFor.configFields.length === 0 ? <p className="muted">This integration is already connected server-side; reconnect with new credentials if needed.</p> : null}
-            </div>
-            {connectFor.requiresRuntimeSession ? <p className="muted" style={{ fontSize: 12.5 }}>This app also needs a runtime session on your deployment.</p> : null}
-            {connectFor.dangerous ? <p className="muted" style={{ fontSize: 12.5 }}>This app can execute arbitrary remote actions â€” connect at your own risk.</p> : null}
-            {status ? <p className="muted mono">{status}</p> : null}
-            <footer className="modal-foot">
+        <Modal
+          isOpen={true}
+          onClose={() => { if (!busy) setConnectFor(null); }}
+          title={`Connect ${connectFor.displayName}`}
+          footer={
+            <>
               <span className="muted" style={{ fontSize: 12.5 }}>Secrets are encrypted at rest and never shown back to you.</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                 <Button onClick={() => { setConnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
-                <Button kind="primary" onClick={() => void connect()} disabled={busy}>{busy ? "Workingâ€¦" : "Connect"}</Button>
+                <Button kind="primary" onClick={() => void connect()} disabled={busy}>{busy ? "Working…" : "Connect"}</Button>
               </div>
-            </footer>
+            </>
+          }
+        >
+          <div className="form-grid">
+            {connectFor.configFields.map((f) => (
+              <label className="form-field" key={f.key}>
+                {f.label}{f.optional ? " (optional)" : ""}
+                {f.secret ? (
+                  <input type="password" value={secretsInput[f.key] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [f.key]: e.target.value }))} />
+                ) : (
+                  <input value={secretsInput[f.key] ?? ""} onChange={(e) => setSecretsInput((prev) => ({ ...prev, [f.key]: e.target.value }))} />
+                )}
+              </label>
+            ))}
+            {connectFor.configFields.length === 0 ? <p className="muted">This integration is already connected server-side; reconnect with new credentials if needed.</p> : null}
           </div>
-        </div>
+          {connectFor.requiresRuntimeSession ? <p className="muted" style={{ fontSize: 12.5 }}>This app also needs a runtime session on your deployment.</p> : null}
+          {connectFor.dangerous ? <p className="muted" style={{ fontSize: 12.5 }}>This app can execute arbitrary remote actions — connect at your own risk.</p> : null}
+          {status ? <p className="muted mono">{status}</p> : null}
+        </Modal>
       ) : null}
     </div>
   );
@@ -1507,7 +1505,7 @@ export function ChannelsView() {
       const secrets: Record<string, string> = {};
       for (const k of connectFor.secretKeys) secrets[k] = secretsInput[k] ?? "";
       const res = await mox.api.connectChannel(connectFor.channelId, { agentId, secrets });
-      setStatus(res.connected ? `${connectFor.displayName} â†’ connected` : `${connectFor.displayName} â†’ not connected`);
+      setStatus(res.connected ? `${connectFor.displayName} → connected` : `${connectFor.displayName} → not connected`);
       setConnectFor(null);
       setAgentId("");
       setSecretsInput({});
@@ -1559,7 +1557,7 @@ export function ChannelsView() {
 
   return (
     <div>
-      <PageHeader title="Channels" subtitle="Messaging channels your agents can send and receive through â€” each connection binds one agent." />
+      <PageHeader title="Channels" subtitle="Messaging channels your agents can send and receive through — each connection binds one agent." />
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState /> : null}
       {status ? <p className="muted mono" role="status">{status}</p> : null}
@@ -1568,7 +1566,7 @@ export function ChannelsView() {
           head={[
             { key: "displayName", label: "Channel" },
             { key: "kind", label: "Kind", render: (r) => kindLabel(r.kind) },
-            { key: "boundAgentName", label: "Bound agent", render: (r) => r.boundAgentName ?? <span className="muted">â€”</span> },
+            { key: "boundAgentName", label: "Bound agent", render: (r) => r.boundAgentName ?? <span className="muted">—</span> },
             { key: "connected", label: "Status", render: (r) => <Badge tone={statusTone(channelState(r))}>{stateLabel(channelState(r))}</Badge> },
             { key: "actions", label: "", render: (r) => (
               <div className="row-actions">
@@ -1599,67 +1597,65 @@ export function ChannelsView() {
         </ul>
       </Panel>
       {connectFor ? (
-        <div className="modal-backdrop" onClick={() => { if (!busy) setConnectFor(null); }} role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Connect channel" onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h3>Connect {connectFor.displayName}</h3>
-              <Button kind="ghost" size="sm" onClick={() => { setConnectFor(null); }}>âœ•</Button>
-            </header>
-            <div className="form-grid">
-              <label className="form-field">
-                Bind to agent
-                <select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
-                  <option value="">Select agentâ€¦</option>
-                  {mox.agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName}</option>)}
-                </select>
-              </label>
-              {connectFor.secretKeys.map((k) => (
-                <label className="form-field" key={k}>
-                  {secretLabel(k)}
-                  <input type="password" value={secretsInput[k] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [k]: e.target.value }))} />
-                </label>
-              ))}
-              {connectFor.secretKeys.length === 0 ? <p className="muted">No external credential required for this channel.</p> : null}
-            </div>
-            <p className="muted" style={{ fontSize: 12.5 }}>{connectFor.setupInstructions}</p>
-            <footer className="modal-foot">
+        <Modal
+          isOpen={true}
+          onClose={() => { if (!busy) setConnectFor(null); }}
+          title={`Connect ${connectFor.displayName}`}
+          footer={
+            <>
               <span className="muted" style={{ fontSize: 12.5 }}>Secrets are encrypted at rest and never shown back to you.</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
                 <Button onClick={() => { setConnectFor(null); setAgentId(""); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
-                <Button kind="primary" disabled={busy || !agentId} onClick={() => void connect()}>{busy ? "Workingâ€¦" : "Connect"}</Button>
+                <Button kind="primary" disabled={busy || !agentId} onClick={() => void connect()}>{busy ? "Working…" : "Connect"}</Button>
               </div>
-            </footer>
+            </>
+          }
+        >
+          <div className="form-grid">
+            <label className="form-field">
+              Bind to agent
+              <select value={agentId} onChange={(e) => setAgentId(e.target.value)}>
+                <option value="">Select agent…</option>
+                {mox.agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName}</option>)}
+              </select>
+            </label>
+            {connectFor.secretKeys.map((k) => (
+              <label className="form-field" key={k}>
+                {secretLabel(k)}
+                <input type="password" value={secretsInput[k] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [k]: e.target.value }))} />
+              </label>
+            ))}
+            {connectFor.secretKeys.length === 0 ? <p className="muted">No external credential required for this channel.</p> : null}
           </div>
-        </div>
+          <p className="muted" style={{ fontSize: 12.5 }}>{connectFor.setupInstructions}</p>
+        </Modal>
       ) : null}
       {reconnectFor ? (
-        <div className="modal-backdrop" onClick={() => { if (!busy) setReconnectFor(null); setSecretsInput({}); }} role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Reconnect channel" onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h3>Reconnect {reconnectFor.displayName}</h3>
-              <Button kind="ghost" size="sm" onClick={() => { setReconnectFor(null); setSecretsInput({}); }}>âœ•</Button>
-            </header>
-            <div className="form-grid">
-              <label className="form-field">
-                Bound agent
-                <input value={reconnectFor.boundAgentName ?? reconnectFor.boundAgentId ?? ""} disabled />
-              </label>
-              {reconnectFor.secretKeys.map((k) => (
-                <label className="form-field" key={k}>
-                  {secretLabel(k)} (new value)
-                  <input type="password" value={secretsInput[k] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [k]: e.target.value }))} />
-                </label>
-              ))}
-              {reconnectFor.secretKeys.length === 0 ? <p className="muted">This channel needs no credential â€” reconnecting just re-checks the binding.</p> : null}
+        <Modal
+          isOpen={true}
+          onClose={() => { if (!busy) { setReconnectFor(null); setSecretsInput({}); } }}
+          title={`Reconnect ${reconnectFor.displayName}`}
+          footer={
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <Button onClick={() => { setReconnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
+              <Button kind="primary" onClick={() => void reconnect(reconnectFor)} disabled={busy}>{busy ? "Working…" : "Reconnect"}</Button>
             </div>
-            <footer className="modal-foot">
-              <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <Button onClick={() => { setReconnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
-                <Button kind="primary" onClick={() => void reconnect(reconnectFor)} disabled={busy}>{busy ? "Workingâ€¦" : "Reconnect"}</Button>
-              </div>
-            </footer>
+          }
+        >
+          <div className="form-grid">
+            <label className="form-field">
+              Bound agent
+              <input value={reconnectFor.boundAgentName ?? reconnectFor.boundAgentId ?? ""} disabled />
+            </label>
+            {reconnectFor.secretKeys.map((k) => (
+              <label className="form-field" key={k}>
+                {secretLabel(k)} (new value)
+                <input type="password" value={secretsInput[k] ?? ""} autoComplete="off" onChange={(e) => setSecretsInput((prev) => ({ ...prev, [k]: e.target.value }))} />
+              </label>
+            ))}
+            {reconnectFor.secretKeys.length === 0 ? <p className="muted">This channel needs no credential — reconnecting just re-checks the binding.</p> : null}
           </div>
-        </div>
+        </Modal>
       ) : null}
     </div>
   );
@@ -1726,7 +1722,7 @@ export function UsageView() {
               { key: "metric", label: "Metric", render: (r) => r.metric },
               { key: "quantity", label: "Consumed", render: (r) => `${r.quantity.toLocaleString()} ${r.unit}` },
               { key: "included", label: "Plan Limit", render: (r) => r.unlimited ? "Unlimited" : `${r.includedQuantity.toLocaleString()} ${r.unit}` },
-              { key: "remaining", label: "Remaining", render: (r) => r.unlimited ? "âˆž" : r.remaining !== null ? `${r.remaining.toLocaleString()} ${r.unit}` : "â€”" },
+              { key: "remaining", label: "Remaining", render: (r) => r.unlimited ? "∞" : r.remaining !== null ? `${r.remaining.toLocaleString()} ${r.unit}` : "—" },
               {
                 key: "status",
                 label: "Status",
@@ -1822,7 +1818,7 @@ export function BillingView() {
     setBusy(true);
     try {
       const res = await mox.api.reconcileCheckout({ sessionId: createdSession.sessionId });
-      setStatus(`reconciliation ${String(res.state ?? "done")} â€” entitlement refreshed`);
+      setStatus(`reconciliation ${String(res.state ?? "done")} — entitlement refreshed`);
       await mox.refreshEntitlements();
       await load();
       setCheckoutFor(null);
@@ -1863,25 +1859,25 @@ export function BillingView() {
       {status ? <p className="muted mono" role="status">{status}</p> : null}
       <section className="kpi-row" aria-label="Billing summary">
         <KpiCard label="Commercial access" value={subscription?.commercialAccess.entitled ? "Active" : "Denied"} hint={subscription?.commercialAccess.denialReason ?? (subscription?.commercialAccess.entitled ? "all services on" : "not entitled")} tone={subscription?.commercialAccess.entitled ? "good" : "warn"} />
-        <KpiCard label="Current plan" value={subscription?.plan?.name ?? "None"} hint={subscription?.plan ? `v${subscription.plan.version} Â· ${subscription.plan.tier}` : "no active subscription"} tone={subscription?.state ? (() => { const t = statusTone(subscription.state); return t === "neutral" ? undefined : t; })() : undefined} />
+        <KpiCard label="Current plan" value={subscription?.plan?.name ?? "None"} hint={subscription?.plan ? `v${subscription.plan.version} · ${subscription.plan.tier}` : "no active subscription"} tone={subscription?.state ? (() => { const t = statusTone(subscription.state); return t === "neutral" ? undefined : t; })() : undefined} />
         <KpiCard label="Open invoices" value={open.length} hint="awaiting payment" tone={open.length ? "warn" : "good"} />
       </section>
 
       <Panel title="Subscription" subtitle={subscription?.state ? humanState(subscription.state) : "No active subscription."}>
         {!subscription ? (
-          <EmptyState>No subscription yet â€” pick a plan below to get started.</EmptyState>
+          <EmptyState>No subscription yet — pick a plan below to get started.</EmptyState>
         ) : (
           <div className="form-field" style={{ maxWidth: "none" }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-              <div><span className="muted">Plan</span><br /><strong>{subscription.plan?.name ?? "â€”"}</strong></div>
+              <div><span className="muted">Plan</span><br /><strong>{subscription.plan?.name ?? "—"}</strong></div>
               <div><span className="muted">State</span><br /><Badge tone={statusTone(subscription.state)}>{humanState(subscription.state)}</Badge></div>
-              <div><span className="muted">Current period</span><br />{subscription.currentPeriodStart ?? "â€”"} â†’ {subscription.currentPeriodEnd ?? "â€”"}</div>
+              <div><span className="muted">Current period</span><br />{subscription.currentPeriodStart ?? "—"} → {subscription.currentPeriodEnd ?? "—"}</div>
               <div><span className="muted">Ends when period ends</span><br />{subscription.cancelAtPeriodEnd ? "yes" : "no"}</div>
             </div>
             {subscription.cancellation ? (
               <p className="muted" style={{ marginTop: 8 }}>
-                Cancellation: {humanState(subscription.cancellation.state)}{subscription.cancellation.attempts ? ` â€” ${subscription.cancellation.attempts} attempt(s)` : ""}
-                {subscription.cancellation.lastError ? <> â€” {subscription.cancellation.lastError}</> : null}
+                Cancellation: {humanState(subscription.cancellation.state)}{subscription.cancellation.attempts ? ` — ${subscription.cancellation.attempts} attempt(s)` : ""}
+                {subscription.cancellation.lastError ? <> — {subscription.cancellation.lastError}</> : null}
               </p>
             ) : null}
             <div className="row-actions" style={{ marginTop: 12 }}>
@@ -1903,7 +1899,7 @@ export function BillingView() {
             { key: "tier", label: "Tier", render: (r) => <Badge tone="accent">{r.tier}</Badge> },
             { key: "price", label: "From", render: (r) => {
               const p = bestPlanPrice(r);
-              return p ? <span>{moneyMinorToDisplay(p.amountMinor, p.currency)}<span className="muted"> /mo in {p.displayName}</span></span> : <span className="muted">â€”</span>;
+              return p ? <span>{moneyMinorToDisplay(p.amountMinor, p.currency)}<span className="muted"> /mo in {p.displayName}</span></span> : <span className="muted">—</span>;
             } },
             { key: "actions", label: "", render: (r) => (
               <div className="row-actions">
@@ -1917,70 +1913,69 @@ export function BillingView() {
       </Panel>
 
       {checkoutFor ? (
-        <div className="modal-backdrop" onClick={() => { if (!busy) { setCheckoutFor(null); setCreatedSession(null); } }} role="presentation">
-          <div className="modal" role="dialog" aria-modal="true" aria-label="Start checkout" onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h3>Subscribe â€” {checkoutFor.name}</h3>
-              <Button kind="ghost" size="sm" onClick={() => { setCheckoutFor(null); setCreatedSession(null); }}>âœ•</Button>
-            </header>
-            {!createdSession ? (
-              <>
-                <div className="form-grid">
-                  <label className="form-field">
-                    Payment provider
-                    <select value={providerName} onChange={(e) => setProviderName(e.target.value)}>
-                      {providers.filter((b) => b.enabled && b.available).map((b) => <option key={b.providerName} value={b.providerName}>{b.displayName}</option>)}
-                    </select>
-                  </label>
-                  <label className="form-field">
-                    Region
-                    <select value={regionCode} onChange={(e) => setRegionCode(e.target.value)}>
-                      {checkoutFor.pricingRegions.filter((r) => r.available).map((r) => <option key={r.pricingRegionCode} value={r.pricingRegionCode}>{r.displayName} â€” {r.amountMinor === null ? "TBD" : moneyMinorToDisplay(r.amountMinor, r.currency)}</option>)}
-                    </select>
-                  </label>
-                </div>
-                <p className="muted" style={{ fontSize: 12.5 }}>
-                  Checkout is handled by the payment provider directly. Pricing is quoted in the selected region's currency.
-                </p>
-                {status ? <p className="muted mono">{status}</p> : null}
-                <footer className="modal-foot">
-                  <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                    <Button onClick={() => { setCheckoutFor(null); setCreatedSession(null); }} disabled={busy}>Cancel</Button>
-                    <Button kind="primary" disabled={busy || !providerName || !regionCode} onClick={() => void startCheckout()}>
-                      {busy ? "Startingâ€¦" : "Start checkout"}
-                    </Button>
-                  </div>
-                </footer>
-              </>
+        <Modal
+          isOpen={true}
+          onClose={() => { if (!busy) { setCheckoutFor(null); setCreatedSession(null); } }}
+          title={`Subscribe — ${checkoutFor.name}`}
+          footer={
+            !createdSession ? (
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <Button onClick={() => { setCheckoutFor(null); setCreatedSession(null); }} disabled={busy}>Cancel</Button>
+                <Button kind="primary" disabled={busy || !providerName || !regionCode} onClick={() => void startCheckout()}>
+                  {busy ? "Starting…" : "Start checkout"}
+                </Button>
+              </div>
             ) : (
-              <>
-                <EmptyState>
-                  Checkout session created â€” follow the provider's payment page to complete the purchase.
-                </EmptyState>
-                <p className="mono muted">session: {createdSession.sessionId}</p>
-                <p className="mono muted">redirect: {createdSession.redirectUrl}</p>
-                <p className="muted" style={{ fontSize: 12.5 }}>
-                  On this deployment the checkout happens in a provider window; when you return, confirm the session so billing can reconcile the payment.
-                </p>
-                <footer className="modal-foot">
-                  <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                    <Button kind="ghost" onClick={() => window.open(createdSession.redirectUrl, "_blank", "noopener,noreferrer")} disabled={busy}>Open payment page</Button>
-                    <Button kind="primary" disabled={busy} onClick={() => void reconcile()}>
-                      {busy ? "Reconcilingâ€¦" : "I've paid â€” reconcile"}
-                    </Button>
-                  </div>
-                </footer>
-              </>
-            )}
-          </div>
-        </div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                <Button kind="ghost" onClick={() => window.open(createdSession.redirectUrl, "_blank", "noopener,noreferrer")} disabled={busy}>Open payment page</Button>
+                <Button kind="primary" disabled={busy} onClick={() => void reconcile()}>
+                  {busy ? "Reconciling…" : "I've paid — reconcile"}
+                </Button>
+              </div>
+            )
+          }
+        >
+          {!createdSession ? (
+            <>
+              <div className="form-grid">
+                <label className="form-field">
+                  Payment provider
+                  <select value={providerName} onChange={(e) => setProviderName(e.target.value)}>
+                    {providers.filter((b) => b.enabled && b.available).map((b) => <option key={b.providerName} value={b.providerName}>{b.displayName}</option>)}
+                  </select>
+                </label>
+                <label className="form-field">
+                  Region
+                  <select value={regionCode} onChange={(e) => setRegionCode(e.target.value)}>
+                    {checkoutFor.pricingRegions.filter((r) => r.available).map((r) => <option key={r.pricingRegionCode} value={r.pricingRegionCode}>{r.displayName} — {r.amountMinor === null ? "TBD" : moneyMinorToDisplay(r.amountMinor, r.currency)}</option>)}
+                  </select>
+                </label>
+              </div>
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                Checkout is handled by the payment provider directly. Pricing is quoted in the selected region's currency.
+              </p>
+              {status ? <p className="muted mono">{status}</p> : null}
+            </>
+          ) : (
+            <>
+              <EmptyState>
+                Checkout session created — follow the provider's payment page to complete the purchase.
+              </EmptyState>
+              <p className="mono muted">session: {createdSession.sessionId}</p>
+              <p className="mono muted">redirect: {createdSession.redirectUrl}</p>
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                On this deployment the checkout happens in a provider window; when you return, confirm the session so billing can reconcile the payment.
+              </p>
+            </>
+          )}
+        </Modal>
       ) : null}
 
       <Panel title="Invoices">
         <DataTable
           head={[
             { key: "invoiceId", label: "Invoice", render: (r) => String(r.invoiceId) },
-            { key: "periodStart", label: "Period", render: (r) => `${r.periodStart} â†’ ${r.periodEnd}` },
+            { key: "periodStart", label: "Period", render: (r) => `${r.periodStart} → ${r.periodEnd}` },
             { key: "amountCents", label: "Amount", render: (r) => moneyMinorToDisplay(Number(r.amountCents), r.currency) },
             { key: "state", label: "State", render: (r) => <Badge tone={statusTone(r.state)}>{humanState(r.state)}</Badge> },
           ]}
@@ -2056,7 +2051,7 @@ export function BackupsView() {
             title={overview !== null && !overview.availability ? "Backups not included in current plan entitlement" : undefined}
             onClick={() => void triggerBackup()}
           >
-            {busy ? "Backing upâ€¦" : "Create manual backup"}
+            {busy ? "Backing up…" : "Create manual backup"}
           </Button>
         }
       />
@@ -2071,7 +2066,7 @@ export function BackupsView() {
       <section className="kpi-row" aria-label="Backup summary">
         <KpiCard
           label="Retention allowance"
-          value={overview ? `${overview.retentionDays} days` : "â€”"}
+          value={overview ? `${overview.retentionDays} days` : "—"}
           hint={overview?.availability ? "Active plan allowance" : "Not included in plan"}
         />
         <KpiCard
@@ -2089,7 +2084,7 @@ export function BackupsView() {
       {overview?.cancellationExportSummary ? (
         <Panel title="Cancellation & Snapshot Retention Policy">
           <p className="muted" style={{ margin: 0 }}>
-            <strong>{overview.cancellationExportSummary.description}</strong> â€” Even if compute servers are canceled or torn down, snapshots remain accessible offsite throughout the {overview.cancellationExportSummary.retentionWindowDays}-day retention window for cancellation export or migration.
+            <strong>{overview.cancellationExportSummary.description}</strong> — Even if compute servers are canceled or torn down, snapshots remain accessible offsite throughout the {overview.cancellationExportSummary.retentionWindowDays}-day retention window for cancellation export or migration.
           </p>
         </Panel>
       ) : null}
@@ -2108,7 +2103,7 @@ export function BackupsView() {
                 </Badge>
               ),
             },
-            { key: "size", label: "Size", render: (r) => r.sizeBytes ? `${(r.sizeBytes / (1024 * 1024)).toFixed(1)} MB` : "â€”" },
+            { key: "size", label: "Size", render: (r) => r.sizeBytes ? `${(r.sizeBytes / (1024 * 1024)).toFixed(1)} MB` : "—" },
             { key: "location", label: "Storage Location", render: (r) => r.locationLabel },
             { key: "date", label: "Created At", render: (r) => new Date(r.createdAt).toLocaleString() },
             {
@@ -2208,7 +2203,7 @@ export function SettingsView() {
     // the CLI snippet generic rather than leaking an empty/incorrect URL.
   }
 
-  // Phase 04 Â§D: Team state
+  // Phase 04 §D: Team state
   const [team, setTeam] = useState<WorkspaceTeamOverview | null>(null);
   const [loadingTeam, setLoadingTeam] = useState(true);
   const [inviteEmail, setInviteEmail] = useState("");
@@ -2216,14 +2211,14 @@ export function SettingsView() {
   const [createdInvite, setCreatedInvite] = useState<CreatedWorkspaceInvitation | null>(null);
   const [teamError, setTeamError] = useState<string | null>(null);
 
-  // Phase 04 Â§B: Notification preferences state
+  // Phase 04 §B: Notification preferences state
   const [notifPrefs, setNotifPrefs] = useState<NotificationPreferencesView | null>(null);
   const [loadingNotifs, setLoadingNotifs] = useState(true);
   const [notifError, setNotifError] = useState<string | null>(null);
   const [savingNotifs, setSavingNotifs] = useState(false);
   const [notifSuccess, setNotifSuccess] = useState<string | null>(null);
 
-  // Phase 04 Â§E/Â§H: Knowledge sources & storage state
+  // Phase 04 §E/§H: Knowledge sources & storage state
   const [knowledgeSources, setKnowledgeSources] = useState<KnowledgeSourceItem[]>([]);
   const [loadingKnowledge, setLoadingKnowledge] = useState(true);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
@@ -2505,7 +2500,7 @@ export function SettingsView() {
           <div className="notice" style={{ marginBottom: 12 }}>
             <p style={{ margin: "0 0 4px" }}><strong>Invitation generated for {createdInvite.email}:</strong></p>
             <code className="mono">{createdInvite.inviteUrl}</code>
-            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>Role: {humanState(createdInvite.role)} Â· Expires: {new Date(createdInvite.expiresAt).toLocaleDateString()}</p>
+            <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>Role: {humanState(createdInvite.role)} · Expires: {new Date(createdInvite.expiresAt).toLocaleDateString()}</p>
           </div>
         ) : null}
 
@@ -2538,7 +2533,7 @@ export function SettingsView() {
               disabled={busy || !inviteEmail.trim()}
               onClick={() => void handleInvite()}
             >
-              {busy ? "Sendingâ€¦" : "Send Invitation"}
+              {busy ? "Sending…" : "Send Invitation"}
             </Button>
           </div>
         </div>
@@ -2568,7 +2563,7 @@ export function SettingsView() {
         ) : null}
 
         <h4 style={{ margin: "0 0 8px" }}>Active Members</h4>
-        {loadingTeam ? <LoadingState label="Loading team membersâ€¦" /> : (
+        {loadingTeam ? <LoadingState label="Loading team members…" /> : (
           <DataTable
             head={[
               { key: "name", label: "Name", render: (r) => r.displayName || r.email },
@@ -2583,7 +2578,7 @@ export function SettingsView() {
                   </div>
                 ),
               },
-              { key: "joined", label: "Joined", render: (r) => r.joinedAt ? new Date(r.joinedAt).toLocaleDateString() : "â€”" },
+              { key: "joined", label: "Joined", render: (r) => r.joinedAt ? new Date(r.joinedAt).toLocaleDateString() : "—" },
               {
                 key: "actions",
                 label: "",
@@ -2629,7 +2624,7 @@ export function SettingsView() {
             disabled={savingNotifs || loadingNotifs}
             onClick={() => void saveNotifPrefs()}
           >
-            {savingNotifs ? "Savingâ€¦" : "Save preferences"}
+            {savingNotifs ? "Saving…" : "Save preferences"}
           </Button>
         }
       >
@@ -2638,7 +2633,7 @@ export function SettingsView() {
         </p>
         {notifError ? <ErrorState message={notifError} /> : null}
         {notifSuccess ? <div className="notice" style={{ marginBottom: 12 }}>{notifSuccess}</div> : null}
-        {loadingNotifs ? <LoadingState label="Loading notification preferencesâ€¦" /> : (
+        {loadingNotifs ? <LoadingState label="Loading notification preferences…" /> : (
           <DataTable
             head={[
               { key: "title", label: "Notification Event" },
@@ -2647,7 +2642,7 @@ export function SettingsView() {
                 label: "Category",
                 render: (r) => (
                   <Badge tone={r.mandatory ? "bad" : "neutral"}>
-                    {humanState(r.category)} {r.mandatory ? "Â· Mandatory" : ""}
+                    {humanState(r.category)} {r.mandatory ? "· Mandatory" : ""}
                   </Badge>
                 ),
               },
@@ -2746,17 +2741,17 @@ export function SettingsView() {
               disabled={busy || !newKnowledgeName.trim()}
               onClick={() => void handleCreateKnowledge()}
             >
-              {busy ? "Addingâ€¦" : "Add Knowledge Source"}
+              {busy ? "Adding…" : "Add Knowledge Source"}
             </Button>
           </div>
         </div>
-        {loadingKnowledge ? <LoadingState label="Loading knowledge sourcesâ€¦" /> : (
+        {loadingKnowledge ? <LoadingState label="Loading knowledge sources…" /> : (
           <DataTable
             head={[
               { key: "name", label: "Name" },
               { key: "kind", label: "Kind", render: (r) => <Badge tone="accent">{r.kind}</Badge> },
               { key: "created", label: "Created", render: (r) => new Date(r.createdAt).toLocaleDateString() },
-              { key: "synced", label: "Last Synced", render: (r) => r.lastSyncedAt ? new Date(r.lastSyncedAt).toLocaleString() : "â€”" },
+              { key: "synced", label: "Last Synced", render: (r) => r.lastSyncedAt ? new Date(r.lastSyncedAt).toLocaleString() : "—" },
               {
                 key: "actions",
                 label: "",
@@ -2775,14 +2770,14 @@ export function SettingsView() {
 
       <Panel id="developer" title="Developer" subtitle="Personal API tokens for the Mox API.">
         <p className="muted" style={{ marginBottom: 10 }}>
-          Tokens grant access scoped to you and your workspace. The plaintext value is shown once at creation â€” store it somewhere safe.
+          Tokens grant access scoped to you and your workspace. The plaintext value is shown once at creation — store it somewhere safe.
         </p>
         {status ? <p className="muted mono" role="status">{status}</p> : null}
         {latestToken ? (
           <div className="notice" style={{ marginBottom: 12 }}>
-            <p style={{ margin: "0 0 6px" }}>Token created â€” this is the only time the plaintext is shown:</p>
+            <p style={{ margin: "0 0 6px" }}>Token created — this is the only time the plaintext is shown:</p>
             <code className="mono">{latestToken.token}</code>
-            <p className="muted" style={{ margin: "6px 0 0", fontSize: 12.5 }}>expires {latestToken.expiresAt} Â· scopes: {latestToken.scopes.join(", ")}</p>
+            <p className="muted" style={{ margin: "6px 0 0", fontSize: 12.5 }}>expires {latestToken.expiresAt} · scopes: {latestToken.scopes.join(", ")}</p>
           </div>
         ) : null}
         <div className="form-grid" style={{ marginBottom: 12 }}>
@@ -2795,10 +2790,10 @@ export function SettingsView() {
             <input value={newTokenScopes} placeholder="agents:read, deployments:write" onChange={(e) => setNewTokenScopes(e.target.value)} />
           </label>
           <div className="row-actions" style={{ alignItems: "flex-end" }}>
-            <Button kind="primary" disabled={busy || !newTokenName.trim()} onClick={() => void createToken()}>{busy ? "Creatingâ€¦" : "Create token"}</Button>
+            <Button kind="primary" disabled={busy || !newTokenName.trim()} onClick={() => void createToken()}>{busy ? "Creating…" : "Create token"}</Button>
           </div>
         </div>
-        {loadingTokens ? <LoadingState label="Loading tokensâ€¦" /> : (
+        {loadingTokens ? <LoadingState label="Loading tokens…" /> : (
           <DataTable
             head={[
               { key: "name", label: "Name" },
@@ -2806,7 +2801,7 @@ export function SettingsView() {
               { key: "createdAt", label: "Created" },
               { key: "status", label: "Status", render: (r) => (r.revoked ? <Badge tone="bad">revoked</Badge> : <Badge tone="good">active</Badge>) },
               { key: "actions", label: "", render: (r) => (
-                r.revoked ? <span className="muted">â€”</span> : <Button size="sm" kind="danger" onClick={() => void revokeToken(r.tokenId)} disabled={busy}>Revoke</Button>
+                r.revoked ? <span className="muted">—</span> : <Button size="sm" kind="danger" onClick={() => void revokeToken(r.tokenId)} disabled={busy}>Revoke</Button>
               ) },
             ]}
             rows={tokens}
@@ -2814,7 +2809,7 @@ export function SettingsView() {
           />
         )}
         <div className="notice" style={{ marginTop: 12 }}>
-          <p className="muted" style={{ margin: "0 0 6px" }}>CLI usage â€” point the Mox CLI at this app's control plane and authenticate with a token:</p>
+          <p className="muted" style={{ margin: "0 0 6px" }}>CLI usage — point the Mox CLI at this app's control plane and authenticate with a token:</p>
           <pre className="mono" style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
 {`mox config set api_url ${cliBaseUrl || "<https API URL>"}\nmox --token "\${TOKEN}" me\nmox --token "\${TOKEN}" agents list`}
           </pre>

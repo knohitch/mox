@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from "react";
+import { useEffect, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from "react";
 import { formatDisplayValue } from "../domain/labels.js";
 import { avatarHue, initials, STATUS_LABEL } from "../domain/roster.js";
 import type { AgentStatus } from "../domain/roster.js";
@@ -211,6 +211,22 @@ export function LoadingState({ label = "Loading…" }: { label?: string }) {
     <div className="state" role="status" aria-live="polite">
       <span className="spinner" aria-hidden />
       <span className="muted">{label}</span>
+    </div>
+  );
+}
+
+export function SkeletonList({ count = 3 }: { count?: number }) {
+  return (
+    <div className="skeleton-list" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <div className="skeleton skeleton-avatar" />
+          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="skeleton skeleton-text" />
+            <div className={`skeleton skeleton-text ${i % 2 === 0 ? "short" : "long"}`} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -441,6 +457,62 @@ export function SteppedChart() {
             strokeLinecap="round"
           />
         </svg>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shared Modal primitive
+ */
+export function Modal({
+  isOpen,
+  onClose,
+  title,
+  children,
+  footer,
+  width = 500,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: ReactNode;
+  footer?: ReactNode;
+  width?: number;
+}) {
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="modal"
+        style={{ width, maxWidth: "95vw" }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+      >
+        <div className="modal-head">
+          <h3 id="modal-title">{title}</h3>
+          <Button kind="ghost" onClick={onClose} aria-label="Close modal">
+            ✕
+          </Button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-foot">{footer}</div>}
       </div>
     </div>
   );

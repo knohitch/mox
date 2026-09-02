@@ -91,7 +91,7 @@ function SidebarContent({
                   {entry.icon ? <span className="nav-icon" aria-hidden>{entry.icon}</span> : null}
                   <span className="nav-label">{collapsed ? "" : entry.label}</span>
                   {!collapsed && badgeCount !== undefined && badgeCount > 0 ? (
-                    <span className={`nav-badge ${isAgents ? "nav-badge-accent" : ""}`}>{badgeCount}</span>
+                    <span className="nav-badge">{badgeCount}</span>
                   ) : null}
                 </Link>
               );
