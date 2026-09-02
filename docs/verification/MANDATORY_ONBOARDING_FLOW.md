@@ -138,6 +138,8 @@ Migration 0020 backfills all pre-existing organizations as `completed` (idempote
 
 Totals after the change: **725 passed / 103 skipped** (skips are PG-gated suites) plus the PG-gated run below. Playwright/browser E2E does not exist in this repo (no config/deps), so routing/resume behavior is covered by the HTTP+PostgreSQL integration tests and SSR view tests; manual browser verification was performed via the UI Studio (screenshots above).
 
+**Live manual E2E (2026-09-02, real backend):** with a disposable PostgreSQL cluster (port 5434, all migrations incl. 0020), the control plane on `:8080` and the web app on `:5175`, a real browser signup (`/signup` → account `founder+…@mox.test`, workspace "First Signup Robotics") landed on **`/onboarding`** with the workspace name prefilled; navigating to `/dashboard` while incomplete redirected back to `/onboarding`; PostgreSQL showed the signup-created `org_onboarding` row (`not_started`, step 1, empty completedSteps). Operational note: the web app must use a same-SITE API base (`http://localhost:8080`, not `127.0.0.1:8080`) because session cookies are SameSite=Lax and `localhost` vs `127.0.0.1` are different sites.
+
 ## 15. PostgreSQL results
 
 `powershell -ExecutionPolicy Bypass -File scripts/run-postgres-verification.ps1`:
