@@ -20,6 +20,7 @@ import { agentStatus, STATUS_LABEL } from "../domain/roster.js";
 import { simpleInputFromDefinition, slugFromName } from "../domain/authoring.js";
 import { projectWorkView } from "../domain/work-view.js";
 import { EMPTY_THREAD_SUGGESTIONS, startConversation } from "../domain/first-message.js";
+import { archiveCurrentConversation } from "../domain/thread-actions.js";
 import { Avatar, Badge, Button, Card, EmptyState, ErrorState } from "../ui/primitives.js";
 import { Markdown } from "../ui/markdown.js";
 
@@ -39,6 +40,11 @@ export function AgentsView() {
   const [hubError, setHubError] = useState<string | null>(null);
   const hubComposerRef = useRef<HTMLTextAreaElement | null>(null);
   const hubPickerRef = useRef<HTMLSelectElement | null>(null);
+  // Intentional Recent/message states: loading, empty, and failed loads are
+  // never rendered as a blank panel.
+  const [recentLoading, setRecentLoading] = useState(true);
+  const [loadingThreadId, setLoadingThreadId] = useState<string | null>(null);
+  const [threadLoadError, setThreadLoadError] = useState<string | null>(null);
 
   const selected = useMemo(
     () => mox.agents.find((a) => a.agentId === selectedId) ?? null,
@@ -46,11 +52,21 @@ export function AgentsView() {
   );
 
   const syncAllThreads = useCallback(async () => {
-    const all = await Promise.all(mox.agents.map(async (a) => {
-      const list = await mox.api.listThreads(a.agentId);
-      return list.map(t => ({ ...t, agentId: a.agentId, agentName: a.definition.identity.displayName }));
-    }));
-    setRecentThreads(all.flat());
+    setRecentLoading(true);
+    try {
+      const all = await Promise.all(mox.agents.map(async (a) => {
+        const list = await mox.api.listThreads(a.agentId);
+        // Archived threads are authoritative server state; Recent shows only
+        // active conversations. Threads without a status field (older
+        // deployments) are treated as active.
+        return list
+          .filter((t) => t.status !== "archived")
+          .map((t) => ({ threadId: t.threadId, title: t.title, agentId: a.agentId, agentName: a.definition.identity.displayName }));
+      }));
+      setRecentThreads(all.flat());
+    } finally {
+      setRecentLoading(false);
+    }
   }, [mox.agents, mox.api]);
 
   useEffect(() => {
@@ -75,6 +91,8 @@ export function AgentsView() {
       onThreadReady: (a, t) => {
         setSelectedId(a);
         setSelectedThreadId(t);
+        setThreadLoadError(null);
+        setLoadingThreadId(null);
         opts?.onThreadReady?.(a, t);
       },
       syncThreads: syncAllThreads,
@@ -121,11 +139,43 @@ export function AgentsView() {
   }, [hubDraft]);
 
   /** Recent rail: selecting an existing thread must load its real messages. */
-  const openRecentThread = useCallback((t: { agentId: string; threadId: string }) => {
+  const openRecentThread = useCallback(async (t: { agentId: string; threadId: string }) => {
     setSelectedId(t.agentId);
     setSelectedThreadId(t.threadId);
-    void mox.loadThread(t.agentId, t.threadId);
+    setThreadLoadError(null);
+    setLoadingThreadId(t.threadId);
+    try {
+      await mox.loadThread(t.agentId, t.threadId);
+    } catch (error) {
+      setThreadLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingThreadId((current) => (current === t.threadId ? null : current));
+    }
   }, [mox]);
+
+  const reloadSelectedThread = useCallback(() => {
+    if (selectedId && selectedThreadId) void openRecentThread({ agentId: selectedId, threadId: selectedThreadId });
+  }, [selectedId, selectedThreadId, openRecentThread]);
+
+  /**
+   * Archive the open conversation through the canonical API seam; Recent
+   * refreshes from the server and selection falls back to the agent's start
+   * state. Errors keep the thread open and are surfaced in the header.
+   */
+  const archiveCurrent = useCallback(async (threadId: string): Promise<string | null> => {
+    let failure: string | null = null;
+    await archiveCurrentConversation({
+      archiveThread: (id) => mox.api.archiveThread(id),
+      syncThreads: syncAllThreads,
+      onArchived: () => {
+        setSelectedThreadId(null);
+        setThreadLoadError(null);
+        setLoadingThreadId(null);
+      },
+      onError: (message) => { failure = message; },
+    }, threadId);
+    return failure;
+  }, [mox.api, syncAllThreads]);
 
   /** Rail plus = new conversation for the current context (never agent creation). */
   const handleRailPlus = useCallback(() => {
@@ -177,28 +227,36 @@ export function AgentsView() {
           />
         </div>
         <div className="aw-sidebar-list">
-          {recentThreads.length > 0 && (
+          {(recentThreads.length > 0 || recentLoading || mox.agents.length > 0) && (
             <div className="aw-rail-section">
               <div className="aw-rail-heading">Recent</div>
-              {filteredThreads.map((t) => (
-                <div
-                  key={t.threadId}
-                  className={`aw-thread-row ${t.agentId === selectedId && t.threadId === selectedThreadId ? "active" : ""}`}
-                  onClick={() => openRecentThread(t)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openRecentThread(t);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`Open conversation ${t.title || "New chat"} with ${t.agentName}`}
-                >
-                  <div className="aw-thread-row-title">{t.title || "New chat"}</div>
-                  <div className="aw-thread-row-sub">{t.agentName}</div>
-                </div>
-              ))}
+              {recentLoading && recentThreads.length === 0 ? (
+                <div className="muted" style={{ padding: "10px 20px", fontSize: 12 }} role="status">Loading conversations…</div>
+              ) : recentThreads.length === 0 ? (
+                <div className="muted" style={{ padding: "10px 20px", fontSize: 12 }}>No conversations yet.</div>
+              ) : filteredThreads.length === 0 ? (
+                <div className="muted" style={{ padding: "10px 20px", fontSize: 12 }}>No matches.</div>
+              ) : (
+                filteredThreads.map((t) => (
+                  <div
+                    key={t.threadId}
+                    className={`aw-thread-row ${t.agentId === selectedId && t.threadId === selectedThreadId ? "active" : ""}`}
+                    onClick={() => void openRecentThread(t)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openRecentThread(t);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open conversation ${t.title || "New chat"} with ${t.agentName}`}
+                  >
+                    <div className="aw-thread-row-title">{t.title || "New chat"}</div>
+                    <div className="aw-thread-row-sub">{t.agentName}</div>
+                  </div>
+                ))
+              )}
             </div>
           )}
           <div className="aw-rail-section">
@@ -244,10 +302,10 @@ export function AgentsView() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
               Agent Rooms
             </Link>
-            <a href="#" className="aw-sidebar-footer-item" onClick={(e) => { e.preventDefault(); setShowNew(true); }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <button type="button" className="aw-sidebar-footer-item" onClick={() => setShowNew(true)} aria-label="Create Agent" title="Create Agent">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
               Create Agent
-            </a>
+            </button>
           </div>
         </div>
       </div>
@@ -261,6 +319,10 @@ export function AgentsView() {
             onThreadChange={setSelectedThreadId}
             onNewChat={async () => { setSelectedThreadId(null); }}
             onStartFirstMessage={(agentId, text, opts) => startFirstMessage(agentId, text, opts)}
+            messagesLoading={loadingThreadId === selectedThreadId && selectedThreadId !== null}
+            threadLoadError={threadLoadError}
+            onReloadThread={reloadSelectedThread}
+            onArchive={archiveCurrent}
             onBack={() => { setSelectedId(null); setSelectedThreadId(null); }}
           />
         ) : (
@@ -268,6 +330,12 @@ export function AgentsView() {
             <div className="aw-hub-title">MOX WORKSPACE</div>
             <div className="aw-hub-heading">Start a new conversation</div>
 
+            {!mox.ready && !mox.error ? (
+              <div className="muted" style={{ marginTop: 32 }} role="status">
+                Loading workspace…
+              </div>
+            ) : (
+              <>
             {mox.agents.length === 0 ? (
               <div className="aw-composer-wrapper">
                 <textarea
@@ -367,9 +435,15 @@ export function AgentsView() {
               </div>
             ) : (
               <div style={{ textAlign: "center", color: "#94a3b8", marginTop: 40 }}>
-                <p>Create your first Agent to start a conversation.</p>
-                <Button kind="primary" onClick={() => setShowNew(true)}>Create Agent</Button>
+                {mox.error ? (
+                  <p role="alert">Workspace unavailable: {mox.error}</p>
+                ) : (
+                  <p>Create your first Agent to start a conversation.</p>
+                )}
+                {!mox.error && <Button kind="primary" onClick={() => setShowNew(true)}>Create Agent</Button>}
               </div>
+            )}
+              </>
             )}
           </div>
         )}
@@ -609,12 +683,44 @@ export type StartFirstMessageFn = (
   opts?: { onThreadReady?: (agentId: string, threadId: string) => void; onError?: (message: string) => void },
 ) => Promise<void>;
 
-export function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat, onStartFirstMessage }: { summary: AgentSummary; threadId: string | null; onBack?: () => void; onThreadChange: (id: string) => void; onNewChat: () => Promise<void>; onStartFirstMessage: StartFirstMessageFn }) {
+export function AgentDetail({
+  summary,
+  threadId,
+  onBack,
+  onThreadChange,
+  onNewChat,
+  onStartFirstMessage,
+  messagesLoading,
+  threadLoadError,
+  onReloadThread,
+  onArchive,
+}: {
+  summary: AgentSummary;
+  threadId: string | null;
+  onBack?: () => void;
+  onThreadChange: (id: string) => void;
+  onNewChat: () => Promise<void>;
+  onStartFirstMessage: StartFirstMessageFn;
+  messagesLoading?: boolean;
+  threadLoadError?: string | null;
+  onReloadThread?: () => void;
+  onArchive?: (threadId: string) => Promise<string | null>;
+}) {
   const mox = useMox();
   const terminalAllowed = useTerminal();
   const computerAllowed = useBrowser();
   const [tab, setTab] = useState<Tab>("chat");
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const agentId = summary.agentId;
+
+  const handleArchive = async () => {
+    if (!threadId || !onArchive || archiving) return;
+    setArchiving(true);
+    const failure = await onArchive(threadId);
+    setArchiving(false);
+    setArchiveError(failure);
+  };
 
   const enabled: Record<Tab, boolean> = {
     chat: true,
@@ -646,11 +752,22 @@ export function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewCh
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             New chat
           </button>
-          
+
+          {threadId && onArchive && (
+            <button
+              className="aw-icon-btn"
+              onClick={() => void handleArchive()}
+              disabled={archiving}
+              title="Archive conversation"
+              aria-label="Archive conversation"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><polyline points="21 8 21 21 3 21 3 8"></polyline><rect x="1" y="3" width="22" height="5"></rect><line x1="10" y1="12" x2="14" y2="12"></line></svg>
+            </button>
+          )}
+
           {summary.modelBadge && (
-            <div className="aw-model-badge">
+            <div className="aw-model-badge" title={`Model ${summary.modelBadge} — change it in Settings`}>
               {summary.modelBadge}
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </div>
           )}
 
@@ -693,11 +810,24 @@ export function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewCh
       </header>
 
       <div className="aw-chat-container">
+        {archiveError && (
+          <div className="aw-thread-error" role="alert">
+            Archive failed: {archiveError} — the conversation stays open.
+          </div>
+        )}
 
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
           {tab === "chat" &&
             (threadId ? (
-              <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} summary={summary} />
+              <ChatTab
+                agentId={agentId}
+                threadId={threadId}
+                name={d.identity.displayName}
+                summary={summary}
+                messagesLoading={messagesLoading}
+                loadError={threadLoadError}
+                onReloadThread={onReloadThread}
+              />
             ) : (
               <EmptyThreadPanel summary={summary} status={status} onStartFirstMessage={onStartFirstMessage} />
             ))}
@@ -794,13 +924,20 @@ export function EmptyThreadPanel({ summary, status, onStartFirstMessage }: { sum
   );
 }
 
-function ChatTab({ agentId, threadId, name, summary }: { agentId: string; threadId: string; name: string; summary?: AgentSummary }) {
+function ChatTab({ agentId, threadId, name, summary, messagesLoading, loadError, onReloadThread }: { agentId: string; threadId: string; name: string; summary?: AgentSummary; messagesLoading?: boolean; loadError?: string | null; onReloadThread?: () => void }) {
   const mox = useMox();
   const messages = mox.messages(threadId);
   const runId = mox.activeRun(threadId);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [isScrolledUp, setIsScrolledUp] = useState(false);
+
+  // Switching threads must not inherit the previous thread's scroll offset:
+  // reset and snap to the newest message once it arrives.
+  useEffect(() => {
+    setIsScrolledUp(false);
+    if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [threadId]);
 
   useEffect(() => {
     if (!scrollRef.current) return;
@@ -828,22 +965,36 @@ function ChatTab({ agentId, threadId, name, summary }: { agentId: string; thread
   return (
     <div className="chat">
       <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
-        {messages.length === 0 && summary && (
-          <div className="aw-empty-thread">
-            <Avatar slug={summary.definition.slug} name={summary.definition.identity.displayName} size={64} status={agentStatus(summary)} />
-            <h2>{summary.definition.identity.displayName}</h2>
-            <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
-            <div className="aw-suggestions">
-              {EMPTY_THREAD_SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => { setDraft(s); }} aria-label={`Use suggestion: ${s}`}>{s}</button>
-              ))}
-            </div>
+        {loadError ? (
+          <div className="aw-empty-thread" role="alert">
+            <p>⚠ This conversation could not be loaded.</p>
+            <p className="muted" style={{ fontSize: 13 }}>{loadError}</p>
+            {onReloadThread && <Button size="sm" onClick={onReloadThread}>Retry</Button>}
           </div>
+        ) : messages.length === 0 && messagesLoading ? (
+          <div className="aw-empty-thread" role="status">
+            <p>Loading conversation…</p>
+          </div>
+        ) : (
+          <>
+            {messages.length === 0 && summary && (
+              <div className="aw-empty-thread">
+                <Avatar slug={summary.definition.slug} name={summary.definition.identity.displayName} size={64} status={agentStatus(summary)} />
+                <h2>{summary.definition.identity.displayName}</h2>
+                <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
+                <div className="aw-suggestions">
+                  {EMPTY_THREAD_SUGGESTIONS.map((s) => (
+                    <button key={s} onClick={() => { setDraft(s); }} aria-label={`Use suggestion: ${s}`}>{s}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((m) => (
+              <MessageBubble key={m.messageId} msg={m} agentName={name} onRetry={() => void mox.send(agentId, threadId, m.text)} />
+            ))}
+            {mox.approvals.length > 0 && <ApprovalCards />}
+          </>
         )}
-        {messages.map((m) => (
-          <MessageBubble key={m.messageId} msg={m} agentName={name} onRetry={() => void mox.send(agentId, threadId, m.text)} />
-        ))}
-        {mox.approvals.length > 0 && <ApprovalCards />}
       </div>
       <div className="aw-composer-container">
         <div className="aw-composer-wrapper active-composer">
@@ -860,18 +1011,13 @@ function ChatTab({ agentId, threadId, name, summary }: { agentId: string; thread
             }}
           />
           <div className="aw-composer-toolbar">
-            <div className="aw-composer-tools">
-              <button className="aw-icon-btn" title="Add context">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-              </button>
-            </div>
             {runId ? (
-              <button className="aw-composer-stop" onClick={() => mox.cancel(runId)}>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12"></rect></svg>
+              <button className="aw-composer-stop" onClick={() => mox.cancel(runId)} aria-label="Stop response" title="Stop response">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12"></rect></svg>
               </button>
             ) : (
-              <button className="aw-composer-submit" onClick={submit} disabled={!draft.trim()}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+              <button className="aw-composer-submit" onClick={submit} disabled={!draft.trim()} aria-label="Send message" title="Send">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
               </button>
             )}
           </div>

@@ -394,7 +394,7 @@ export class HttpMoxApi implements MoxApi {
 
   // ---- Threads & chat ------------------------------------------------------------
 
-  async listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string }>> {
+  async listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string; status?: string }>> {
     return this.call(`/api/agents/${encodeURIComponent(agentId)}/threads`);
   }
 

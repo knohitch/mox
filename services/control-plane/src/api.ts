@@ -1783,7 +1783,9 @@ export function buildApiRouter(deps: ApiDeps): Router {
   router.get("/api/agents/:agentId/threads", async (ctx) => {
     const identity = await requireAuth(ctx, "threads");
     const records = await services.threads.listForAgent(identity, ctx.params.agentId!);
-    return records.map((r) => ({ threadId: r.threadId, title: r.title }));
+    // Status is exposed so clients keep archived threads out of "recent"
+    // surfaces; the store stays the single authority for thread state.
+    return records.map((r) => ({ threadId: r.threadId, title: r.title, status: r.status }));
   });
 
   router.post("/api/threads", async (ctx) => {

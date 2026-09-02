@@ -115,30 +115,72 @@ export function createMockMoxStore(
     listAgentVersions: async () => [],
     diffAgentVersions: async () => ({ from: 1, to: 2, changes: ["Updated prompt"] }),
     rollbackAgent: async () => ({ agentId: "draft_1", revision: 1 }),
-    listThreads: async () => [{ threadId: "th_main", title: "General Discussion" }],
-    createThread: async (_input) => ({ threadId: "th_new", title: _input?.title ?? "New conversation" }),
+    listThreads: async () =>
+      isEmpty
+        ? []
+        : [
+            { threadId: "th_main", title: "General Discussion", status: "active" },
+            { threadId: "th_q3", title: "Q3 Pipeline Review", status: "active" },
+          ],
+    createThread: async (input) => {
+      if (isError) throw new Error("Simulated thread creation failure — Studio preview of createThread errors.");
+      return { threadId: "th_new", title: input?.title ?? "New conversation" };
+    },
     archiveThread: async () => ({ threadId: "th_main", status: "archived" }),
-    getMessages: async (threadId) =>
-      !isEmpty && threadId === "th_main"
-        ? [
-            {
-              messageId: "msg_fixture_1",
-              threadId,
-              authorId: "u_you",
-              role: "user",
-              text: "Summarize the current pipeline for me.",
-              at: new Date().toISOString(),
-            },
-            {
-              messageId: "msg_fixture_2",
-              threadId,
-              authorId: "agent_orchestrator",
-              role: "agent",
-              text: "Here is the current pipeline summary based on your workspace data.",
-              at: new Date().toISOString(),
-            },
-          ]
-        : [],
+    getMessages: async (threadId) => {
+      if (isEmpty) return [];
+      if (threadId === "th_main") {
+        return [
+          {
+            messageId: "msg_fixture_1",
+            threadId,
+            authorId: "u_you",
+            role: "user",
+            text: "Summarize the current pipeline for me.",
+            at: new Date().toISOString(),
+          },
+          {
+            messageId: "msg_fixture_2",
+            threadId,
+            authorId: "agent_orchestrator",
+            role: "agent",
+            text: "Here is the current pipeline summary based on your workspace data.",
+            at: new Date().toISOString(),
+          },
+          // Streaming bubble + active run: previews the "running" state.
+          {
+            messageId: "msg_fixture_3",
+            threadId,
+            authorId: "agent_orchestrator",
+            role: "agent",
+            text: "Breaking down the Q3 numbers: ",
+            at: new Date().toISOString(),
+            streaming: true,
+          },
+        ];
+      }
+      if (threadId === "th_q3") {
+        return [
+          {
+            messageId: "msg_fixture_4",
+            threadId,
+            authorId: "u_you",
+            role: "user",
+            text: "Compare the top three competitors for us.",
+            at: new Date().toISOString(),
+          },
+          {
+            messageId: "msg_fixture_5",
+            threadId,
+            authorId: "agent_orchestrator",
+            role: "agent",
+            text: "Here is the competitor comparison you asked for.",
+            at: new Date().toISOString(),
+          },
+        ];
+      }
+      return [];
+    },
     send: async () => ({ runId: "run_mock", done: Promise.resolve(), cancel: () => {} }),
     openApprovals: async () => [],
     resolveApproval: noopPromise,
@@ -359,15 +401,31 @@ export function createMockMoxStore(
             storage_gb: 100,
           },
     },
-    approvals: [],
+    approvals: isEmpty
+      ? []
+      : [
+          {
+            approvalId: "apr_fixture_1" as any,
+            orgId: "org_acme_prod" as any,
+            agentId: customerAgents[0]?.agentId ?? "agent_orchestrator",
+            threadId: "th_main",
+            kind: "tool-run",
+            summary: "Agent wants to run a browser search (Studio preview).",
+            payload: {},
+            state: "open",
+            requestedAt: new Date().toISOString(),
+          },
+        ],
     messages: (threadId) => previewThreadMessages.get(threadId) ?? [],
     loadThread: async (_agentId, threadId) => {
       const msgs = await mockApi.getMessages(threadId);
       previewThreadMessages.set(threadId, msgs);
     },
-    send: noopPromise,
+    send: async () => {
+      if (isError) throw new Error("Simulated send failure — Studio preview of send errors.");
+    },
     cancel: () => {},
-    activeRun: () => null,
+    activeRun: (threadId) => (!isEmpty && threadId === "th_main" ? "run_mock" : null),
     resolveApproval: noopPromise,
     eventsVersion: 0,
     invalidateEvents: () => {},

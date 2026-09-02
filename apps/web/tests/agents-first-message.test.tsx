@@ -8,6 +8,7 @@ import {
   deriveSafeTitle,
   startConversation,
 } from "../src/domain/first-message.js";
+import { archiveCurrentConversation } from "../src/domain/thread-actions.js";
 import type { AgentSummary, ChatMessage } from "../src/api/types.js";
 
 /**
@@ -20,8 +21,9 @@ import type { AgentSummary, ChatMessage } from "../src/api/types.js";
  */
 
 const mockApi = {
-  listThreads: vi.fn(async () => [{ threadId: "t1", title: "Test thread" }]),
+  listThreads: vi.fn(async () => [{ threadId: "t1", title: "Test thread", status: "active" }]),
   createThread: vi.fn(async () => ({ threadId: "th_unused", title: "unused" })),
+  archiveThread: vi.fn(async () => ({ threadId: "t1", status: "archived" })),
   listModels: vi.fn(async () => []),
   listAgentVersions: vi.fn(async () => []),
   listKnowledgeSources: vi.fn(async () => []),
@@ -33,9 +35,14 @@ const storeLoadThread = vi.fn(async () => {});
 const storeMessages = vi.fn((_threadId: string): ChatMessage[] => []);
 
 let currentAgents: AgentSummary[] = [];
+let currentReady = true;
+let currentError: string | null = null;
 
 vi.mock("../src/api/store.js", () => ({
   useMox: () => ({
+    ready: currentReady,
+    error: currentError,
+    needsAuth: false,
     me: { displayName: "Test", email: "test@test.com", orgs: [] },
     agents: currentAgents,
     api: mockApi,
@@ -67,7 +74,10 @@ function fixtureAgent(id: string, name: string): AgentSummary {
 
 beforeEach(() => {
   currentAgents = [fixtureAgent("a1", "Research Agent"), fixtureAgent("a2", "Ops Agent")];
+  currentReady = true;
+  currentError = null;
   vi.clearAllMocks();
+  storeMessages.mockImplementation((_threadId: string): ChatMessage[] => []);
 });
 
 describe("deriveSafeTitle (deterministic local thread titles)", () => {
@@ -272,5 +282,181 @@ describe("Agent empty-thread composer", () => {
     expect(html).toContain("Summarize the pipeline.");
     expect(html).toContain("Here is the summary.");
     expect(html).toContain("Message Research Agent");
+  });
+});
+
+describe("startConversation call ordering", () => {
+  it("runs create → select → load → send → sync in canonical order", async () => {
+    const calls: string[] = [];
+    const deps = {
+      createThread: vi.fn(async () => { calls.push("create"); return { threadId: "th_9", title: "Hello" }; }),
+      onThreadReady: vi.fn(() => { calls.push("ready"); }),
+      loadThread: vi.fn(async () => { calls.push("load"); }),
+      send: vi.fn(async () => { calls.push("send"); }),
+      syncThreads: vi.fn(async () => { calls.push("sync"); }),
+      onError: vi.fn(),
+    };
+
+    await startConversation(deps, { agentId: "a1", initialMessage: "Hello" });
+
+    expect(calls).toEqual(["create", "ready", "load", "send", "sync"]);
+  });
+});
+
+describe("archiveCurrentConversation", () => {
+  it("archives once, falls back selection, then refreshes Recent", async () => {
+    const order: string[] = [];
+    const deps = {
+      archiveThread: vi.fn(async () => { order.push("archive"); return { threadId: "t1", status: "archived" }; }),
+      onArchived: vi.fn(() => { order.push("fallback"); }),
+      syncThreads: vi.fn(async () => { order.push("sync"); }),
+      onError: vi.fn(),
+    };
+
+    await archiveCurrentConversation(deps, "t1");
+
+    expect(deps.archiveThread).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["archive", "fallback", "sync"]);
+    expect(deps.onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps the thread open and reports the error when archive fails", async () => {
+    const deps = {
+      archiveThread: vi.fn(async () => { throw new Error("Archive service unavailable"); }),
+      onArchived: vi.fn(),
+      syncThreads: vi.fn(async () => {}),
+      onError: vi.fn(),
+    };
+
+    await archiveCurrentConversation(deps, "t1");
+
+    expect(deps.archiveThread).toHaveBeenCalledTimes(1);
+    expect(deps.onArchived).not.toHaveBeenCalled();
+    expect(deps.syncThreads).not.toHaveBeenCalled();
+    expect(deps.onError).toHaveBeenCalledWith("Archive service unavailable");
+  });
+});
+
+describe("Intentional loading / error states (no blank panels)", () => {
+  const noop = async () => {};
+
+  it("shows a loading workspace instead of a fake zero-agent state", () => {
+    currentReady = false;
+    const html = renderToString(<AgentsView />);
+    expect(html).toContain("Loading workspace");
+    expect(html).not.toContain("Create your first Agent");
+  });
+
+  it("shows a truthful error state when the backend is unavailable and no agents exist", () => {
+    currentReady = false;
+    currentError = "Control Plane unreachable";
+    currentAgents = [];
+    const html = renderToString(<AgentsView />);
+    expect(html).toContain("Workspace unavailable");
+    expect(html).toContain("Control Plane unreachable");
+    // The hub hides its creation CTA on backend failure (the separate footer
+    // action remains as workspace chrome).
+    expect(html).not.toContain("Create your first Agent");
+  });
+
+  it("shows a message loading state instead of an empty chat", () => {
+    const html = renderToString(
+      <AgentDetail
+        summary={fixtureAgent("a1", "Research Agent")}
+        threadId="t1"
+        messagesLoading
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(html).toContain("Loading conversation");
+    expect(html).not.toContain("Ready when you are");
+  });
+
+  it("surfaces failed thread loads with a retry affordance", () => {
+    const onReloadThread = vi.fn();
+    const html = renderToString(
+      <AgentDetail
+        summary={fixtureAgent("a1", "Research Agent")}
+        threadId="t1"
+        threadLoadError="Thread service unavailable"
+        onReloadThread={onReloadThread}
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(html).toContain("could not be loaded");
+    expect(html).toContain("Thread service unavailable");
+    expect(html).toContain("Retry");
+  });
+});
+
+describe("No dead controls in the Agents workspace", () => {
+  const noop = async () => {};
+
+  it("has no href=\"#\" actions left (Create Agent is a real button)", () => {
+    const html = renderToString(<AgentsView />);
+    expect(html).not.toContain('href="#"');
+    expect(html).toContain('aria-label="Create Agent"');
+  });
+
+  it("removed the Add context no-op from the active composer", () => {
+    const html = renderToString(
+      <AgentDetail
+        summary={fixtureAgent("a1", "Research Agent")}
+        threadId="t1"
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(html).not.toContain("Add context");
+  });
+
+  it("renders the model badge as non-interactive (no dropdown chevron)", () => {
+    const summary = { ...fixtureAgent("a1", "Research Agent"), modelBadge: "gpt-4.1" } as AgentSummary;
+    const html = renderToString(
+      <AgentDetail
+        summary={summary}
+        threadId="t1"
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(html).toContain("aw-model-badge");
+    expect(html).toContain("change it in Settings");
+    const start = html.indexOf('class="aw-model-badge"');
+    const end = html.indexOf("</div>", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(html.slice(start, end)).not.toContain("<svg");
+  });
+
+  it("exposes an archive action only for an open thread", () => {
+    const onArchive = vi.fn(async () => null);
+    const withThread = renderToString(
+      <AgentDetail
+        summary={fixtureAgent("a1", "Research Agent")}
+        threadId="t1"
+        onArchive={onArchive}
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(withThread).toContain('aria-label="Archive conversation"');
+    const noThread = renderToString(
+      <AgentDetail
+        summary={fixtureAgent("a1", "Research Agent")}
+        threadId={null}
+        onArchive={onArchive}
+        onThreadChange={noop}
+        onNewChat={noop}
+        onStartFirstMessage={noop}
+      />,
+    );
+    expect(noThread).not.toContain('aria-label="Archive conversation"');
   });
 });

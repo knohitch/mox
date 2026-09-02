@@ -11,6 +11,9 @@ vi.mock("../src/api/store.js", async () => {
   return {
     ...(actual as any),
     useMox: () => ({
+      ready: true,
+      error: null,
+      needsAuth: false,
       me: { displayName: "Test", email: "test@test.com", orgs: [] },
       agents: [
         {

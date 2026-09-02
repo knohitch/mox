@@ -759,7 +759,7 @@ export interface MoxApi {
   rollbackAgent(agentId: string, toRevision: number): Promise<{ agentId: string; revision: number }>;
 
   // Threads & chat
-  listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string }>>;
+  listThreads(agentId: string): Promise<Array<{ threadId: string; title?: string; status?: string }>>;
   createThread(input: { agentId: string; title?: string }): Promise<{ threadId: string; title?: string }>;
   getMessages(threadId: string): Promise<ChatMessage[]>;
   archiveThread(threadId: string): Promise<{ threadId: string; status: string }>;
