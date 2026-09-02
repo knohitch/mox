@@ -2900,6 +2900,17 @@ small {
 .aw-composer-toolbar { position: absolute; bottom: 12px; left: 16px; right: 16px; display: flex; align-items: center; justify-content: space-between; }
 .aw-composer-tools { display: flex; align-items: center; gap: 8px; }
 .aw-composer-stop { background: var(--bad); border: none; color: #fff; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.aw-agent-picker { background: var(--bg-card); border: 1px solid var(--line); color: var(--text); border-radius: 18px; padding: 5px 10px; font-size: 12.5px; font-family: inherit; cursor: pointer; max-width: 240px; }
+.aw-agent-picker:hover:not(:disabled) { border-color: var(--line-hover); }
+.aw-agent-picker:focus { outline: none; border-color: var(--line-hover); }
+.aw-agent-picker:disabled { opacity: 0.5; cursor: not-allowed; }
+.aw-agent-picker.invalid { border-color: var(--bad, #ef4444); }
+.aw-composer-hint { font-size: 12px; color: var(--text-dim); }
+.aw-composer-hint[role="alert"] { color: var(--bad, #ef4444); }
+.aw-composer-wrapper[aria-busy="true"] { opacity: 0.75; }
+.aw-agent-card.selected .aw-agent-card-inner { border: 1px solid var(--line-hover); box-shadow: 0 0 0 1px var(--line-hover) inset; }
+.aw-agent-card:focus-visible { outline: 2px solid var(--line-hover); outline-offset: 2px; }
+.aw-thread-row:focus-visible, .aw-agent-row:focus-visible { outline: 2px solid var(--line-hover); outline-offset: -2px; }
 
 
 /* Dashboard Vercel-inspired CSS */

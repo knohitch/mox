@@ -1,5 +1,5 @@
 import type { MoxStore } from "../api/store.js";
-import type { MoxApi } from "../api/types.js";
+import type { ChatMessage, MoxApi } from "../api/types.js";
 import {
   createCustomerAgentsFixture,
   createCustomerBackupsFixture,
@@ -102,6 +102,9 @@ export function createMockMoxStore(
 
   const noopPromise = async () => {};
 
+  // Preview-only message cache (fixture data, never privileged APIs/PostgreSQL).
+  const previewThreadMessages = new Map<string, ChatMessage[]>();
+
   const mockApi: MoxApi = {
     listAgents: async () => (isEmpty ? [] : customerAgents),
     getAgent: async (id) => customerAgents.find((a) => a.agentId === id),
@@ -113,9 +116,29 @@ export function createMockMoxStore(
     diffAgentVersions: async () => ({ from: 1, to: 2, changes: ["Updated prompt"] }),
     rollbackAgent: async () => ({ agentId: "draft_1", revision: 1 }),
     listThreads: async () => [{ threadId: "th_main", title: "General Discussion" }],
-    createThread: async () => ({ threadId: "th_new", title: "New Conversation" }),
+    createThread: async (_input) => ({ threadId: "th_new", title: _input?.title ?? "New conversation" }),
     archiveThread: async () => ({ threadId: "th_main", status: "archived" }),
-    getMessages: async () => [],
+    getMessages: async (threadId) =>
+      !isEmpty && threadId === "th_main"
+        ? [
+            {
+              messageId: "msg_fixture_1",
+              threadId,
+              authorId: "u_you",
+              role: "user",
+              text: "Summarize the current pipeline for me.",
+              at: new Date().toISOString(),
+            },
+            {
+              messageId: "msg_fixture_2",
+              threadId,
+              authorId: "agent_orchestrator",
+              role: "agent",
+              text: "Here is the current pipeline summary based on your workspace data.",
+              at: new Date().toISOString(),
+            },
+          ]
+        : [],
     send: async () => ({ runId: "run_mock", done: Promise.resolve(), cancel: () => {} }),
     openApprovals: async () => [],
     resolveApproval: noopPromise,
@@ -337,8 +360,11 @@ export function createMockMoxStore(
           },
     },
     approvals: [],
-    messages: () => [],
-    loadThread: noopPromise,
+    messages: (threadId) => previewThreadMessages.get(threadId) ?? [],
+    loadThread: async (_agentId, threadId) => {
+      const msgs = await mockApi.getMessages(threadId);
+      previewThreadMessages.set(threadId, msgs);
+    },
     send: noopPromise,
     cancel: () => {},
     activeRun: () => null,

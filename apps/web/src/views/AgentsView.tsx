@@ -16,22 +16,30 @@ import type {
 } from "../api/types.js";
 
 
-import { limitOf } from "../api/entitlement.js";
 import { agentStatus, STATUS_LABEL } from "../domain/roster.js";
 import { simpleInputFromDefinition, slugFromName } from "../domain/authoring.js";
 import { projectWorkView } from "../domain/work-view.js";
+import { EMPTY_THREAD_SUGGESTIONS, startConversation } from "../domain/first-message.js";
 import { Avatar, Badge, Button, Card, EmptyState, ErrorState } from "../ui/primitives.js";
 import { Markdown } from "../ui/markdown.js";
 
 export function AgentsView() {
   const mox = useMox();
-  const entitlements = useEntitlements();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [search, setSearch] = useState("");
   const [recentThreads, setRecentThreads] = useState<Array<{ threadId: string; title?: string; agentId: string; agentName: string; }>>([]);
-  
+  // Quick Start Composer: editable draft + explicitly chosen target agent.
+  // There is NO silent default agent — the user must pick one before sending.
+  const [hubDraft, setHubDraft] = useState("");
+  const [hubAgentId, setHubAgentId] = useState<string | null>(null);
+  const [hubNeedsAgent, setHubNeedsAgent] = useState(false);
+  const [hubStarting, setHubStarting] = useState(false);
+  const [hubError, setHubError] = useState<string | null>(null);
+  const hubComposerRef = useRef<HTMLTextAreaElement | null>(null);
+  const hubPickerRef = useRef<HTMLSelectElement | null>(null);
+
   const selected = useMemo(
     () => mox.agents.find((a) => a.agentId === selectedId) ?? null,
     [mox.agents, selectedId],
@@ -49,8 +57,84 @@ export function AgentsView() {
     void syncAllThreads();
   }, [syncAllThreads]);
 
-  const maxAgents = limitOf(entitlements, "max_agents", Infinity);
-  const atAgentLimit = maxAgents > 0 && mox.agents.length >= maxAgents;
+  /**
+   * The single shared first-message flow used by the Hub composer, an agent's
+   * empty-thread composer, and suggested prompts: create the durable thread
+   * only when the first message is actually sent, select it immediately, and
+   * submit through the canonical mox.send pipeline.
+   */
+  const startFirstMessage = useCallback(async (
+    agentId: string,
+    initialMessage: string,
+    opts?: { onThreadReady?: (agentId: string, threadId: string) => void; onError?: (message: string) => void },
+  ) => {
+    await startConversation({
+      createThread: mox.api.createThread.bind(mox.api),
+      loadThread: (a, t) => mox.loadThread(a, t),
+      send: (a, t, text) => mox.send(a, t, text),
+      onThreadReady: (a, t) => {
+        setSelectedId(a);
+        setSelectedThreadId(t);
+        opts?.onThreadReady?.(a, t);
+      },
+      syncThreads: syncAllThreads,
+      onError: (message) => opts?.onError?.(message),
+    }, { agentId, initialMessage });
+  }, [mox.api, mox.loadThread, mox.send, syncAllThreads]);
+
+  const startFromHub = useCallback(async () => {
+    const text = hubDraft.trim();
+    if (!text || hubStarting) return;
+    if (mox.agents.length === 0) return;
+    // Send-without-agent: preserve the draft, ask for an explicit target.
+    if (!hubAgentId || !mox.agents.some((a) => a.agentId === hubAgentId)) {
+      setHubNeedsAgent(true);
+      hubPickerRef.current?.focus();
+      return;
+    }
+    setHubNeedsAgent(false);
+    setHubError(null);
+    setHubStarting(true);
+    try {
+      await startFirstMessage(hubAgentId, text, {
+        onThreadReady: () => {
+          setHubDraft("");
+          setHubAgentId(null);
+        },
+        onError: setHubError,
+      });
+    } finally {
+      setHubStarting(false);
+    }
+  }, [hubDraft, hubStarting, hubAgentId, mox.agents, startFirstMessage]);
+
+  /** Hub agent card: with a draft it targets the composer; without, it opens the agent's start state. */
+  const handleHubCardClick = useCallback((agentId: string) => {
+    if (hubDraft.trim()) {
+      setHubAgentId(agentId);
+      setHubNeedsAgent(false);
+      setHubError(null);
+    } else {
+      setSelectedId(agentId);
+      setSelectedThreadId(null);
+    }
+  }, [hubDraft]);
+
+  /** Recent rail: selecting an existing thread must load its real messages. */
+  const openRecentThread = useCallback((t: { agentId: string; threadId: string }) => {
+    setSelectedId(t.agentId);
+    setSelectedThreadId(t.threadId);
+    void mox.loadThread(t.agentId, t.threadId);
+  }, [mox]);
+
+  /** Rail plus = new conversation for the current context (never agent creation). */
+  const handleRailPlus = useCallback(() => {
+    if (selectedId) {
+      setSelectedThreadId(null);
+    } else {
+      hubComposerRef.current?.focus();
+    }
+  }, [selectedId]);
 
   const filteredAgents = useMemo(() => {
     if (!search) return mox.agents;
@@ -78,8 +162,8 @@ export function AgentsView() {
       <div className="aw-sidebar">
         <div className="aw-sidebar-header">
           <div className="aw-sidebar-title">Mox Agents</div>
-          <button className="aw-sidebar-new" onClick={() => setShowNew(true)} title="New Agent" disabled={atAgentLimit}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          <button className="aw-sidebar-new" onClick={handleRailPlus} title="New conversation" aria-label="New conversation">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
           </button>
         </div>
         <div className="aw-search-box">
@@ -100,9 +184,16 @@ export function AgentsView() {
                 <div
                   key={t.threadId}
                   className={`aw-thread-row ${t.agentId === selectedId && t.threadId === selectedThreadId ? "active" : ""}`}
-                  onClick={() => { setSelectedId(t.agentId); setSelectedThreadId(t.threadId); }}
+                  onClick={() => openRecentThread(t)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openRecentThread(t);
+                    }
+                  }}
                   role="button"
                   tabIndex={0}
+                  aria-label={`Open conversation ${t.title || "New chat"} with ${t.agentName}`}
                 >
                   <div className="aw-thread-row-title">{t.title || "New chat"}</div>
                   <div className="aw-thread-row-sub">{t.agentName}</div>
@@ -117,8 +208,16 @@ export function AgentsView() {
                 key={a.agentId}
                 className={`aw-agent-row ${a.agentId === selectedId && !selectedThreadId ? "active" : ""}`}
                 onClick={() => { setSelectedId(a.agentId); setSelectedThreadId(null); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelectedId(a.agentId);
+                    setSelectedThreadId(null);
+                  }
+                }}
                 role="button"
                 tabIndex={0}
+                aria-label={`Open ${a.definition.identity.displayName}`}
               >
                 <div className="aw-agent-row-icon" style={{ background: gradients[i % gradients.length] }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
@@ -156,33 +255,86 @@ export function AgentsView() {
       {/* Main Area */}
       <div className="aw-main">
         {selected ? (
-          <AgentDetail 
-            summary={selected} 
+          <AgentDetail
+            summary={selected}
             threadId={selectedThreadId}
             onThreadChange={setSelectedThreadId}
-            onNewChat={async () => {
-               const created = await mox.api.createThread({ agentId: selected.agentId, title: "New chat" });
-               await syncAllThreads();
-               setSelectedThreadId(created.threadId);
-            }}
-            onBack={() => { setSelectedId(null); setSelectedThreadId(null); }} 
+            onNewChat={async () => { setSelectedThreadId(null); }}
+            onStartFirstMessage={(agentId, text, opts) => startFirstMessage(agentId, text, opts)}
+            onBack={() => { setSelectedId(null); setSelectedThreadId(null); }}
           />
         ) : (
           <div className="aw-hub">
             <div className="aw-hub-title">MOX WORKSPACE</div>
             <div className="aw-hub-heading">Start a new conversation</div>
 
-            <div className="aw-composer-wrapper">
-              <textarea
-                className="aw-composer"
-                placeholder="Ask anything..."
-                disabled
-              />
-              <button className="aw-composer-submit" disabled>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
-              </button>
-            </div>
-            
+            {mox.agents.length === 0 ? (
+              <div className="aw-composer-wrapper">
+                <textarea
+                  className="aw-composer"
+                  placeholder="Ask anything..."
+                  aria-label="Ask anything"
+                  disabled
+                />
+                <div className="aw-composer-toolbar">
+                  <div className="aw-composer-tools">
+                    <select className="aw-agent-picker" value="" aria-label="Choose agent" disabled>
+                      <option value="" disabled>Choose agent</option>
+                    </select>
+                  </div>
+                  <button className="aw-composer-submit" disabled aria-label="Send message">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="aw-composer-wrapper" aria-busy={hubStarting}>
+                <textarea
+                  ref={hubComposerRef}
+                  className="aw-composer"
+                  placeholder="Ask anything..."
+                  aria-label="Ask anything"
+                  value={hubDraft}
+                  disabled={hubStarting}
+                  onChange={(e) => { setHubDraft(e.target.value); if (hubNeedsAgent) setHubNeedsAgent(false); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void startFromHub();
+                    }
+                  }}
+                />
+                <div className="aw-composer-toolbar">
+                  <div className="aw-composer-tools">
+                    <select
+                      ref={hubPickerRef}
+                      className={`aw-agent-picker ${hubNeedsAgent ? "invalid" : ""}`}
+                      value={hubAgentId ?? ""}
+                      aria-label="Choose agent"
+                      disabled={hubStarting}
+                      onChange={(e) => { setHubAgentId(e.target.value || null); setHubNeedsAgent(false); setHubError(null); }}
+                    >
+                      <option value="" disabled>Choose agent</option>
+                      {mox.agents.map((a) => (
+                        <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName}</option>
+                      ))}
+                    </select>
+                    {hubNeedsAgent && <span className="aw-composer-hint" role="alert">Choose an agent to continue.</span>}
+                    {hubStarting && <span className="aw-composer-hint" role="status">Starting conversation…</span>}
+                    {hubError && <span className="aw-composer-hint" role="alert">{hubError}</span>}
+                  </div>
+                  <button
+                    className="aw-composer-submit"
+                    onClick={() => void startFromHub()}
+                    disabled={!hubDraft.trim() || hubStarting}
+                    aria-label="Send message"
+                    title="Send"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {mox.agents.length > 0 ? (
               <div className="aw-explore-section">
@@ -191,8 +343,18 @@ export function AgentsView() {
                   {mox.agents.map((a, i) => (
                     <div
                       key={a.agentId}
-                      className="aw-agent-card"
-                      onClick={() => setSelectedId(a.agentId)}
+                      className={`aw-agent-card ${hubAgentId === a.agentId ? "selected" : ""}`}
+                      onClick={() => handleHubCardClick(a.agentId)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          handleHubCardClick(a.agentId);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={hubDraft.trim() ? `Use ${a.definition.identity.displayName} for this message` : `Open ${a.definition.identity.displayName}`}
+                      aria-pressed={hubDraft.trim() ? hubAgentId === a.agentId : undefined}
                       style={{ background: gradients[i % gradients.length] }}
                     >
                       <div className="aw-agent-card-inner">
@@ -205,8 +367,8 @@ export function AgentsView() {
               </div>
             ) : (
               <div style={{ textAlign: "center", color: "#94a3b8", marginTop: 40 }}>
-                <p>No agents available in this workspace.</p>
-                <Button kind="primary" onClick={() => setShowNew(true)}>Create your first agent</Button>
+                <p>Create your first Agent to start a conversation.</p>
+                <Button kind="primary" onClick={() => setShowNew(true)}>Create Agent</Button>
               </div>
             )}
           </div>
@@ -441,17 +603,19 @@ function NewAgentModal({ onDone, onClose }: { onDone: (agentId?: string) => void
 const TABS = ["chat", "work", "computer", "files", "terminal", "logs", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
-function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat }: { summary: AgentSummary; threadId: string | null; onBack?: () => void; onThreadChange: (id: string) => void; onNewChat: () => Promise<void> }) {
+export type StartFirstMessageFn = (
+  agentId: string,
+  initialMessage: string,
+  opts?: { onThreadReady?: (agentId: string, threadId: string) => void; onError?: (message: string) => void },
+) => Promise<void>;
+
+export function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat, onStartFirstMessage }: { summary: AgentSummary; threadId: string | null; onBack?: () => void; onThreadChange: (id: string) => void; onNewChat: () => Promise<void>; onStartFirstMessage: StartFirstMessageFn }) {
   const mox = useMox();
   const terminalAllowed = useTerminal();
   const computerAllowed = useBrowser();
   const [tab, setTab] = useState<Tab>("chat");
   const agentId = summary.agentId;
-  
-  
-  const [creating, setCreating] = useState(false);
 
-  
   const enabled: Record<Tab, boolean> = {
     chat: true,
     work: true,
@@ -478,9 +642,9 @@ function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat }: {
           <h2>{d.identity.displayName}</h2>
         </div>
         <div className="aw-chat-actions">
-          <button className="aw-action-btn" onClick={onNewChat} disabled={creating}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
-            Task
+          <button className="aw-action-btn" onClick={() => void onNewChat()} title="New conversation" aria-label="New conversation">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            New chat
           </button>
           
           {summary.modelBadge && (
@@ -535,17 +699,7 @@ function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat }: {
             (threadId ? (
               <ChatTab agentId={agentId} threadId={threadId} name={d.identity.displayName} summary={summary} />
             ) : (
-              <div className="aw-empty-thread">
-                <Avatar slug={d.slug} name={d.identity.displayName} size={64} status={status} />
-                <h2>{d.identity.displayName}</h2>
-                <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
-                <div className="aw-suggestions">
-                  <button onClick={() => void 0}>Research a market</button>
-                  <button onClick={() => void 0}>Analyze a document</button>
-                  <button onClick={() => void 0}>Compare competitors</button>
-                  <button onClick={() => void 0}>Build a research brief</button>
-                </div>
-              </div>
+              <EmptyThreadPanel summary={summary} status={status} onStartFirstMessage={onStartFirstMessage} />
             ))}
           {tab === "work" && threadId && <WorkTab subjectId={threadId} />}
           {tab === "computer" && <ComputerTab agentId={agentId} />}
@@ -553,6 +707,87 @@ function AgentDetail({ summary, threadId, onBack, onThreadChange, onNewChat }: {
           {tab === "terminal" && <TerminalTab agentId={agentId} />}
           {tab === "logs" && <LogsTab agentId={agentId} />}
           {tab === "settings" && <SettingsTab summary={summary} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Selected agent + no durable thread yet: a fully functional composer. The
+ * thread is created through the shared first-message flow only when the user
+ * actually sends — never merely because the agent was opened.
+ */
+export function EmptyThreadPanel({ summary, status, onStartFirstMessage }: { summary: AgentSummary; status: ReturnType<typeof agentStatus>; onStartFirstMessage: StartFirstMessageFn }) {
+  const [draft, setDraft] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const name = summary.definition.identity.displayName;
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || starting) return;
+    setStarting(true);
+    setError(null);
+    try {
+      await onStartFirstMessage(summary.agentId, text, {
+        onThreadReady: () => setDraft(""),
+        onError: setError,
+      });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  return (
+    <div className="aw-empty-thread" aria-busy={starting}>
+      <Avatar slug={summary.definition.slug} name={name} size={64} status={status} />
+      <h2>{name}</h2>
+      <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
+      <div className="aw-suggestions">
+        {EMPTY_THREAD_SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            onClick={() => { setDraft(s); inputRef.current?.focus(); }}
+            aria-label={`Use suggestion: ${s}`}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+      <div className="aw-composer-container" style={{ marginTop: 24 }}>
+        <div className="aw-composer-wrapper active-composer">
+          <textarea
+            ref={inputRef}
+            className="aw-composer"
+            value={draft}
+            placeholder={`Message ${name}…`}
+            aria-label={`Message ${name}`}
+            disabled={starting}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+          />
+          <div className="aw-composer-toolbar">
+            <div className="aw-composer-tools">
+              {starting && <span className="aw-composer-hint" role="status">Starting conversation…</span>}
+              {error && <span className="aw-composer-hint" role="alert">{error}</span>}
+            </div>
+            <button
+              className="aw-composer-submit"
+              onClick={() => void send()}
+              disabled={!draft.trim() || starting}
+              aria-label="Send message"
+              title="Send"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"></line><polyline points="5 12 12 5 19 12"></polyline></svg>
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -599,10 +834,9 @@ function ChatTab({ agentId, threadId, name, summary }: { agentId: string; thread
             <h2>{summary.definition.identity.displayName}</h2>
             <p>Ready when you are.<br/>Ask this agent to research, analyze, compare, or investigate something.</p>
             <div className="aw-suggestions">
-              <button onClick={() => { setDraft("Research a market"); }}>Research a market</button>
-              <button onClick={() => { setDraft("Analyze a document"); }}>Analyze a document</button>
-              <button onClick={() => { setDraft("Compare competitors"); }}>Compare competitors</button>
-              <button onClick={() => { setDraft("Build a research brief"); }}>Build a research brief</button>
+              {EMPTY_THREAD_SUGGESTIONS.map((s) => (
+                <button key={s} onClick={() => { setDraft(s); }} aria-label={`Use suggestion: ${s}`}>{s}</button>
+              ))}
             </div>
           </div>
         )}
