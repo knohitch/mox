@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useMox } from "../api/store.js";
 import { useRoute } from "../router.js";
 import { Badge, Button, ErrorState, LoadingState } from "../ui/primitives.js";
-import { MoxLogo } from "./AuthPages.js";
 import { slugFromName } from "../domain/authoring.js";
 import {
   ONBOARDING_GOALS,
@@ -178,43 +177,36 @@ export function OnboardingView() {
 
   const meta = ONBOARDING_STEP_META[step]!;
 
+  // Focused full-screen flow: NO header, footer or sidebar chrome — a single
+  // centered card with the progress indicator, the step content and an inline
+  // action row only.
+  const onBack = step > 1 ? () => goTo(step - 1) : undefined;
+
   return (
     <div className="onboarding-shell">
-      <header className="onboarding-top">
-        <div className="onboarding-brand" aria-label="Mox onboarding">
-          <MoxLogo className="onboarding-logo" />
-        </div>
-        <div className="onboarding-top-right">
-          <span className="muted onboarding-user">{mox.me?.email}</span>
-          <Button kind="ghost" size="sm" onClick={() => void mox.signOut()}>
-            Sign out
-          </Button>
-        </div>
-      </header>
-
       <main className="onboarding-main">
-        <div className="onboarding-progress" role="progressbar" aria-label="Onboarding progress" aria-valuemin={1} aria-valuemax={ONBOARDING_TOTAL_STEPS} aria-valuenow={step} aria-valuetext={`Step ${step} of ${ONBOARDING_TOTAL_STEPS}: ${meta.kicker}`}>
-          <div className="onboarding-progress-track" aria-hidden="true">
-            <div className="onboarding-progress-fill" style={{ width: `${(step / ONBOARDING_TOTAL_STEPS) * 100}%` }} />
-          </div>
-          <p className="onboarding-progress-text">
-            Step <strong>{step}</strong> of {ONBOARDING_TOTAL_STEPS} — {meta.kicker}
-          </p>
-          <ol className="onboarding-steps" aria-label="Onboarding steps">
-            {STEP_ORDER.map((n) => (
-              <li
-                key={n}
-                className={`onboarding-step${n === step ? " current" : ""}${state.completedSteps.includes(n) ? " done" : ""}`}
-                aria-current={n === step ? "step" : undefined}
-              >
-                {n}. {ONBOARDING_STEP_META[n]!.kicker}
-              </li>
-            ))}
-          </ol>
-          <p className="onboarding-save-note muted">Progress is saved as you continue — you can leave and resume any time.</p>
-        </div>
-
         <section className="onboarding-card" aria-labelledby="onboarding-step-title">
+          <div className="onboarding-progress" role="progressbar" aria-label="Onboarding progress" aria-valuemin={1} aria-valuemax={ONBOARDING_TOTAL_STEPS} aria-valuenow={step} aria-valuetext={`Step ${step} of ${ONBOARDING_TOTAL_STEPS}: ${meta.kicker}`}>
+            <div className="onboarding-progress-track" aria-hidden="true">
+              <div className="onboarding-progress-fill" style={{ width: `${(step / ONBOARDING_TOTAL_STEPS) * 100}%` }} />
+            </div>
+            <p className="onboarding-progress-text">
+              Step <strong>{step}</strong> of {ONBOARDING_TOTAL_STEPS} — {meta.kicker}
+            </p>
+            <ol className="onboarding-steps" aria-label="Onboarding steps">
+              {STEP_ORDER.map((n) => (
+                <li
+                  key={n}
+                  className={`onboarding-step${n === step ? " current" : ""}${state.completedSteps.includes(n) ? " done" : ""}`}
+                  aria-current={n === step ? "step" : undefined}
+                >
+                  {n}. {ONBOARDING_STEP_META[n]!.kicker}
+                </li>
+              ))}
+            </ol>
+            <p className="onboarding-save-note muted">Progress is saved as you continue — you can leave and resume any time.</p>
+          </div>
+
           <h1 id="onboarding-step-title">{meta.title}</h1>
           {error ? (
             <div className="mastra-error-box" role="alert">
@@ -227,38 +219,32 @@ export function OnboardingView() {
             </div>
           ) : null}
 
-          {step === 1 ? <StepWorkspace state={state} busy={busy} onAdvance={advance} /> : null}
-          {step === 2 ? <StepGoals state={state} busy={busy} onAdvance={advance} /> : null}
+          {step === 1 ? <StepWorkspace state={state} busy={busy} onAdvance={advance} onBack={onBack} /> : null}
+          {step === 2 ? <StepGoals state={state} busy={busy} onAdvance={advance} onBack={onBack} /> : null}
           {step === 3 ? (
             <StepModels
               state={state}
               busy={busy}
               catalog={catalog}
               onAdvance={advance}
+              onBack={onBack}
               onReloadCatalog={() => void loadCatalog()}
             />
           ) : null}
-          {step === 4 ? <StepAgent state={state} busy={busy} catalog={catalog} onAdvance={advance} /> : null}
+          {step === 4 ? <StepAgent state={state} busy={busy} catalog={catalog} onAdvance={advance} onBack={onBack} /> : null}
           {step === 5 ? (
             <StepInfrastructure
               busy={busy}
               catalog={catalog}
               onAdvance={advance}
+              onBack={onBack}
               onReloadCatalog={() => void loadCatalog()}
             />
           ) : null}
           {step === 6 ? (
-            <StepConnections state={state} busy={busy} catalog={catalog} onPatch={patch} onAdvance={advance} onFinish={finish} />
+            <StepConnections state={state} busy={busy} catalog={catalog} onPatch={patch} onAdvance={advance} onBack={onBack} onFinish={finish} />
           ) : null}
 
-          {step > 1 ? (
-            <footer className="onboarding-footer">
-              <Button kind="ghost" onClick={() => goTo(step - 1)} disabled={busy}>
-                Back
-              </Button>
-              <span className="muted onboarding-footer-hint">Back never erases saved decisions.</span>
-            </footer>
-          ) : null}
         </section>
       </main>
     </div>
@@ -271,10 +257,12 @@ function StepWorkspace({
   state,
   busy,
   onAdvance,
+  onBack,
 }: {
   state: OnboardingState;
   busy: boolean;
   onAdvance: (input: { step: number; persona: OnboardingPersona; displayName: string; workspaceName: string }) => Promise<void>;
+  onBack?: () => void;
 }) {
   const mox = useMox();
   const [displayName, setDisplayName] = useState(state.displayName ?? mox.me?.displayName ?? "");
@@ -333,11 +321,17 @@ function StepWorkspace({
           </label>
         ))}
       </fieldset>
-      <footer className="onboarding-footer">
-        <span />
-        <Button kind="primary" onClick={submit} disabled={busy}>
-          {busy ? "Saving…" : "Continue"}
-        </Button>
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy}>
+            Back
+          </Button>
+        ) : null}
+        <div className="onboarding-actions-end">
+          <Button kind="primary" onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Continue"}
+          </Button>
+        </div>
       </footer>
     </div>
   );
@@ -349,10 +343,12 @@ function StepGoals({
   state,
   busy,
   onAdvance,
+  onBack,
 }: {
   state: OnboardingState;
   busy: boolean;
   onAdvance: (input: { step: number; goals: string[] }) => Promise<void>;
+  onBack?: () => void;
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set(state.goals));
 
@@ -382,11 +378,17 @@ function StepGoals({
           </label>
         ))}
       </fieldset>
-      <footer className="onboarding-footer">
-        <span />
-        <Button kind="primary" onClick={() => void onAdvance({ step: 2, goals: [...selected] })} disabled={busy}>
-          {busy ? "Saving…" : "Continue"}
-        </Button>
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy}>
+            Back
+          </Button>
+        ) : null}
+        <div className="onboarding-actions-end">
+          <Button kind="primary" onClick={() => void onAdvance({ step: 2, goals: [...selected] })} disabled={busy}>
+            {busy ? "Saving…" : "Continue"}
+          </Button>
+        </div>
       </footer>
     </div>
   );
@@ -399,12 +401,14 @@ function StepModels({
   busy,
   catalog,
   onAdvance,
+  onBack,
   onReloadCatalog,
 }: {
   state: OnboardingState;
   busy: boolean;
   catalog: CatalogBundle | null;
   onAdvance: (input: { step: number; modelSetupChoice: "mox_managed" | "own_provider" | "deferred"; modelProviderId?: string }) => Promise<void>;
+  onBack?: () => void;
   onReloadCatalog: () => void;
 }) {
   const mox = useMox();
@@ -547,24 +551,30 @@ function StepModels({
         <p className="onboarding-defer-note muted">Deferred is a normal choice. Agents you create will wait for model access — Mox will never pretend a provider is connected.</p>
       ) : null}
 
-      <footer className="onboarding-footer">
-        <span />
-        {mode === "own" ? (
-          <Button kind="primary" onClick={() => void connectOwnProvider()} disabled={continueDisabled}>
-            {connecting ? "Connecting…" : "Connect and continue"}
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy || connecting}>
+            Back
           </Button>
-        ) : (
-          <Button
-            kind="primary"
-            disabled={continueDisabled}
-            onClick={() => {
-              if (mode === "managed") void onAdvance({ step: 3, modelSetupChoice: "mox_managed" });
-              if (mode === "later") void onAdvance({ step: 3, modelSetupChoice: "deferred" });
-            }}
-          >
-            {busy ? "Saving…" : "Continue"}
-          </Button>
-        )}
+        ) : null}
+        <div className="onboarding-actions-end">
+          {mode === "own" ? (
+            <Button kind="primary" onClick={() => void connectOwnProvider()} disabled={continueDisabled}>
+              {connecting ? "Connecting…" : "Connect and continue"}
+            </Button>
+          ) : (
+            <Button
+              kind="primary"
+              disabled={continueDisabled}
+              onClick={() => {
+                if (mode === "managed") void onAdvance({ step: 3, modelSetupChoice: "mox_managed" });
+                if (mode === "later") void onAdvance({ step: 3, modelSetupChoice: "deferred" });
+              }}
+            >
+              {busy ? "Saving…" : "Continue"}
+            </Button>
+          )}
+        </div>
       </footer>
     </div>
   );
@@ -577,11 +587,13 @@ function StepAgent({
   busy,
   catalog,
   onAdvance,
+  onBack,
 }: {
   state: OnboardingState;
   busy: boolean;
   catalog: CatalogBundle | null;
   onAdvance: (input: { step: number; agentSetupChoice: "created" | "deferred"; agentId?: string }) => Promise<void>;
+  onBack?: () => void;
 }) {
   const mox = useMox();
   const availableModels = (catalog?.models ?? []).filter((m) => m.available);
@@ -691,13 +703,20 @@ function StepAgent({
       </fieldset>
       <p className="muted onboarding-hint">The draft targets the Mox sandbox — you can retarget it to your own server after infrastructure is ready.</p>
 
-      <footer className="onboarding-footer onboarding-footer-split">
-        <Button kind="ghost" onClick={() => void onAdvance({ step: 4, agentSetupChoice: "deferred" })} disabled={busy || creating}>
-          {busy ? "Saving…" : "I'll create my first agent from the dashboard"}
-        </Button>
-        <Button kind="primary" onClick={() => void submit()} disabled={busy || creating}>
-          {creating ? "Creating…" : "Create my first agent"}
-        </Button>
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy || creating}>
+            Back
+          </Button>
+        ) : null}
+        <div className="onboarding-actions-end">
+          <Button kind="ghost" onClick={() => void onAdvance({ step: 4, agentSetupChoice: "deferred" })} disabled={busy || creating}>
+            {busy ? "Saving…" : "I'll create my first agent from the dashboard"}
+          </Button>
+          <Button kind="primary" onClick={() => void submit()} disabled={busy || creating}>
+            {creating ? "Creating…" : "Create my first agent"}
+          </Button>
+        </div>
       </footer>
     </div>
   );
@@ -711,11 +730,13 @@ function StepInfrastructure({
   busy,
   catalog,
   onAdvance,
+  onBack,
   onReloadCatalog,
 }: {
   busy: boolean;
   catalog: CatalogBundle | null;
   onAdvance: (input: { step: number; infrastructureSetupChoice: "provisioned" | "deferred"; serverOrderId?: string }) => Promise<void>;
+  onBack?: () => void;
   onReloadCatalog: () => void;
 }) {
   const mox = useMox();
@@ -805,15 +826,22 @@ function StepInfrastructure({
         </div>
       )}
 
-      <footer className="onboarding-footer onboarding-footer-split">
-        <Button kind="ghost" onClick={() => void onAdvance({ step: 5, infrastructureSetupChoice: "deferred" })} disabled={busy || ordering}>
-          {busy ? "Saving…" : "I'll provision infrastructure later"}
-        </Button>
-        {canProvision && !order ? (
-          <Button kind="primary" onClick={() => void provision()} disabled={busy || ordering}>
-            {ordering ? "Ordering…" : "Provision my server"}
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy || ordering}>
+            Back
           </Button>
         ) : null}
+        <div className="onboarding-actions-end">
+          <Button kind="ghost" onClick={() => void onAdvance({ step: 5, infrastructureSetupChoice: "deferred" })} disabled={busy || ordering}>
+            {busy ? "Saving…" : "I'll provision infrastructure later"}
+          </Button>
+          {canProvision && !order ? (
+            <Button kind="primary" onClick={() => void provision()} disabled={busy || ordering}>
+              {ordering ? "Ordering…" : "Provision my server"}
+            </Button>
+          ) : null}
+        </div>
       </footer>
     </div>
   );
@@ -827,6 +855,7 @@ function StepConnections({
   catalog,
   onPatch,
   onAdvance,
+  onBack,
   onFinish,
 }: {
   state: OnboardingState;
@@ -834,6 +863,7 @@ function StepConnections({
   catalog: CatalogBundle | null;
   onPatch: (input: { step: number; connectionsSetupChoice: "configured" | "deferred" }) => Promise<boolean>;
   onAdvance: (input: { step: number; connectionsSetupChoice: "configured" | "deferred" }) => Promise<void>;
+  onBack?: () => void;
   onFinish: () => Promise<void>;
 }) {
   const mox = useMox();
@@ -968,21 +998,28 @@ function StepConnections({
         Deferred items are honest, not failures — they show where to pick up in the dashboard.
       </p>
 
-      <footer className="onboarding-footer onboarding-footer-split">
-        {state.connectionsSetupChoice !== "deferred" ? (
-          <Button
-            kind="ghost"
-            onClick={() => void onAdvance({ step: 6, connectionsSetupChoice: "deferred" })}
-            disabled={busy || working !== null}
-          >
-            {busy ? "Saving…" : "I'll connect apps later"}
+      <footer className="onboarding-actions">
+        {onBack ? (
+          <Button kind="ghost" onClick={onBack} disabled={busy || working !== null}>
+            Back
           </Button>
-        ) : (
-          <span className="muted">Connections deferred — you can connect apps any time.</span>
-        )}
-        <Button kind="primary" onClick={() => void onFinish()} disabled={busy || working !== null}>
-          {busy ? "Finishing…" : configuredCount > 0 ? `Finish onboarding (${configuredCount} configured)` : "Finish onboarding"}
-        </Button>
+        ) : null}
+        <div className="onboarding-actions-end">
+          {state.connectionsSetupChoice !== "deferred" ? (
+            <Button
+              kind="ghost"
+              onClick={() => void onAdvance({ step: 6, connectionsSetupChoice: "deferred" })}
+              disabled={busy || working !== null}
+            >
+              {busy ? "Saving…" : "I'll connect apps later"}
+            </Button>
+          ) : (
+            <span className="muted">Connections deferred — you can connect apps any time.</span>
+          )}
+          <Button kind="primary" onClick={() => void onFinish()} disabled={busy || working !== null}>
+            {busy ? "Finishing…" : configuredCount > 0 ? `Finish onboarding (${configuredCount} configured)` : "Finish onboarding"}
+          </Button>
+        </div>
       </footer>
     </div>
   );

@@ -99,10 +99,10 @@ No redirect loops: `/dashboard → /onboarding` renders the flow; `/onboarding` 
 
 ## 8. Screenshots / visual notes
 
-Light theme, captured from the dev-only UI Studio at 1440×950 and 390px:
+Light theme, captured from the dev-only UI Studio at 1440×950 and 390px. The flow is fully chrome-free — no header, no footer band, no sidebar: one centered card holding the progress indicator, the step content and an inline Back/decision action row (the toolbar visible above the card in the studio captures is the dev-only UI Studio chrome, not the product):
 
-- `docs/verification/assets/onboarding-step1-light.png` — step 1: brand header, progress bar, step chips, prefilled form, persona cards; **no sidebar anywhere**.
-- `docs/verification/assets/onboarding-step6-review.png` — step 6: real connection counts + readiness review (Completed items green: Connected/Created/Running/3 Configured).
+- `docs/verification/assets/onboarding-step1-light.png` — step 1: progress bar + step chips, prefilled form, persona cards, inline Continue.
+- `docs/verification/assets/onboarding-step6-review.png` — step 6: real connection counts + readiness review (Completed items green: Connected/Created/Running/3 Configured) with the inline action row.
 - `docs/verification/assets/onboarding-provider-unavailable.png` — "Use Mox-managed models" honestly disabled with the deployment reason; Continue blocked until a valid choice.
 - `docs/verification/assets/onboarding-mobile-390.png` — ~390px: stacked layout, wrapped step chips, no horizontal overflow.
 
@@ -110,9 +110,9 @@ Light theme, captured from the dev-only UI Studio at 1440×950 and 390px:
 
 Run `pnpm ui:studio`, open `http://localhost:5174/__ui?surface=customer&page=/onboarding&theme=light`. Use the **Onboarding** selector (or the `onboarding=` URL param): `step1 … step6`, `error` (state-load failure with retry), `provider-unavailable` (managed models disabled, no BYOK connected, server entitlement 0), `mobile` (390px frame). The preview renders through `MoxPreviewProvider` with deterministic fixtures (`uiStudio/mockStore.ts`), is gated by `isUiStudioAllowed()` (DEV + `VITE_MOX_UI_STUDIO=1` + localhost) and renders a fake 404 in production builds. It is visual-only: it never touches real onboarding authority, and `/onboarding` is registered ONLY in the studio page list — never in `CUSTOMER_NAV` (the sidebar).
 
-## 10. Confirmation: onboarding has no sidebar
+## 10. Confirmation: onboarding has no sidebar, header or footer
 
-`CustomerSurface` returns `<OnboardingView />` before the `CustomerShell` wrap (the same pattern as the public auth pages). SSR tests assert the rendered flow contains no `sidebar`/`nav-scroll`/`topbar-customer` markup and no `/onboarding` entry exists in `CUSTOMER_NAV`. Screenshots confirm visually.
+`CustomerSurface` returns `<OnboardingView />` before the `CustomerShell` wrap (the same pattern as the public auth pages), so no customer sidebar/topbar can appear. The flow itself renders a single centered card with NO header (no brand bar, user email or sign-out control) and NO footer band — Back/Continue are an inline action row inside the card, and the accessible progress indicator lives at the top of the card. SSR tests assert the rendered flow contains no `sidebar`/`nav-scroll`/`topbar-customer`/`onboarding-top`/`onboarding-footer`/`Sign out` markup, no `/onboarding` entry exists in `CUSTOMER_NAV`, and step 1 renders no Back control. Screenshots confirm visually.
 
 ## 11. Confirmation: dashboard CSS/design system reused
 

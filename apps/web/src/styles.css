@@ -3863,33 +3863,10 @@ input.search-bar-input, input.input-pill {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 20px 20px 48px;
+  padding: 40px 20px 56px;
   box-sizing: border-box;
   overflow-x: hidden;
 }
-
-.onboarding-top {
-  width: 100%;
-  max-width: 880px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 28px;
-}
-.onboarding-top-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-.onboarding-user {
-  font-size: var(--type-sm);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.onboarding-logo { width: 96px; }
 
 .onboarding-main {
   width: 100%;
@@ -3900,7 +3877,7 @@ input.search-bar-input, input.input-pill {
 }
 
 /* Compact accessible progress indicator */
-.onboarding-progress { display: flex; flex-direction: column; gap: 10px; }
+.onboarding-progress { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .onboarding-progress-track {
   height: 6px;
   border-radius: 999px;
@@ -4019,19 +3996,23 @@ input.search-bar-input, input.input-pill {
 .onboarding-option-text strong { font-size: var(--type-md); }
 .onboarding-option-text small { color: var(--text-dim); font-size: var(--type-sm); }
 
-/* Footer navigation */
-.onboarding-footer {
+/* Inline step actions (no footer band): Back on the left, decisions right. */
+.onboarding-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  border-top: 1px solid var(--line);
-  padding-top: 16px;
+  flex-wrap: wrap;
   margin-top: 8px;
 }
-.onboarding-footer-split { flex-wrap: wrap; }
-.onboarding-footer-split .btn-ghost { max-width: 60%; text-align: left; }
-.onboarding-footer-hint { font-size: var(--type-xs); }
+.onboarding-actions-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.onboarding-actions-end .btn-ghost { max-width: 320px; }
 
 /* Facts + statuses */
 .onboarding-facts {
@@ -4155,17 +4136,13 @@ input.search-bar-input, input.input-pill {
 
 /* Responsive: onboarding at ~390px */
 @media (max-width: 640px) {
-  .onboarding-shell { padding: 14px 14px 32px; }
+  .onboarding-shell { padding: 20px 14px 32px; }
   .onboarding-card { padding: var(--space-4); }
-  .onboarding-top { flex-direction: column; align-items: flex-start; gap: 8px; }
-  .onboarding-footer {
-    flex-direction: column-reverse;
-    align-items: stretch;
-  }
-  .onboarding-footer .btn { width: 100%; }
-  .onboarding-footer-split .btn-ghost { max-width: none; text-align: center; }
+  .onboarding-actions { flex-direction: column-reverse; align-items: stretch; }
+  .onboarding-actions .btn { width: 100%; }
+  .onboarding-actions-end { margin-left: 0; }
+  .onboarding-actions-end .btn-ghost { max-width: none; }
   .onboarding-review-row { grid-template-columns: 1fr; gap: 4px; }
-  .onboarding-user { display: none; }
 }
 
 /* UI Studio onboarding preview stage (dev-only, /__ui) */

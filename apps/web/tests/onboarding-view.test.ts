@@ -45,7 +45,7 @@ function renderOnboarding(onboardingState: "step1" | "step6" | "error" | "provid
 }
 
 describe("OnboardingView (standalone, no sidebar)", () => {
-  it("renders the focused onboarding shell with NO sidebar or app chrome", () => {
+  it("renders the focused onboarding shell with NO sidebar, header or footer chrome", () => {
     const html = renderOnboarding("step1");
     expect(html).toContain("onboarding-shell");
     expect(html).toContain("onboarding-card");
@@ -54,6 +54,15 @@ describe("OnboardingView (standalone, no sidebar)", () => {
     expect(html).not.toContain("sidebar-desktop");
     expect(html).not.toContain("nav-scroll");
     expect(html).not.toContain("topbar-customer");
+    // No header chrome: no brand bar, user email or sign-out control.
+    expect(html).not.toContain("onboarding-top");
+    expect(html).not.toContain("onboarding-logo");
+    expect(html).not.toContain("Sign out");
+    // No footer band: navigation is an inline action row inside the card.
+    expect(html).not.toContain("onboarding-footer");
+    expect(html).toContain("onboarding-actions");
+    // Step 1 has nothing behind it, so no Back control is rendered.
+    expect(html).not.toContain(">Back<");
   });
 
   it("uses the shared design-system primitives (buttons, tokens, badges)", () => {
