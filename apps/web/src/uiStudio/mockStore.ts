@@ -1,5 +1,5 @@
 import type { MoxStore } from "../api/store.js";
-import type { ChatMessage, MoxApi } from "../api/types.js";
+import type { ChatMessage, MoxApi, OnboardingState, ServerOrderView } from "../api/types.js";
 import {
   createCustomerAgentsFixture,
   createCustomerBackupsFixture,
@@ -36,9 +36,99 @@ import {
   ADMIN_PREVIEW_ROLES,
   SUPPORT_PREVIEW_ROLES,
 } from "../concepts/staffNav.js";
+import type { StudioOnboardingState } from "./previewNavigation.js";
 
 export type UiStudioSurface = "customer" | "admin" | "support";
 export type UiStudioState = "populated" | "empty" | "loading" | "error" | "gated";
+
+/**
+ * Deterministic onboarding preview fixtures (VISUAL ONLY — fixture data, never
+ * the real onboarding authority). `provider-unavailable` models a deployment
+ * where Mox-managed models are absent and no BYOK provider is connected;
+ * `error` models the onboarding state failing to load.
+ */
+function createOnboardingPreviewFixture(preview: StudioOnboardingState | undefined): OnboardingState {
+  const base: OnboardingState = {
+    orgId: "org_acme_prod",
+    status: "in_progress",
+    currentStep: 1,
+    completedSteps: [],
+    persona: null,
+    goals: [],
+    displayName: "Ada Operator",
+    workspaceName: "Acme Robotics",
+    modelSetupChoice: null,
+    modelProviderId: null,
+    agentSetupChoice: null,
+    agentId: null,
+    infrastructureSetupChoice: null,
+    serverOrderId: null,
+    connectionsSetupChoice: null,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: null,
+    updatedByUserId: "usr_owner",
+    missingRequiredSteps: [1, 2, 3, 4, 5, 6],
+  };
+  const at = (step: number) => {
+    base.currentStep = step;
+    base.completedSteps = [1, 2, 3, 4, 5, 6].slice(0, step - 1);
+    base.missingRequiredSteps = [1, 2, 3, 4, 5, 6].slice(step - 1);
+    return base;
+  };
+  switch (preview) {
+    case "step1":
+      return at(1);
+    case "step2":
+      at(2);
+      base.persona = "founder";
+      return { ...base };
+    case "step3":
+      at(3);
+      base.persona = "founder";
+      base.goals = ["build-ai-agents", "deploy-autonomous-agents"];
+      return { ...base };
+    case "step4":
+      at(4);
+      base.persona = "founder";
+      base.goals = ["build-ai-agents", "deploy-autonomous-agents"];
+      base.modelSetupChoice = "mox_managed";
+      base.modelProviderId = "mox";
+      return { ...base };
+    case "provider-unavailable":
+      // Modeled at the model-setup step: Mox-managed models are absent on the
+      // deployment and no BYOK provider is connected (honest unavailability).
+      at(3);
+      base.persona = "founder";
+      base.goals = ["use-own-ai-provider"];
+      return { ...base };
+    case "step5":
+      at(5);
+      base.persona = "founder";
+      base.goals = ["build-ai-agents", "dedicated-infrastructure"];
+      base.modelSetupChoice = "own_provider";
+      base.modelProviderId = "anthropic";
+      base.agentSetupChoice = "created";
+      base.agentId = "agent_orchestrator";
+      return { ...base };
+    case "step6":
+      at(6);
+      base.persona = "founder";
+      base.goals = ["build-ai-agents", "connect-messaging-channels"];
+      base.modelSetupChoice = "own_provider";
+      base.modelProviderId = "anthropic";
+      base.agentSetupChoice = "created";
+      base.agentId = "agent_orchestrator";
+      base.infrastructureSetupChoice = "provisioned";
+      base.serverOrderId = "ord_fixture_1";
+      return { ...base };
+    case "mobile":
+      at(1);
+      return { ...base };
+    default:
+      return base;
+  }
+}
 
 function previewCapabilities(
   surface: UiStudioSurface,
@@ -62,6 +152,7 @@ export function createMockMoxStore(
   surface: UiStudioSurface,
   state: UiStudioState,
   role?: string,
+  onboardingPreview?: StudioOnboardingState,
 ): MoxStore {
   const isLoading = state === "loading";
   const isError = state === "error";
@@ -99,6 +190,17 @@ export function createMockMoxStore(
   const draftDefinition = createCustomerAgentsFixture()[0]!.definition;
   const modelConnectionTemplate = createCustomerModelsFixture().connections[0]!;
   const { role: previewRole, capabilities: previewCaps } = previewCapabilities(surface, state, role);
+
+  // Onboarding preview (visual fixture only): mutable local copy so PATCHes in
+  // the preview behave realistically without touching any real authority.
+  const onboardingUnavailable = onboardingPreview === "provider-unavailable";
+  let onboardingFixture = createOnboardingPreviewFixture(onboardingPreview === "error" ? undefined : onboardingPreview);
+  const onboardingModels = onboardingUnavailable
+    ? []
+    : customerModels.models.map((m) => (m.providerId === "deepseek" ? { ...m, providerId: "mox", modelId: "mox-agent", byok: false, displayName: "Mox Agent (managed)" } : m));
+  const onboardingConnections = onboardingUnavailable
+    ? customerModels.connections.map((c) => ({ ...c, connected: false, credentialConfigured: false, status: "unconfigured" }))
+    : customerModels.connections;
 
   const noopPromise = async () => {};
 
@@ -196,14 +298,68 @@ export function createMockMoxStore(
     }),
     listServers: async () => customerServers,
     serverAction: async () => ({ ok: true }),
+    orderServer: async (input) => {
+      if (isGated) throw new Error("server quota exceeded for current plan");
+      const order: ServerOrderView = {
+        orderId: `ord_${Date.now()}`,
+        state: "provisioning",
+        computeClassCode: input.computeClassCode,
+        hostname: input.hostname,
+        regionCode: "eu-central",
+        providerName: "Fixture Provider",
+        lastError: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      return order;
+    },
+    getOnboarding: async () => {
+      if (onboardingPreview === "error") throw new Error("Simulated onboarding state failure — Studio preview of error handling.");
+      return onboardingFixture;
+    },
+    updateOnboarding: async (input) => {
+      if (onboardingPreview === "error") throw new Error("Simulated onboarding state failure — Studio preview of error handling.");
+      onboardingFixture = {
+        ...onboardingFixture,
+        ...("persona" in input && input.persona ? { persona: input.persona } : {}),
+        goals: "goals" in input && input.goals ? input.goals : onboardingFixture.goals,
+        displayName: input.displayName ?? onboardingFixture.displayName,
+        workspaceName: input.workspaceName ?? onboardingFixture.workspaceName,
+        modelSetupChoice: input.modelSetupChoice ?? onboardingFixture.modelSetupChoice,
+        modelProviderId: input.modelProviderId ?? onboardingFixture.modelProviderId,
+        agentSetupChoice: input.agentSetupChoice ?? onboardingFixture.agentSetupChoice,
+        agentId: input.agentId ?? onboardingFixture.agentId,
+        infrastructureSetupChoice: input.infrastructureSetupChoice ?? onboardingFixture.infrastructureSetupChoice,
+        serverOrderId: input.serverOrderId ?? onboardingFixture.serverOrderId,
+        connectionsSetupChoice: input.connectionsSetupChoice ?? onboardingFixture.connectionsSetupChoice,
+        currentStep: input.advanceTo ?? onboardingFixture.currentStep,
+        completedSteps: input.step && !onboardingFixture.completedSteps.includes(input.step)
+          ? [...onboardingFixture.completedSteps, input.step].sort((a, b) => a - b)
+          : onboardingFixture.completedSteps,
+        updatedAt: new Date().toISOString(),
+      };
+      onboardingFixture.missingRequiredSteps = [1, 2, 3, 4, 5, 6].filter((n) => !onboardingFixture.completedSteps.includes(n));
+      return onboardingFixture;
+    },
+    completeOnboarding: async () => {
+      onboardingFixture = {
+        ...onboardingFixture,
+        status: "completed",
+        currentStep: 6,
+        completedSteps: [1, 2, 3, 4, 5, 6],
+        missingRequiredSteps: [],
+        completedAt: new Date().toISOString(),
+      };
+      return onboardingFixture;
+    },
     listDeployments: async () => customerDeployments,
     deployAgent: async () => ({ ok: true, state: "running" }),
     redeployDeployment: async () => ({ ok: true, state: "running" }),
     deploymentRollback: async () => ({ ok: true, state: "running" }),
-    listModels: async () => (isEmpty ? [] : customerModels.models),
+    listModels: async () => (isEmpty ? [] : onboardingPreview ? onboardingModels : customerModels.models),
     testProviderConnection: async () => ({ ok: true }),
     listCliEngines: async () => [],
-    listModelConnections: async () => (isEmpty ? [] : customerModels.connections),
+    listModelConnections: async () => (isEmpty ? [] : onboardingPreview ? onboardingConnections : customerModels.connections),
     connectModelConnection: async () => customerModels.connections[0] ?? modelConnectionTemplate,
     rotateModelConnection: async () => customerModels.connections[0] ?? modelConnectionTemplate,
     disconnectModelConnection: async () => ({ ok: true, providerId: "anthropic" }),
@@ -233,6 +389,8 @@ export function createMockMoxStore(
             backup_retention_days: 30,
             team_members: 10,
             storage_gb: 100,
+            included_server_count: onboardingUnavailable ? 0 : 2,
+            included_compute_class: "COMPUTE_SMALL",
           },
     }),
     listPlans: async () => customerBilling.plans,
@@ -360,8 +518,8 @@ export function createMockMoxStore(
     needsAuth: false,
     me: isEmpty ? { ...customerUser, orgDisplayName: "Empty Sandbox Org" } : customerUser,
     switchOrg: noopPromise,
-    signIn: noopPromise,
-    signUp: noopPromise,
+    signIn: async () => onboardingFixture,
+    signUp: async () => onboardingFixture,
     signOut: noopPromise,
     staffSession: {
       staffUserId: surface === "admin" ? "usr_mock_admin" : "usr_mock_support",
@@ -387,6 +545,8 @@ export function createMockMoxStore(
     agents: customerAgents,
     refreshAgents: noopPromise,
     refreshEntitlements: noopPromise,
+    refreshOnboarding: noopPromise,
+    onboarding: onboardingPreview === "error" ? null : onboardingFixture,
     entitlements: {
       commerciallyEntitled: !isGated,
       values: isGated

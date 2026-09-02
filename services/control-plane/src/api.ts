@@ -123,6 +123,7 @@ import {
   updateStaffMembershipStatus,
 } from "./auth.js";
 import { httpError, Router, sendJson, type RequestContext } from "./http.js";
+import { assertCompletionAllowed, projectOnboarding, validateOnboardingPatch } from "./onboarding.js";
 import {
   DEFAULT_WEBHOOK_ABUSE,
   PLATFORM_ROLE_CAPABILITIES,
@@ -694,6 +695,106 @@ export function buildApiRouter(deps: ApiDeps): Router {
       ...result,
       expiresAt: new Date(Date.now() + services.config.sessionTtlMs),
     });
+  });
+
+  // ---- Mandatory customer onboarding (org-scoped durable authority) -----------
+  // Progress lives in `org_onboarding` (PostgreSQL), never in client state.
+  // Existing orgs were backfilled `completed` by migration 0020; orgs created
+  // by signup start `not_started`. Deferred external setup is a real recorded
+  // decision and never marks the underlying feature configured.
+
+  router.get("/api/onboarding", async (ctx) => {
+    const identity = await requireAuth(ctx, "settings");
+    const row = await services.onboarding.getOrDefault(identity.orgId);
+    return projectOnboarding(row);
+  });
+
+  router.patch("/api/onboarding", async (ctx) => {
+    const identity = await requireAuth(ctx, "settings");
+    requireOrgRole(identity, "admin");
+    const current = await services.onboarding.getOrDefault(identity.orgId);
+    if (current.status === "completed") {
+      throw httpError("onboarding is already completed for this workspace", 409, {
+        code: "onboarding_completed",
+      });
+    }
+    const command = validateOnboardingPatch(ctx.body);
+
+    // Referenced resources must REALLY exist in the caller's org — onboarding
+    // never accepts invented agent ids or server orders.
+    if (command.fields.agentId) {
+      const agent = (
+        await db()
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.id, command.fields.agentId), eq(agents.orgId, identity.orgId)))
+          .limit(1)
+      )[0];
+      if (!agent) throw httpError("agent not found in this workspace", 400, { code: "onboarding_agent_unknown" });
+    }
+    if (command.fields.serverOrderId) {
+      const order = (
+        await db()
+          .select({ id: serverOrders.id })
+          .from(serverOrders)
+          .where(and(eq(serverOrders.id, command.fields.serverOrderId), eq(serverOrders.orgId, identity.orgId)))
+          .limit(1)
+      )[0];
+      if (!order) {
+        throw httpError("server order not found in this workspace", 400, { code: "onboarding_server_unknown" });
+      }
+    }
+
+    // Step 1 confirms the real profile/workspace names against their own
+    // authorities (users/organizations) — not just onboarding metadata.
+    if (command.fields.displayName !== undefined && command.fields.displayName !== identity.displayName) {
+      await db().update(users).set({ displayName: command.fields.displayName, updatedAt: new Date() }).where(eq(users.id, identity.userId));
+    }
+    if (command.fields.workspaceName !== undefined) {
+      const orgRow = (
+        await db()
+          .select({ displayName: organizations.displayName })
+          .from(organizations)
+          .where(eq(organizations.id, identity.orgId))
+          .limit(1)
+      )[0];
+      if (orgRow && orgRow.displayName !== command.fields.workspaceName) {
+        await db()
+          .update(organizations)
+          .set({ displayName: command.fields.workspaceName })
+          .where(eq(organizations.id, identity.orgId));
+      }
+    }
+
+    const row = await services.onboarding.applyPatch(identity.orgId, {
+      updatedByUserId: identity.userId,
+      fields: command.fields,
+      markStepComplete: command.markStepComplete,
+      advanceTo: command.advanceTo,
+    });
+    return projectOnboarding(row);
+  });
+
+  router.post("/api/onboarding/complete", async (ctx) => {
+    const identity = await requireAuth(ctx, "settings");
+    requireOrgRole(identity, "admin");
+    const current = await services.onboarding.getOrDefault(identity.orgId);
+    assertCompletionAllowed(current);
+    const row = await services.onboarding.complete(identity.orgId, identity.userId);
+    if (row.status === "completed" && current.status !== "completed") {
+      // Durable audit event on the existing audit infrastructure (safe,
+      // org-scoped, secret-free).
+      await db().insert(auditEvents).values({
+        orgId: identity.orgId,
+        actorType: "user",
+        actorId: identity.userId,
+        action: "onboarding.completed",
+        resourceType: "org_onboarding",
+        resourceId: identity.orgId,
+        result: "success",
+      });
+    }
+    return projectOnboarding(row);
   });
 
   // ---- Password reset (Prompt 01: one password authority, all surfaces) -----

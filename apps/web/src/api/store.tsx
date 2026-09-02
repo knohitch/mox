@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   Entitlements,
   MoxApi,
+  OnboardingState,
 } from "./types.js";
 import { hasAgentRooms, hasBackups, hasBrowser, hasChannels, hasDeveloperMode, hasIntegrations, hasMoxAiCredits, hasModelConnections, hasStorage, hasTeamMembers, hasTerminal, hasVoice } from "./entitlement.js";
 import type { CanonicalEntitlementKey } from "./entitlement.js";
@@ -38,8 +39,9 @@ export interface MoxStore {
   /** Authenticated identity + org memberships (authoritative, from /api/me). */
   me: MeResponse | null;
   switchOrg(orgId: string): Promise<void>;
-  signIn(input: { email: string; password: string }): Promise<void>;
-  signUp(input: { email: string; password: string; orgName?: string }): Promise<void>;
+  /** Resolves with the fresh onboarding state so routing can redirect correctly. */
+  signIn(input: { email: string; password: string }): Promise<OnboardingState | null>;
+  signUp(input: { email: string; password: string; orgName?: string }): Promise<OnboardingState | null>;
   signOut(): Promise<void>;
   /** Staff surface (Prompt 01): admin/support session + auth. */
   staffSession: StaffSessionResponse | null;
@@ -69,6 +71,9 @@ export interface MoxStore {
   invalidateEvents(): void;
   /** Re-pull the entitlement surface (used after billing changes, Phase 03 §A). */
   refreshEntitlements(): Promise<void>;
+  /** Durable onboarding state for the active org (PostgreSQL authority). */
+  onboarding: OnboardingState | null;
+  refreshOnboarding(): Promise<void>;
 }
 
 const Ctx = createContext<MoxStore | null>(null);
@@ -168,6 +173,10 @@ function failingApi(message: string): MoxApi {
 
     listApiTokens: fail,
     revokeApiToken: fail,
+    getOnboarding: fail,
+    updateOnboarding: fail,
+    completeOnboarding: fail,
+    orderServer: fail,
     adminOverview: fail,
     adminCustomers: fail,
     adminCustomerAction: fail,
@@ -242,6 +251,7 @@ export function MoxProvider({ children }: { children: ReactNode }) {
   const [agents, setAgents] = useState<AgentSummary[]>([]);
   const [entitlements, setEntitlements] = useState<Entitlements>();
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [messagesByThread, setMessagesByThread] = useState<Map<string, ChatMessage[]>>(new Map());
   const [eventsVersion, setEventsVersion] = useState(0);
   const runsRef = useRef(new Map<string, RunState>()); // threadId → run
@@ -257,17 +267,19 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     let alive = true;
     (async () => {
       try {
-        const [identity, list, ents, open] = await Promise.all([
+        const [identity, list, ents, open, obd] = await Promise.all([
           httpApi?.me() ?? Promise.resolve(null),
           api.listAgents(),
           api.getEntitlements(),
           api.openApprovals(),
+          api.getOnboarding().catch(() => null),
         ]);
         if (!alive) return;
         setMe(identity);
         setAgents(list);
         setEntitlements(ents);
         setApprovals(open);
+        setOnboarding(obd);
         setReady(true);
         setNeedsAuth(false);
         setBackendError(null);
@@ -308,35 +320,36 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     [api, messagesByThread],
   );
 
-  const authenticateAndLoad = useCallback(async (action: () => Promise<unknown>) => {
-    if (!httpApi) return;
+  const authenticateAndLoad = useCallback(async (action: () => Promise<unknown>): Promise<OnboardingState | null> => {
+    if (!httpApi) return null;
     await action();
-    const [identity, list, ents, open] = await Promise.all([
+    const [identity, list, ents, open, obd] = await Promise.all([
       httpApi.me(),
       httpApi.listAgents(),
       httpApi.getEntitlements(),
       httpApi.openApprovals(),
+      httpApi.getOnboarding().catch(() => null),
     ]);
     setMe(identity);
     setAgents(list);
     setEntitlements(ents);
     setApprovals(open);
+    setOnboarding(obd);
     setReady(true);
     setNeedsAuth(false);
     setBackendError(null);
+    return obd;
   }, [httpApi]);
 
   const signIn = useCallback(
-    async (input: { email: string; password: string }) => {
-      await authenticateAndLoad(() => httpApi!.login(input));
-    },
+    async (input: { email: string; password: string }) =>
+      authenticateAndLoad(() => httpApi!.login(input)),
     [authenticateAndLoad, httpApi],
   );
 
   const signUp = useCallback(
-    async (input: { email: string; password: string; orgName?: string }) => {
-      await authenticateAndLoad(() => httpApi!.signup(input));
-    },
+    async (input: { email: string; password: string; orgName?: string }) =>
+      authenticateAndLoad(() => httpApi!.signup(input)),
     [authenticateAndLoad, httpApi],
   );
 
@@ -348,6 +361,7 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     setMe(null);
     setAgents([]);
     setApprovals([]);
+    setOnboarding(null);
     setMessagesByThread(new Map());
   }, [httpApi]);
 
@@ -601,6 +615,8 @@ export function MoxProvider({ children }: { children: ReactNode }) {
     agents,
     refreshAgents: async () => setAgents(await api.listAgents()),
     refreshEntitlements: async () => setEntitlements(await api.getEntitlements()),
+    refreshOnboarding: async () => setOnboarding(await api.getOnboarding()),
+    onboarding,
     entitlements,
     approvals,
     messages: (threadId) => messagesByThread.get(threadId) ?? [],

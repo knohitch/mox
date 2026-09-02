@@ -9,6 +9,7 @@ import { SidebarToggleIcon } from "../ui/primitives.js";
 import { LoadingState } from "../ui/primitives.js";
 import { AdminView } from "./AdminView.js";
 import { AgentsView } from "./AgentsView.js";
+import { OnboardingView } from "./OnboardingView.js";
 import {
   BackupsView,
   BillingView,
@@ -27,6 +28,8 @@ import { StudioErrorBoundary } from "../uiStudio/StudioErrorBoundary.js";
 import {
   STUDIO_ADMIN_PAGES,
   STUDIO_CUSTOMER_PAGES,
+  STUDIO_ONBOARDING_PAGE,
+  STUDIO_ONBOARDING_STATES,
   STUDIO_SUPPORT_PAGES,
   applyStudioNavigation,
   defaultPageFor,
@@ -35,6 +38,7 @@ import {
   logicalPathFor,
   parseStudioSearch,
   studioLocation,
+  withStudioOnboardingState,
   withStudioPage,
   withStudioRole,
   withStudioState,
@@ -110,8 +114,8 @@ export function UiStudioView() {
   };
 
   const mockStore = useMemo(
-    () => createMockMoxStore(studio.surface, studio.previewState, studio.role),
-    [studio.surface, studio.previewState, studio.role],
+    () => createMockMoxStore(studio.surface, studio.previewState, studio.role, studio.onboarding),
+    [studio.surface, studio.previewState, studio.role, studio.onboarding],
   );
 
   const adapter: NavAdapter = useMemo(
@@ -167,6 +171,19 @@ export function UiStudioView() {
   const customerRenderer = CUSTOMER_PAGE_RENDERERS[studio.page] ?? CUSTOMER_PAGE_RENDERERS["/dashboard"]!;
 
   const renderSurfaceContent = (): ReactNode => {
+    // Onboarding preview: STANDALONE flow — never wrapped in the customer
+    // shell, matching the real product routing exactly (no sidebar).
+    if (studio.surface === "customer" && studio.page === STUDIO_ONBOARDING_PAGE.id) {
+      const mobile = studio.onboarding === "mobile";
+      return (
+        <div
+          className={`studio-onboarding-stage${mobile ? " studio-mobile-frame" : ""}`}
+          style={mobile ? { width: 390, margin: "0 auto", border: "1px solid var(--line)", borderRadius: 20, overflow: "hidden" } : undefined}
+        >
+          <OnboardingView />
+        </div>
+      );
+    }
     if (studio.previewState === "loading") {
       const body = <LoadingState label="Connecting to the Mox control plane…" />;
       if (studio.surface === "customer") {
@@ -268,6 +285,24 @@ export function UiStudioView() {
                 {STUDIO_CUSTOMER_PAGES.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+
+          {studio.surface === "customer" && studio.page === STUDIO_ONBOARDING_PAGE.id ? (
+            <div className="ui-studio-group" role="group" aria-label="Onboarding preview state">
+              <span className="ui-studio-group-label">Onboarding</span>
+              <select
+                className="ui-studio-select"
+                value={studio.onboarding ?? "step1"}
+                onChange={(e) => updateStudio(withStudioOnboardingState(studio, e.target.value as typeof STUDIO_ONBOARDING_STATES[number]))}
+                aria-label="Onboarding preview state"
+              >
+                {STUDIO_ONBOARDING_STATES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
                   </option>
                 ))}
               </select>
@@ -405,7 +440,7 @@ export function UiStudioView() {
           <NavAdapterProvider adapter={adapter}>
             <MoxPreviewProvider value={mockStore}>
               <StudioErrorBoundary
-                key={`${studio.surface}:${studio.page}:${studio.previewState}:${studio.role}`}
+                key={`${studio.surface}:${studio.page}:${studio.previewState}:${studio.role}:${studio.onboarding ?? ""}`}
                 surface={studio.surface}
                 page={studio.page}
               >

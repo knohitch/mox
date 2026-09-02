@@ -10,6 +10,8 @@ import { Badge, BrandLogo, Card, EmptyState, SidebarToggleIcon } from "./ui/prim
 import { ToastProvider } from "./ui/toast.js";
 import { CommandPalette } from "./ui/CommandPalette.js";
 import { UiStudioView } from "./views/UiStudioView.js";
+import { OnboardingView } from "./views/OnboardingView.js";
+import { postAuthDestination, resolveCustomerOnboardingRouting } from "./domain/onboarding.js";
 import {
   ADMIN_NAV_GROUPS,
   ADMIN_TAB_LABEL,
@@ -105,8 +107,10 @@ function CustomerPublicAuth({ pattern }: { pattern: string }) {
         surface="customer"
         title="Sign in to Mox"
         onSubmit={async (input) => {
-          await signIn({ email: input.email, password: input.password });
-          navigate(returnTo || "/dashboard");
+          // Login inspects the ACTIVE ORG's durable onboarding state and
+          // routes incomplete workspaces into the mandatory flow.
+          const onboarding = await signIn({ email: input.email, password: input.password });
+          navigate(postAuthDestination({ signedUp: false, onboarding, returnTo }));
         }}
         signupPath="/signup"
         forgotPath="/forgot-password"
@@ -119,8 +123,9 @@ function CustomerPublicAuth({ pattern }: { pattern: string }) {
         surface="customer"
         title="Create your Mox workspace"
         onSubmit={async (input) => {
-          await signUp({ email: input.email, password: input.password, orgName: input.orgName });
-          navigate(returnTo || "/dashboard");
+          // A freshly created workspace always starts onboarding.
+          const onboarding = await signUp({ email: input.email, password: input.password, orgName: input.orgName });
+          navigate(postAuthDestination({ signedUp: true, onboarding, returnTo }));
         }}
         loginPath="/login"
       />
@@ -166,7 +171,7 @@ function Connecting() {
 
 export function CustomerSurface() {
   const { path } = useRoute();
-  const { needsAuth, ready, error } = useMox();
+  const { needsAuth, ready, error, onboarding } = useMox();
   const authMatch = resolveParams(CUSTOMER_PUBLIC, path);
 
   if (authMatch) return <CustomerPublicAuth pattern={authMatch.pattern} />;
@@ -174,6 +179,24 @@ export function CustomerSurface() {
   // Protected customer route.
   if (needsAuth) return <Redirect to={`/login${returnQuery(path)}`} />;
   if (!ready && !error) return <Connecting />;
+
+  // Mandatory onboarding routing (root, /onboarding and every product route).
+  // /onboarding renders STANDALONE — before the CustomerShell wrap — so the
+  // flow never shows the customer sidebar.
+  const guard = resolveCustomerOnboardingRouting({ path, onboarding });
+  if (guard.kind === "redirect") return <Redirect to={guard.to} />;
+  if (guard.kind === "view-onboarding") {
+    return (
+      <>
+        {error ? (
+          <div className="backend-error" role="alert">
+            Backend unavailable: {error} — the Mox web app never falls back to demo data.
+          </div>
+        ) : null}
+        <OnboardingView />
+      </>
+    );
+  }
 
   const match = resolveParams(Object.keys(CUSTOMER_ROUTES), path);
   const active = match?.pattern ?? null;

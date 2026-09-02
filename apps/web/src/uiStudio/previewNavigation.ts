@@ -25,6 +25,20 @@ import {
 export type StudioSurface = "customer" | "admin" | "support";
 export type StudioPreviewState = "populated" | "empty" | "loading" | "error" | "gated";
 
+/** Dev-only onboarding preview states (visual only — never real authority). */
+export const STUDIO_ONBOARDING_STATES = [
+  "step1",
+  "step2",
+  "step3",
+  "step4",
+  "step5",
+  "step6",
+  "error",
+  "provider-unavailable",
+  "mobile",
+] as const;
+export type StudioOnboardingState = (typeof STUDIO_ONBOARDING_STATES)[number];
+
 export type StudioAdminRole = keyof typeof ADMIN_PREVIEW_ROLES;
 export type StudioSupportRole = keyof typeof SUPPORT_PREVIEW_ROLES;
 
@@ -34,13 +48,18 @@ export interface StudioUrlState {
   previewState: StudioPreviewState;
   role: string;
   theme?: string;
+  /** Only meaningful while previewing the /onboarding page. */
+  onboarding?: StudioOnboardingState;
 }
 
 export const STUDIO_PATH = "/__ui";
 
-export const STUDIO_CUSTOMER_PAGES: readonly { id: string; label: string }[] = CUSTOMER_NAV.flatMap((group) =>
-  group.entries.map((entry) => ({ id: entry.to, label: entry.label })),
-);
+export const STUDIO_ONBOARDING_PAGE = { id: "/onboarding", label: "Onboarding" } as const;
+
+export const STUDIO_CUSTOMER_PAGES: readonly { id: string; label: string }[] = [
+  STUDIO_ONBOARDING_PAGE,
+  ...CUSTOMER_NAV.flatMap((group) => group.entries.map((entry) => ({ id: entry.to, label: entry.label }))),
+];
 
 export const STUDIO_ADMIN_PAGES: readonly { id: AdminTabKey; label: string }[] = ADMIN_TABS.map((id) => ({
   id,
@@ -80,9 +99,14 @@ export function isStudioSupportRole(value: string | null | undefined): value is 
 
 export function resolveCustomerPage(path: string): string | null {
   const clean = stripQueryAndHash(path);
+  if (clean === STUDIO_ONBOARDING_PAGE.id) return clean;
   if (isCustomerDestination(clean)) return clean;
   const prefix = CUSTOMER_DESTINATIONS.find((dest) => clean === dest || clean.startsWith(`${dest}/`));
   return prefix ?? null;
+}
+
+export function isStudioOnboardingState(value: string | null | undefined): value is StudioOnboardingState {
+  return !!value && (STUDIO_ONBOARDING_STATES as readonly string[]).includes(value);
 }
 
 export function parseStudioSearch(search: string): StudioUrlState {
@@ -92,8 +116,12 @@ export function parseStudioSearch(search: string): StudioUrlState {
   const role = parseRole(surface, params.get("role"));
   const page = parsePage(surface, params.get("page"));
   const theme = params.get("theme");
+  const rawOnboarding = params.get("onboarding");
   const state: StudioUrlState = { surface, page, previewState, role };
   if (theme) state.theme = theme;
+  if (page === STUDIO_ONBOARDING_PAGE.id && isStudioOnboardingState(rawOnboarding)) {
+    state.onboarding = rawOnboarding;
+  }
   return state;
 }
 
@@ -104,6 +132,7 @@ export function serializeStudioSearch(state: StudioUrlState): string {
   params.set("state", state.previewState);
   if (state.surface !== "customer") params.set("role", state.role);
   if (state.theme) params.set("theme", state.theme);
+  if (state.page === STUDIO_ONBOARDING_PAGE.id && state.onboarding) params.set("onboarding", state.onboarding);
   return `?${params.toString()}`;
 }
 
@@ -157,7 +186,11 @@ export function applyStudioNavigation(current: StudioUrlState, to: string): Stud
 }
 
 export function withStudioPage(current: StudioUrlState, page: string): StudioUrlState {
-  return { ...current, page };
+  return { ...current, page, onboarding: page === STUDIO_ONBOARDING_PAGE.id ? (current.onboarding ?? "step1") : undefined };
+}
+
+export function withStudioOnboardingState(current: StudioUrlState, onboarding: StudioOnboardingState): StudioUrlState {
+  return { ...current, onboarding };
 }
 
 export function withStudioSurface(current: StudioUrlState, surface: StudioSurface): StudioUrlState {

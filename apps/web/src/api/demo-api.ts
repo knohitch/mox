@@ -47,6 +47,9 @@ import type {
   CreatedWorkspaceInvitation,
   KnowledgeSourceItem,
   VoiceOption,
+  OnboardingPatchInput,
+  OnboardingState,
+  ServerOrderView,
 } from "./types.js";
 
 
@@ -171,11 +174,37 @@ interface StoreShape {
   notificationPreferences: NotificationPreferencesView;
   knowledgeSources: KnowledgeSourceItem[];
   voices: VoiceOption[];
+  // Mandatory onboarding — in-memory demo stand-in for the org_onboarding table
+  onboarding: OnboardingState;
 }
 
 
-function seedServers(): ServerSummary[] {
-  const at = now();
+function seedOnboarding(): OnboardingState {
+  return {
+    orgId: "org_demo",
+    status: "not_started",
+    currentStep: 1,
+    completedSteps: [],
+    persona: null,
+    goals: [],
+    displayName: null,
+    workspaceName: null,
+    modelSetupChoice: null,
+    modelProviderId: null,
+    agentSetupChoice: null,
+    agentId: null,
+    infrastructureSetupChoice: null,
+    serverOrderId: null,
+    connectionsSetupChoice: null,
+    startedAt: null,
+    updatedAt: null,
+    completedAt: null,
+    updatedByUserId: null,
+    missingRequiredSteps: [1, 2, 3, 4, 5, 6],
+  };
+}
+
+function seedServers(): ServerSummary[] {  const at = now();
   return [
     { serverId: "srv_1", orderId: "ord_1", displayName: "mox-cloud · eu-central-1", kind: "mox-cloud", region: "eu-central", state: "running", agentsRunning: 3, cpuPct: 41, memPct: 58, createdAt: at, updatedAt: at },
     { serverId: "srv_2", orderId: "ord_2", displayName: "customer-vps · contabo #8841", kind: "customer-vps", region: "us-east", state: "running", agentsRunning: 1, cpuPct: 12, memPct: 34, createdAt: at, updatedAt: at },
@@ -422,6 +451,7 @@ export class DemoMoxApi implements MoxApi {
       notificationPreferences: seedNotificationPreferences(),
       knowledgeSources: seedKnowledgeSources(),
       voices: seedVoices(),
+      onboarding: seedOnboarding(),
     };
 
     for (const a of agents) this.s.agents.set(a.agentId, a);
@@ -755,6 +785,56 @@ export class DemoMoxApi implements MoxApi {
 
   async listServers(): Promise<ServerSummary[]> {
     return this.s.servers.map((s) => ({ ...s }));
+  }
+
+  // ---- Mandatory onboarding (dev-only demo state; never a production path) ----
+
+  async getOnboarding(): Promise<OnboardingState> {
+    return { ...this.s.onboarding, completedSteps: [...this.s.onboarding.completedSteps], goals: [...this.s.onboarding.goals] };
+  }
+
+  async updateOnboarding(input: OnboardingPatchInput): Promise<OnboardingState> {
+    const state = this.s.onboarding;
+    this.s.onboarding = {
+      ...state,
+      ...input,
+      goals: input.goals ? [...input.goals] : state.goals,
+      completedSteps: state.completedSteps.includes(input.step)
+        ? state.completedSteps
+        : [...state.completedSteps, input.step].sort((a, b) => a - b),
+      currentStep: input.advanceTo ?? state.currentStep,
+      status: state.status === "completed" ? "completed" : "in_progress",
+      updatedAt: new Date().toISOString(),
+      missingRequiredSteps: [],
+    };
+    return this.getOnboarding();
+  }
+
+  async completeOnboarding(): Promise<OnboardingState> {
+    this.s.onboarding = {
+      ...this.s.onboarding,
+      status: "completed",
+      currentStep: 6,
+      completedSteps: [1, 2, 3, 4, 5, 6],
+      missingRequiredSteps: [],
+      completedAt: new Date().toISOString(),
+    };
+    return this.getOnboarding();
+  }
+
+  async orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView> {
+    const now = new Date().toISOString();
+    return {
+      orderId: `ord_${randomUUID()}`,
+      state: "provisioning",
+      computeClassCode: input.computeClassCode,
+      hostname: input.hostname,
+      regionCode: "eu-central",
+      providerName: "Demo Provider",
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   async serverAction(

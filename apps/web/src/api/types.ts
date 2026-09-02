@@ -743,6 +743,73 @@ export interface VoiceOption {
   provider: string;
 }
 
+// ---- Mandatory customer onboarding (org-scoped durable authority) -----------
+
+export type OnboardingStatus = "not_started" | "in_progress" | "completed";
+
+export type OnboardingPersona = "founder" | "developer" | "agency" | "operations" | "other";
+
+/** "Configure later" style choices are explicit decisions, never fake success. */
+export type OnboardingModelChoice = "mox_managed" | "own_provider" | "deferred";
+export type OnboardingAgentChoice = "created" | "deferred";
+export type OnboardingInfrastructureChoice = "provisioned" | "deferred";
+export type OnboardingConnectionsChoice = "configured" | "deferred";
+
+export interface OnboardingState {
+  orgId: string;
+  status: OnboardingStatus;
+  currentStep: number;
+  completedSteps: number[];
+  persona: OnboardingPersona | null;
+  goals: string[];
+  displayName: string | null;
+  workspaceName: string | null;
+  modelSetupChoice: OnboardingModelChoice | null;
+  modelProviderId: string | null;
+  agentSetupChoice: OnboardingAgentChoice | null;
+  agentId: string | null;
+  infrastructureSetupChoice: OnboardingInfrastructureChoice | null;
+  serverOrderId: string | null;
+  connectionsSetupChoice: OnboardingConnectionsChoice | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+  completedAt: string | null;
+  updatedByUserId: string | null;
+  /** Server-derived: required decision steps not recorded yet. */
+  missingRequiredSteps: number[];
+}
+
+/** Step-scoped progress patch; the server validates fields against the step. */
+export interface OnboardingPatchInput {
+  step: number;
+  advanceTo?: number;
+  persona?: OnboardingPersona;
+  goals?: string[];
+  displayName?: string;
+  workspaceName?: string;
+  modelSetupChoice?: OnboardingModelChoice;
+  modelProviderId?: string;
+  agentSetupChoice?: OnboardingAgentChoice;
+  agentId?: string;
+  infrastructureSetupChoice?: OnboardingInfrastructureChoice;
+  serverOrderId?: string;
+  connectionsSetupChoice?: OnboardingConnectionsChoice;
+}
+
+/** Customer-safe projection of a real server order (no provider internals). */
+export interface ServerOrderView {
+  orderId: string;
+  state: ServerSummary["state"];
+  computeClassCode: string;
+  hostname: string;
+  regionCode?: string | null;
+  providerName?: string | null;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+
 export interface MoxApi {
 
   // Roster / definitions
@@ -861,6 +928,14 @@ export interface MoxApi {
   createApiToken(input: { name: string; scopes?: string[] }): Promise<{ token: string; tokenId: string; scopes: string[]; expiresAt: string }>;
   listApiTokens(): Promise<ApiTokenRow[]>;
   revokeApiToken(tokenId: string): Promise<void>;
+
+  // Mandatory customer onboarding (durable, org-scoped authority)
+  getOnboarding(): Promise<OnboardingState>;
+  updateOnboarding(input: OnboardingPatchInput): Promise<OnboardingState>;
+  completeOnboarding(): Promise<OnboardingState>;
+
+  // Real server order authority (customer-safe projection)
+  orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView>;
 
 
   // Protected Mox Admin

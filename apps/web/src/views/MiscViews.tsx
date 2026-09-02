@@ -33,6 +33,7 @@ import type {
 
 import type { AgentStatus } from "../domain/roster.js";
 import { channelState, integrationState, kindLabel, modelConnectionState, stateLabel } from "../domain/connections.js";
+import { WorkspaceSetupCard } from "./WorkspaceSetupCard.js";
 import { bestPlanPrice, commercialStatus, moneyMinorToDisplay } from "../domain/billing.js";
 
 const statusTone = (s: string | undefined): "good" | "warn" | "bad" | "accent" | "neutral" => {
@@ -164,6 +165,9 @@ export function HomeView() {
       {loadError ? (
         <ErrorState message={`Some summary data is unavailable right now: ${loadError}`} onRetry={() => window.location.reload()} />
       ) : null}
+
+      {/* Post-onboarding setup guidance — real resource state, never the wizard. */}
+      <WorkspaceSetupCard />
 
       {/* LEVEL 2: Operational Overview */}
       <section className="dashboard-overview" aria-label="Operational overview">

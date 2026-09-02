@@ -8,6 +8,7 @@ export * from "./pg-billing-store.js";
 export * from "./pg-orchestrator-store.js";
 export * from "./pg-notification-store.js";
 export * from "./pg-entitlements-store.js";
+export * from "./pg-onboarding-store.js";
 export * from "./pg-agent-control-store.js";
 export * from "./memory-service.js";
 export * from "./schema/index.js";

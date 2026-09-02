@@ -58,9 +58,12 @@ import type {
   ModelConnectionRow,
   ModelOption,
   MoxApi,
+  OnboardingPatchInput,
+  OnboardingState,
   PlanOption,
   SendRunHandle,
   ServerSummary,
+  ServerOrderView,
   SubscriptionView,
   SupportCustomer,
   SupportCustomerDetail,
@@ -829,6 +832,42 @@ export class HttpMoxApi implements MoxApi {
     });
   }
 
+
+  // ---- Mandatory onboarding (org-scoped durable authority) --------------------
+
+  getOnboarding(): Promise<OnboardingState> {
+    return this.call("/api/onboarding");
+  }
+
+  updateOnboarding(input: OnboardingPatchInput): Promise<OnboardingState> {
+    return this.call("/api/onboarding", { method: "PATCH", body: JSON.stringify(input) });
+  }
+
+  completeOnboarding(): Promise<OnboardingState> {
+    return this.call("/api/onboarding/complete", { method: "POST", body: "{}" });
+  }
+
+  // ---- Real server order authority (customer-safe projection) -----------------
+
+  async orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView> {
+    const order = await this.call<Record<string, unknown>>("/api/servers/orders", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    // The raw order carries provider-internal fields (SKU, account refs);
+    // the seam projects the customer-safe subset only.
+    return {
+      orderId: String(order.id),
+      state: order.state as ServerSummary["state"],
+      computeClassCode: String(order.computeClassCode),
+      hostname: String(order.hostname),
+      regionCode: (order.regionCode as string | undefined) ?? null,
+      providerName: (order.providerName as string | undefined) ?? null,
+      lastError: (order.lastError as string | undefined) ?? null,
+      createdAt: String(order.createdAt),
+      updatedAt: String(order.updatedAt),
+    };
+  }
 
   // ---- Protected Mox Admin ----------------------------------------------------------
 

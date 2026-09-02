@@ -30,6 +30,7 @@ import {
   PgMemoryStore,
   PgMessageStore,
   PgNotificationStore,
+  PgOnboardingStore,
   PgOrchestratorStore,
   PgSessionEventStore,
   PgThreadStore,
@@ -64,6 +65,8 @@ export interface ControlPlaneServices {
   messages: PgMessageStore;
   events: PgSessionEventStore;
   memory: PgMemoryStore;
+  /** Mandatory customer onboarding authority (org-scoped, PostgreSQL). */
+  onboarding: PgOnboardingStore;
   runtime?: AgentRuntime;
   /**
    * Customer credential vault (Phase 03 §B/§C/§D). Absent when the
@@ -176,6 +179,7 @@ export async function composeControlPlane(config: ControlPlaneConfig): Promise<C
     messages: new PgMessageStore(db),
     events,
     memory: new PgMemoryStore(db),
+    onboarding: new PgOnboardingStore(db),
     runtime,
     customerCredentials,
   };

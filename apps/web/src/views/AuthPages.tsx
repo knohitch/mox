@@ -105,7 +105,7 @@ function EyeOffIcon() {
   );
 }
 
-function MoxLogo({ className = "mox-brand-logo" }: { className?: string }) {
+export function MoxLogo({ className = "mox-brand-logo" }: { className?: string }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"

@@ -29,6 +29,7 @@ import {
   authCredentials,
   authSessions,
   memberships,
+  orgOnboarding,
   organizations,
   passwordResets,
   platformStaffMemberships,
@@ -457,6 +458,12 @@ export async function signup(input: {
     if (!org) throw new AuthError("could not allocate workspace slug", 500);
     await tx.insert(memberships).values({ orgId: org.id, userId: user.id, role: "owner" });
     await tx.insert(authCredentials).values({ userId: user.id, passwordHash });
+    // Mandatory onboarding: customer workspaces created AFTER migration 0020
+    // start as not_started (pre-existing orgs were backfilled completed).
+    await tx
+      .insert(orgOnboarding)
+      .values({ orgId: org.id, status: "not_started" })
+      .onConflictDoNothing({ target: orgOnboarding.orgId });
     return { user, org };
   });
 

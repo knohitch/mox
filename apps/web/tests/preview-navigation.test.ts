@@ -12,6 +12,7 @@ import {
   STUDIO_CUSTOMER_PAGES,
   STUDIO_PATH,
   STUDIO_SUPPORT_PAGES,
+  STUDIO_ONBOARDING_PAGE,
   applyStudioNavigation,
   defaultPageFor,
   defaultRoleFor,
@@ -80,8 +81,11 @@ describe("Studio URL state", () => {
 });
 
 describe("Studio product navigation stays on /__ui", () => {
-  it("covers all 12 customer pages from sidebar destinations", () => {
-    expect(STUDIO_CUSTOMER_PAGES.map((p) => p.id)).toEqual([...CUSTOMER_DESTINATIONS]);
+  it("covers all 12 customer pages from sidebar destinations plus the onboarding flow", () => {
+    // The onboarding preview page is a Studio-only page: it is deliberately
+    // NOT part of the customer sidebar nav, so the page list is the sidebar
+    // destinations PLUS /onboarding.
+    expect(STUDIO_CUSTOMER_PAGES.map((p) => p.id)).toEqual([STUDIO_ONBOARDING_PAGE.id, ...CUSTOMER_DESTINATIONS]);
     for (const dest of CUSTOMER_DESTINATIONS) {
       const next = applyStudioNavigation(customerHome, dest);
       expect(isStudioPath(studioLocation(next).split("?")[0]!)).toBe(true);
