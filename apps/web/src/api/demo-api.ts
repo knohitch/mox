@@ -32,9 +32,12 @@ import type {
   ModelOption,
   MoxApi,
   PlanOption,
+  ProvisionOptions,
   SendRunHandle,
   ServerSummary,
+  ServerOrderView,
   SimpleAgentInput,
+  SshKeyRow,
   SubscriptionView,
   ToolGrantRow,
   UsageRow,
@@ -49,7 +52,6 @@ import type {
   VoiceOption,
   OnboardingPatchInput,
   OnboardingState,
-  ServerOrderView,
 } from "./types.js";
 
 
@@ -176,6 +178,9 @@ interface StoreShape {
   voices: VoiceOption[];
   // Mandatory onboarding — in-memory demo stand-in for the org_onboarding table
   onboarding: OnboardingState;
+  // PRODUCT_COMPLETION_02 — provisioning fixtures (in-memory demo state)
+  orders: Array<ServerOrderView & { idempotencyKey?: string }>;
+  sshKeys: SshKeyRow[];
 }
 
 
@@ -452,6 +457,17 @@ export class DemoMoxApi implements MoxApi {
       knowledgeSources: seedKnowledgeSources(),
       voices: seedVoices(),
       onboarding: seedOnboarding(),
+      orders: [],
+      sshKeys: [
+        {
+          id: "key_fixture_1",
+          label: "Operator laptop",
+          fingerprint: "SHA256:oG9dBV1WsWcV7YFGmYapT2GDVXYdKXZpF8c+Dg0jCkQ",
+          publicKey:
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB4xXJ+rNHNbYKcJFWQaGHRmTVvfYi10cNWhOR1cjUuJ operator@example.com",
+          createdAt: new Date(Date.now() - 3600000 * 96).toISOString(),
+        },
+      ],
     };
 
     for (const a of agents) this.s.agents.set(a.agentId, a);
@@ -822,19 +838,78 @@ export class DemoMoxApi implements MoxApi {
     return this.getOnboarding();
   }
 
-  async orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView> {
+  async orderServer(input: { computeClassCode: string; hostname: string; sshKeyId?: string; idempotencyKey?: string }): Promise<ServerOrderView> {
     const now = new Date().toISOString();
-    return {
+    // Deterministic demo idempotency: the same key returns the SAME order
+    // instead of creating a second one (mirrors the real order authority).
+    const existing = this.s.orders.find((o) => o.idempotencyKey && o.idempotencyKey === input.idempotencyKey);
+    if (existing) return existing;
+    const order: ServerOrderView & { idempotencyKey?: string } = {
       orderId: `ord_${randomUUID()}`,
       state: "provisioning",
       computeClassCode: input.computeClassCode,
       hostname: input.hostname,
-      regionCode: "eu-central",
-      providerName: "Demo Provider",
+      regionCode: null,
       lastError: null,
       createdAt: now,
       updatedAt: now,
+      idempotencyKey: input.idempotencyKey,
     };
+    this.s.orders.push(order);
+    this.s.servers = [
+      ...this.s.servers,
+      {
+        serverId: order.orderId,
+        orderId: order.orderId,
+        displayName: order.hostname,
+        kind: "customer-vps",
+        computeClass: order.computeClassCode,
+        region: "Mox-managed placement",
+        state: "provisioning",
+        agentsRunning: null,
+        cpuPct: null,
+        memPct: null,
+        lastError: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ];
+    return order;
+  }
+
+  /** Safe provisioning catalog fixture (Mox abstraction; no provider fields). */
+  async getProvisionOptions(): Promise<ProvisionOptions> {
+    return {
+      classes: [
+        { code: "standard-2vcpu", displayName: "Mox Standard — 2 vCPU / 4 GB", minVcpu: 2, minRamGb: 4, included: true },
+        { code: "standard-4vcpu", displayName: "Mox Standard — 4 vCPU / 8 GB", minVcpu: 4, minRamGb: 8, included: true },
+        { code: "performance-8vcpu", displayName: "Mox Performance — 8 vCPU / 16 GB", minVcpu: 8, minRamGb: 16, included: false },
+      ],
+      serverQuota: {
+        entitled: true,
+        included: 3,
+        activeServers: this.s.servers.filter((s) => !["canceled", "destroyed", "error"].includes(s.state)).length,
+        reason: null,
+      },
+      sshKeys: this.s.sshKeys.map((k) => ({ ...k })),
+    };
+  }
+
+  async addSshKey(input: { label: string; publicKey: string }): Promise<SshKeyRow> {
+    const row: SshKeyRow = {
+      id: `key_${randomUUID()}`,
+      label: input.label,
+      fingerprint: "SHA256:1TmaFV6wDURQgMOp2WkGM+VKQv5OQ7mmJUT1hXVi9sE",
+      publicKey: input.publicKey,
+      createdAt: new Date().toISOString(),
+    };
+    this.s.sshKeys = [...this.s.sshKeys, row];
+    return row;
+  }
+
+  async deleteSshKey(keyId: string): Promise<{ ok: boolean }> {
+    this.s.sshKeys = this.s.sshKeys.filter((k) => k.id !== keyId);
+    return { ok: true };
   }
 
   async serverAction(

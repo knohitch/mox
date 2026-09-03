@@ -803,10 +803,38 @@ export interface ServerOrderView {
   computeClassCode: string;
   hostname: string;
   regionCode?: string | null;
-  providerName?: string | null;
   lastError?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Safe Mox compute-class catalog entry (PRODUCT_COMPLETION_02). */
+export interface ComputeClassOption {
+  code: string;
+  displayName: string;
+  minVcpu: number;
+  minRamGb: number;
+  /** Included by the org's current commercial plan (from the real authority). */
+  included: boolean;
+}
+
+export interface SshKeyRow {
+  id: string;
+  label: string;
+  fingerprint: string;
+  publicKey: string;
+  createdAt: string;
+}
+
+export interface ProvisionOptions {
+  classes: ComputeClassOption[];
+  serverQuota: {
+    entitled: boolean;
+    included: number | null;
+    activeServers: number;
+    reason: string | null;
+  };
+  sshKeys: SshKeyRow[];
 }
 
 
@@ -853,6 +881,12 @@ export interface MoxApi {
   listServers(): Promise<ServerSummary[]>;
   listDeployments(): Promise<AgentDeployment[]>;
   serverAction(orderId: string, action: "restart" | "redeploy" | "resize" | "cancel" | "stop" | "start", computeClassCode?: string): Promise<{ ok: boolean }>;
+
+  // Customer provisioning (PRODUCT_COMPLETION_02)
+  getProvisionOptions(): Promise<ProvisionOptions>;
+  orderServer(input: { computeClassCode: string; hostname: string; sshKeyId?: string; idempotencyKey?: string }): Promise<ServerOrderView>;
+  addSshKey(input: { label: string; publicKey: string }): Promise<SshKeyRow>;
+  deleteSshKey(keyId: string): Promise<{ ok: boolean }>;
   deployAgent(input: { agentId: string; revision: number; target?: { kind?: string; vpsId?: string } }): Promise<{ ok: boolean; state: string }>;
   redeployDeployment(deploymentId: string): Promise<{ ok: boolean; state: string }>;
   deploymentRollback(deploymentId: string, toRevision: number): Promise<{ ok: boolean; state: string }>;
@@ -933,10 +967,6 @@ export interface MoxApi {
   getOnboarding(): Promise<OnboardingState>;
   updateOnboarding(input: OnboardingPatchInput): Promise<OnboardingState>;
   completeOnboarding(): Promise<OnboardingState>;
-
-  // Real server order authority (customer-safe projection)
-  orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView>;
-
 
   // Protected Mox Admin
   adminOverview(): Promise<AdminOverview>;

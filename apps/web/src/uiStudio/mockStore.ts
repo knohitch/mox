@@ -305,14 +305,29 @@ export function createMockMoxStore(
         state: "provisioning",
         computeClassCode: input.computeClassCode,
         hostname: input.hostname,
-        regionCode: "eu-central",
-        providerName: "Fixture Provider",
+        regionCode: null,
         lastError: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
       return order;
     },
+    getProvisionOptions: async () => ({
+      classes: [
+        { code: "standard-2vcpu", displayName: "Mox Standard — 2 vCPU / 4 GB", minVcpu: 2, minRamGb: 4, included: true },
+        { code: "standard-4vcpu", displayName: "Mox Standard — 4 vCPU / 8 GB", minVcpu: 4, minRamGb: 8, included: true },
+      ],
+      serverQuota: { entitled: true, included: 3, activeServers: 0, reason: null },
+      sshKeys: [],
+    }),
+    addSshKey: async (input) => ({
+      id: `key_${Date.now()}`,
+      label: input.label,
+      fingerprint: "SHA256:fixture",
+      publicKey: input.publicKey,
+      createdAt: new Date().toISOString(),
+    }),
+    deleteSshKey: async () => ({ ok: true }),
     getOnboarding: async () => {
       if (onboardingPreview === "error") throw new Error("Simulated onboarding state failure — Studio preview of error handling.");
       return onboardingFixture;

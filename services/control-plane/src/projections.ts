@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type ServerState =
   | "requested"
   | "provisioning"
@@ -103,7 +105,6 @@ export interface ServerSummaryView {
   agentsRunning: null;
   cpuPct: null;
   memPct: null;
-  provider: string | null;
   lastError: string | null;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -121,11 +122,74 @@ export function projectServerSummary(order: ServerOrderView): ServerSummaryView 
     agentsRunning: null,
     cpuPct: null,
     memPct: null,
-    provider: order.providerName ?? null,
     lastError: order.lastError ?? null,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };
+}
+
+// ---- Customer provisioning (PRODUCT_COMPLETION_02) ----------------------------
+
+/** Customer-safe SSH public-key projection. Public material only, by design. */
+export interface SshKeyView {
+  id: string;
+  label: string;
+  fingerprint: string;
+  publicKey: string;
+  createdAt: Date | string;
+}
+
+interface SshKeyRowLike {
+  id: string;
+  label: string;
+  fingerprint: string;
+  publicKey: string;
+  createdAt: Date | string;
+}
+
+export function projectSshKey(row: SshKeyRowLike): SshKeyView {
+  return {
+    id: row.id,
+    label: row.label,
+    fingerprint: row.fingerprint,
+    publicKey: row.publicKey,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+  };
+}
+
+const SSH_PUBLIC_KEY_ALGO_RE =
+  /^(ssh-(rsa|dss|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$/;
+
+/**
+ * Validates an OpenSSH-format PUBLIC key ("algo base64 [comment]") and returns
+ * its SHA256 fingerprint (OpenSSH style). Anything that looks like a private
+ * key, a hostile multi-line blob, or fails to decode is rejected — the
+ * Control Plane never persists private key material.
+ */
+export function parseSshPublicKey(input: string): { ok: true; fingerprint: string; algo: string } | { ok: false; error: string } {
+  const value = input.trim();
+  if (!value || value.length > 8192) return { ok: false, error: "public key is required (max 8192 characters)" };
+  if (value.includes("\n") || /PRIVATE KEY/i.test(value)) {
+    return { ok: false, error: "exactly one public key line is required — never paste a private key" };
+  }
+  const parts = value.split(/\s+/);
+  if (parts.length < 2 || parts.length > 3) return { ok: false, error: "public key must look like: <algorithm> <base64> [comment]" };
+  const [algo, b64] = [parts[0]!, parts[1]!];
+  if (!SSH_PUBLIC_KEY_ALGO_RE.test(algo)) return { ok: false, error: `unsupported public key algorithm: ${algo}` };
+  if (b64.length < 16 || b64.length > 16384 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+    return { ok: false, error: "public key body is not valid base64" };
+  }
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(b64, "base64");
+  } catch {
+    return { ok: false, error: "public key body is not valid base64" };
+  }
+  if (decoded.length < 8 || Buffer.from(b64, "base64").toString("base64").replace(/=+$/, "") !== b64.replace(/=+$/, "")) {
+    return { ok: false, error: "public key body is not valid base64" };
+  }
+  const fingerprint = `SHA256:${createHash("sha256").update(decoded).digest("base64").replace(/=+$/, "")}`;
+  return { ok: true, fingerprint, algo };
 }
 
 export interface SupportServerOrderView {

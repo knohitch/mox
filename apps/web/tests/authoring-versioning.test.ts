@@ -154,6 +154,69 @@ describe("Phase 02 §H — server lifecycle actions (web demo seam)", () => {
   });
 });
 
+describe("Phase 02 — customer provisioning (web demo seam)", () => {
+  it("getProvisionOptions returns safe catalog without provider internals", async () => {
+    const api = new DemoMoxApi();
+    const opts = await api.getProvisionOptions();
+    expect(opts.classes.length).toBeGreaterThan(0);
+    for (const c of opts.classes) {
+      expect(c.code).toBeTruthy();
+      expect(c.displayName).toBeTruthy();
+      expect(typeof c.minVcpu).toBe("number");
+      expect(typeof c.minRamGb).toBe("number");
+      expect(typeof c.included).toBe("boolean");
+      // Provider mapping/SKU/cost must NOT be on the customer-safe shape
+      expect("providerName" in c).toBe(false);
+      expect("sku" in c).toBe(false);
+      expect("cost" in c).toBe(false);
+    }
+    expect(opts.serverQuota).toBeDefined();
+    expect(typeof opts.serverQuota.entitled).toBe("boolean");
+    expect(Array.isArray(opts.sshKeys)).toBe(true);
+  });
+
+  it("orderServer with idempotency key — double submit returns same order", async () => {
+    const api = new DemoMoxApi();
+    const idemKey = `test_idem_${Date.now()}`;
+    const first = await api.orderServer({ computeClassCode: "standard-2vcpu", hostname: "test-host", idempotencyKey: idemKey });
+    const second = await api.orderServer({ computeClassCode: "standard-2vcpu", hostname: "test-host", idempotencyKey: idemKey });
+    expect(first.orderId).toBe(second.orderId);
+    expect(first.hostname).toBe("test-host");
+  });
+
+  it("orderServer creates a server visible in listServers", async () => {
+    const api = new DemoMoxApi();
+    const before = await api.listServers();
+    await api.orderServer({ computeClassCode: "standard-2vcpu", hostname: "new-host" });
+    const after = await api.listServers();
+    expect(after.length).toBe(before.length + 1);
+    expect(after.some((s) => s.displayName === "new-host")).toBe(true);
+  });
+
+  it("SSH key add/list/delete lifecycle", async () => {
+    const api = new DemoMoxApi();
+    const opts = await api.getProvisionOptions();
+    const beforeCount = opts.sshKeys.length;
+
+    const added = await api.addSshKey({ label: "Test key", publicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdEaKHMGx test@host" });
+    expect(added.label).toBe("Test key");
+    expect(added.id).toBeTruthy();
+
+    const afterAdd = await api.getProvisionOptions();
+    expect(afterAdd.sshKeys.length).toBe(beforeCount + 1);
+
+    await api.deleteSshKey(added.id);
+    const afterDelete = await api.getProvisionOptions();
+    expect(afterDelete.sshKeys.length).toBe(beforeCount);
+  });
+
+  it("ServerOrderView does not expose providerName to customer", async () => {
+    const api = new DemoMoxApi();
+    const order = await api.orderServer({ computeClassCode: "standard-2vcpu", hostname: "no-provider" });
+    expect("providerName" in order).toBe(false);
+  });
+});
+
 describe("Phase 02 §I — deployments (web demo seam)", () => {
   it("only published revisions can be deployed or rolled back to", async () => {
     const api = new DemoMoxApi();

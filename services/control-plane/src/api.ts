@@ -70,6 +70,7 @@ import {
   users,
   verifiedWebhookEvents,
   workspaceInvitations,
+  sshKeys,
 } from "@mox/database";
 import { sanitizeForPersistence } from "@mox/security";
 import {
@@ -80,6 +81,8 @@ import {
   projectDeploymentTarget,
   projectModelAvailability,
   projectServerSummary,
+  projectSshKey,
+  parseSshPublicKey,
   projectSupportNodeHealth,
   projectSupportServerOrder,
   projectUsageStatus,
@@ -2222,6 +2225,132 @@ export function buildApiRouter(deps: ApiDeps): Router {
     // surface, so agentsRunning/cpuPct/memPct are reported as explicitly
     // unavailable (null) rather than fabricated zeros.
     return orders.map((order) => projectServerSummary(order));
+  });
+
+  // ---- Customer provisioning workflow (PRODUCT_COMPLETION_02) -----------------
+  // Safe, customer-side inputs only: Mox compute class, hostname, SSH key.
+  // Region is NOT customer-selectable — placement is resolved by Mox compute
+  // authority from the class's provider mapping, which stays internal.
+
+  /**
+   * Safe provisioning catalog: Mox compute classes with customer-safe fields
+   * only. Never exposes provider mapping/SKU/cost/account. Also returns the
+   * caller's real server quota from the commercial authority so the UI shows
+   * an honest plan impact instead of guessing.
+   */
+  router.get("/api/servers/provision-options", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    const classRows = await db()
+      .select()
+      .from(computeClasses)
+      .where(eq(computeClasses.active, true))
+      .orderBy(asc(computeClasses.displayName));
+    const classes = [];
+    for (const row of classRows) {
+      const decision = await services.billing.requireCommercialEntitlement(
+        identity.orgId,
+        services.entitlements,
+        "included_compute_class",
+        { equals: row.code },
+      );
+      const wildcard = decision.value === "*" || decision.value === "all";
+      classes.push({
+        code: row.code,
+        displayName: row.displayName,
+        minVcpu: row.minVcpu,
+        minRamGb: row.minRamGb,
+        included: decision.entitled || wildcard,
+      });
+    }
+    const quota = await services.billing.requireCommercialEntitlement(
+      identity.orgId,
+      services.entitlements,
+      "included_server_count",
+      { min: 1 },
+    );
+    const activeOrders = (await services.orchestrator.listOrders(identity.orgId)).filter((order) =>
+      ["requested", "provisioning", "running", "resizing", "stopping", "stopped", "cancelling"].includes(order.state),
+    );
+    const keyRows = await db()
+      .select()
+      .from(sshKeys)
+      .where(eq(sshKeys.orgId, identity.orgId))
+      .orderBy(desc(sshKeys.createdAt));
+    return {
+      classes,
+      serverQuota: {
+        entitled: quota.entitled,
+        included: typeof quota.value === "number" ? quota.value : null,
+        activeServers: activeOrders.length,
+        reason: quota.reason ?? null,
+      },
+      sshKeys: keyRows.map(projectSshKey),
+    };
+  });
+
+  /** Lists the caller's org SSH public keys (public material only). */
+  router.get("/api/ssh-keys", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    const rows = await db()
+      .select()
+      .from(sshKeys)
+      .where(eq(sshKeys.orgId, identity.orgId))
+      .orderBy(desc(sshKeys.createdAt));
+    return rows.map(projectSshKey);
+  });
+
+  /** Adds an org SSH PUBLIC key. Private keys are never accepted or stored. */
+  router.post("/api/ssh-keys", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "infrastructure.manage");
+    const body = ctx.body as { label?: string; publicKey?: string } | undefined;
+    const label = body?.label?.trim() ?? "";
+    const publicKey = body?.publicKey?.trim() ?? "";
+    if (!label || label.length > 64) throw httpError("label is required (max 64 characters)", 400);
+    const parsed = parseSshPublicKey(publicKey);
+    if ("error" in parsed) throw httpError(parsed.error, 400, { code: "invalid_ssh_public_key" });
+    const existing = await db().select({ id: sshKeys.id }).from(sshKeys).where(eq(sshKeys.orgId, identity.orgId));
+    if (existing.length >= 100) throw httpError("SSH public key limit reached for this workspace", 402, { code: "ssh_key_limit" });
+    const inserted = (
+      await db()
+        .insert(sshKeys)
+        .values({ orgId: identity.orgId, label, publicKey, fingerprint: parsed.fingerprint })
+        .returning()
+    )[0];
+    await db().insert(auditEvents).values({
+      orgId: identity.orgId,
+      actorType: "user",
+      actorId: identity.userId,
+      action: "ssh_key.added",
+      resourceType: "ssh_key",
+      resourceId: inserted!.id,
+      result: "success",
+      after: { label, fingerprint: parsed.fingerprint },
+    });
+    return projectSshKey(inserted!);
+  });
+
+  /** Removes an org-owned SSH public key (tenant-scoped, audited). */
+  router.delete("/api/ssh-keys/:keyId", async (ctx) => {
+    const identity = await requireAuth(ctx, "servers");
+    requireOrgCapability(identity, "infrastructure.manage");
+    const deleted = await db()
+      .delete(sshKeys)
+      .where(and(eq(sshKeys.id, ctx.params.keyId!), eq(sshKeys.orgId, identity.orgId)))
+      .returning({ id: sshKeys.id, label: sshKeys.label, fingerprint: sshKeys.fingerprint });
+    const row = deleted[0];
+    if (!row) throw httpError("SSH key not found or not owned by your org", 404);
+    await db().insert(auditEvents).values({
+      orgId: identity.orgId,
+      actorType: "user",
+      actorId: identity.userId,
+      action: "ssh_key.removed",
+      resourceType: "ssh_key",
+      resourceId: row.id,
+      result: "success",
+      after: { label: row.label, fingerprint: row.fingerprint },
+    });
+    return { ok: true };
   });
 
   router.post("/api/servers/orders", async (ctx) => {

@@ -57,9 +57,9 @@ describe("unavailable telemetry (§C)", () => {
     expect(s.memPct).toBeNull();
   });
 
-  it("does not fabricate zero for missing provider/lastError", () => {
-    const s = projectServerSummary(order({ providerName: null, lastError: "disk full" }));
-    expect(s.provider).toBeNull();
+  it("keeps provider internals off the customer-safe summary (compute-class abstraction)", () => {
+    const s = projectServerSummary(order({ providerName: "some-provider", lastError: "disk full" }));
+    expect("provider" in s).toBe(false);
     expect(s.lastError).toBe("disk full");
   });
 });

@@ -61,9 +61,11 @@ import type {
   OnboardingPatchInput,
   OnboardingState,
   PlanOption,
+  ProvisionOptions,
   SendRunHandle,
   ServerSummary,
   ServerOrderView,
+  SshKeyRow,
   SubscriptionView,
   SupportCustomer,
   SupportCustomerDetail,
@@ -849,7 +851,7 @@ export class HttpMoxApi implements MoxApi {
 
   // ---- Real server order authority (customer-safe projection) -----------------
 
-  async orderServer(input: { computeClassCode: string; hostname: string; idempotencyKey?: string }): Promise<ServerOrderView> {
+  async orderServer(input: { computeClassCode: string; hostname: string; sshKeyId?: string; idempotencyKey?: string }): Promise<ServerOrderView> {
     const order = await this.call<Record<string, unknown>>("/api/servers/orders", {
       method: "POST",
       body: JSON.stringify(input),
@@ -862,11 +864,23 @@ export class HttpMoxApi implements MoxApi {
       computeClassCode: String(order.computeClassCode),
       hostname: String(order.hostname),
       regionCode: (order.regionCode as string | undefined) ?? null,
-      providerName: (order.providerName as string | undefined) ?? null,
       lastError: (order.lastError as string | undefined) ?? null,
       createdAt: String(order.createdAt),
       updatedAt: String(order.updatedAt),
     };
+  }
+
+  /** Safe provisioning catalog + real quota + org SSH keys (customer-safe). */
+  async getProvisionOptions(): Promise<ProvisionOptions> {
+    return this.call("/api/servers/provision-options");
+  }
+
+  async addSshKey(input: { label: string; publicKey: string }): Promise<SshKeyRow> {
+    return this.call("/api/ssh-keys", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async deleteSshKey(keyId: string): Promise<{ ok: boolean }> {
+    return this.call(`/api/ssh-keys/${encodeURIComponent(keyId)}`, { method: "DELETE" });
   }
 
   // ---- Protected Mox Admin ----------------------------------------------------------

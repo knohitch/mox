@@ -22,6 +22,7 @@ import type {
   ModelConnectionRow,
   NotificationPreferencesView,
   PlanOption,
+  ProvisionOptions,
   ServerSummary,
   StoredBackupSummary,
   SubscriptionView,
@@ -801,6 +802,7 @@ export function ServersView() {
   const [servers, setServers] = useState<Awaited<ReturnType<typeof mox.api.listServers>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showProvision, setShowProvision] = useState(false);
   const reload = useCallback(async () => {
     setServers(await mox.api.listServers());
   }, [mox.api]);
@@ -816,7 +818,12 @@ export function ServersView() {
       <PageHeader
         title="Servers"
         subtitle="Compute infrastructure hosting your agents."
-        actions={<Link to="/backups"><Button size="sm">Manage Backups</Button></Link>}
+        actions={
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button kind="primary" onClick={() => setShowProvision(true)}>Provision Server</Button>
+            <Link to="/backups"><Button size="sm">Manage Backups</Button></Link>
+          </div>
+        }
       />
 
       {error ? <ErrorState message={error} /> : null}
@@ -839,7 +846,292 @@ export function ServersView() {
           empty="No servers provisioned for this workspace yet."
         />
       </Panel>
+      {showProvision && (
+        <ProvisionServerModal
+          onClose={() => setShowProvision(false)}
+          onDone={async () => { setShowProvision(false); await reload(); }}
+        />
+      )}
     </div>
+  );
+}
+
+/** Customer server provisioning wizard (Phase 02). Safe Mox abstraction — no provider internals. */
+function ProvisionServerModal({ onClose, onDone }: { onClose: () => void; onDone: () => Promise<void> }) {
+  const mox = useMox();
+  const [step, setStep] = useState<"class" | "hostname" | "ssh" | "confirm">("class");
+  const [opts, setOpts] = useState<ProvisionOptions | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Selections
+  const [classCode, setClassCode] = useState("");
+  const [hostname, setHostname] = useState("");
+  const [sshKeyId, setSshKeyId] = useState<string | undefined>(undefined);
+  const [newSshLabel, setNewSshLabel] = useState("");
+  const [newSshPublicKey, setNewSshPublicKey] = useState("");
+  const [addingKey, setAddingKey] = useState(false);
+
+  useEffect(() => {
+    void mox.api
+      .getProvisionOptions()
+      .then((o) => { setOpts(o); setLoading(false); })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)); setLoading(false); });
+  }, [mox.api]);
+
+  const selectedClass = opts?.classes.find((c) => c.code === classCode);
+  const quota = opts?.serverQuota;
+  const quotaExhausted = quota && !quota.entitled || (typeof quota?.included === "number" && quota.included >= 0 && quota.activeServers >= quota.included);
+
+  const addKey = async () => {
+    if (!newSshLabel.trim() || !newSshPublicKey.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const row = await mox.api.addSshKey({ label: newSshLabel.trim(), publicKey: newSshPublicKey.trim() });
+      setOpts((prev) => prev ? { ...prev, sshKeys: [...prev.sshKeys, row] } : prev);
+      setSshKeyId(row.id);
+      setNewSshLabel("");
+      setNewSshPublicKey("");
+      setAddingKey(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeKey = async (keyId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await mox.api.deleteSshKey(keyId);
+      setOpts((prev) => prev ? { ...prev, sshKeys: prev.sshKeys.filter((k) => k.id !== keyId) } : prev);
+      if (sshKeyId === keyId) setSshKeyId(undefined);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submit = async () => {
+    if (!classCode || !hostname.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await mox.api.orderServer({
+        computeClassCode: classCode,
+        hostname: hostname.trim(),
+        sshKeyId,
+        idempotencyKey: `provision_${classCode}_${hostname.trim()}_${Date.now()}`,
+      });
+      await onDone();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const canNext = step === "class" ? !!classCode
+    : step === "hostname" ? hostname.trim().length > 0 && hostname.trim().length <= 63
+    : step === "ssh" ? true
+    : true;
+
+  const next = () => {
+    if (step === "class") setStep("hostname");
+    else if (step === "hostname") setStep("ssh");
+    else if (step === "ssh") setStep("confirm");
+  };
+  const back = () => {
+    if (step === "confirm") setStep("ssh");
+    else if (step === "ssh") setStep("hostname");
+    else if (step === "hostname") setStep("class");
+  };
+
+  if (loading) {
+    return (
+      <Modal isOpen={true} onClose={onClose} title="Provision Server">
+        <LoadingState label="Loading provisioning options…" />
+      </Modal>
+    );
+  }
+
+  if (quotaExhausted) {
+    return (
+      <Modal isOpen={true} onClose={onClose} title="Provision Server">
+        <EmptyState>
+          {quota?.entitled
+            ? `Server quota reached (${quota.included} included). Cancel an existing server or upgrade your plan.`
+            : "Your current plan does not include server provisioning. Upgrade to get started."}
+        </EmptyState>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      isOpen={true}
+      onClose={onClose}
+      title={`Provision Server — ${step === "class" ? "Choose class" : step === "hostname" ? "Name" : step === "ssh" ? "SSH access" : "Confirm"}`}
+      footer={
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          {step !== "class" && <Button onClick={back} disabled={busy}>Back</Button>}
+          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          {step !== "confirm" ? (
+            <Button kind="primary" disabled={!canNext} onClick={next}>Next</Button>
+          ) : (
+            <Button kind="primary" disabled={busy} onClick={() => void submit()}>
+              {busy ? "Provisioning…" : "Provision Server"}
+            </Button>
+          )}
+        </div>
+      }
+    >
+      {error ? <ErrorState message={error} /> : null}
+
+      {step === "class" && opts && (
+        <div className="form-grid">
+          <p className="muted" style={{ marginBottom: 8 }}>Select a Mox compute class for your server.</p>
+          {opts.classes.map((c) => (
+            <label
+              key={c.code}
+              className="form-field"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 12px",
+                border: classCode === c.code ? "2px solid var(--accent)" : "1px solid var(--border)",
+                borderRadius: 8,
+                cursor: "pointer",
+                background: classCode === c.code ? "var(--accent-bg, rgba(99,102,241,0.06))" : undefined,
+              }}
+            >
+              <input
+                type="radio"
+                name="compute-class"
+                value={c.code}
+                checked={classCode === c.code}
+                onChange={() => setClassCode(c.code)}
+              />
+              <div>
+                <strong>{c.displayName}</strong>
+                <div className="muted" style={{ fontSize: 12.5 }}>{c.minVcpu} vCPU · {c.minRamGb} GB RAM{c.included ? " · included in plan" : ""}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {step === "hostname" && (
+        <div className="form-grid">
+          <label className="form-field">
+            Hostname / display name
+            <input
+              value={hostname}
+              placeholder="my-agent-server"
+              maxLength={63}
+              onChange={(e) => setHostname(e.target.value)}
+            />
+          </label>
+          <p className="muted" style={{ fontSize: 12.5 }}>
+            Alphanumeric, hyphens, and dots. Max 63 characters. Used as the server display name.
+          </p>
+        </div>
+      )}
+
+      {step === "ssh" && opts && (
+        <div className="form-grid">
+          <p className="muted" style={{ marginBottom: 8 }}>Optionally attach an SSH public key for server access.</p>
+          {opts.sshKeys.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {opts.sshKeys.map((k) => (
+                <label
+                  key={k.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 12px",
+                    border: sshKeyId === k.id ? "2px solid var(--accent)" : "1px solid var(--border)",
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    background: sshKeyId === k.id ? "var(--accent-bg, rgba(99,102,241,0.06))" : undefined,
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="ssh-key"
+                    checked={sshKeyId === k.id}
+                    onChange={() => setSshKeyId(k.id)}
+                  />
+                  <div style={{ flex: 1 }}>
+                    <strong>{k.label}</strong>
+                    <div className="muted mono" style={{ fontSize: 11 }}>{k.fingerprint}</div>
+                  </div>
+                  <Button size="sm" kind="danger" onClick={(e) => { e.preventDefault(); void removeKey(k.id); }}>Remove</Button>
+                </label>
+              ))}
+              <label style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", border: sshKeyId === undefined ? "2px solid var(--border)" : "1px solid var(--border)", borderRadius: 8, cursor: "pointer" }}>
+                <input type="radio" name="ssh-key" checked={sshKeyId === undefined} onChange={() => setSshKeyId(undefined)} />
+                <span className="muted">No SSH key</span>
+              </label>
+            </div>
+          )}
+          {opts.sshKeys.length === 0 && !addingKey && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span className="muted">No SSH keys configured.</span>
+              <Button size="sm" kind="ghost" onClick={() => setAddingKey(true)}>Add key</Button>
+            </div>
+          )}
+          {addingKey ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+              <label className="form-field">
+                Label
+                <input value={newSshLabel} placeholder="Operator laptop" maxLength={64} onChange={(e) => setNewSshLabel(e.target.value)} />
+              </label>
+              <label className="form-field">
+                Public key
+                <input value={newSshPublicKey} placeholder="ssh-ed25519 AAAA…" onChange={(e) => setNewSshPublicKey(e.target.value)} />
+              </label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button size="sm" kind="primary" disabled={busy || !newSshLabel.trim() || !newSshPublicKey.trim()} onClick={() => void addKey()}>
+                  {busy ? "Adding…" : "Add key"}
+                </Button>
+                <Button size="sm" onClick={() => { setAddingKey(false); setNewSshLabel(""); setNewSshPublicKey(""); }}>Cancel</Button>
+              </div>
+            </div>
+          ) : opts.sshKeys.length > 0 ? (
+            <Button size="sm" kind="ghost" onClick={() => setAddingKey(true)}>+ Add another key</Button>
+          ) : null}
+        </div>
+      )}
+
+      {step === "confirm" && selectedClass && (
+        <div className="form-grid">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div><span className="muted">Compute class</span><br /><strong>{selectedClass.displayName}</strong></div>
+            <div><span className="muted">Hostname</span><br /><strong>{hostname}</strong></div>
+            <div><span className="muted">Resources</span><br />{selectedClass.minVcpu} vCPU · {selectedClass.minRamGb} GB RAM</div>
+            <div><span className="muted">SSH key</span><br />{sshKeyId ? (opts?.sshKeys.find((k) => k.id === sshKeyId)?.label ?? "Selected") : "None"}</div>
+          </div>
+          {quota && (
+            <div style={{ marginTop: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
+              <span className="muted">Plan impact: </span>
+              <strong>{quota.activeServers + 1}</strong>
+              {typeof quota.included === "number" ? <> / {quota.included} servers used</> : null}
+              {selectedClass.included ? <Badge tone="good" >included</Badge> : <Badge tone="warn">may incur charges</Badge>}
+            </div>
+          )}
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 8 }}>
+            Placement is managed by Mox — the region is selected automatically based on availability.
+          </p>
+        </div>
+      )}
+    </Modal>
   );
 }
 
