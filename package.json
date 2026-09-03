@@ -18,11 +18,13 @@
     "container-builds": "node scripts/container-builds.mjs",
     "dependency-security": "pnpm audit --audit-level high",
     "test": "vitest run",
+    "e2e": "playwright test",
     "scan:authority": "node scripts/authority-scan.mjs",
     "quality": "pnpm public-branding-scan && pnpm secret-scan && pnpm dependency-security && pnpm scan:authority && pnpm typecheck && pnpm test",
     "baseline:checks": "scripts\\baseline-checks.cmd"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.3.0",
     "oxlint": "^1.78.0",
     "typescript": "^5.9.2",
