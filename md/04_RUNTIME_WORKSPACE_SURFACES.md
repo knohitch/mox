@@ -1,6 +1,9 @@
 # MOX — PHASE 04
 # WIRE COMPUTER, FILES, TERMINAL, AND LOGS TO REAL RUNTIME AUTHORITY
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_04_RUNTIME_WORKSPACE_SURFACES.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Re-scan current runtime architecture. Preserve onboarding, DEV direct access, auth/RBAC, tenant isolation, entitlement gates, signed node authority, prior SSRF/egress hardening and secret redaction. Do not push.

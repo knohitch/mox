@@ -1133,23 +1133,26 @@ export class HttpMoxApi implements MoxApi {
   }
 
   async computerTakeover(agentId: string, take: boolean, takenBy: string): Promise<ComputerSnapshot> {
-    void agentId;
-    void take;
-    void takenBy;
-    throw new ApiUnavailableError("computer gateway is not configured on this deployment");
+    return this.call(`/api/computer/${encodeURIComponent(agentId)}/takeover`, {
+      method: "POST",
+      body: JSON.stringify({ take, takenBy }),
+    });
   }
 
   async computerRestart(agentId: string): Promise<ComputerSnapshot> {
-    void agentId;
-    throw new ApiUnavailableError("computer gateway is not configured on this deployment");
+    return this.call(`/api/computer/${encodeURIComponent(agentId)}/restart`, { method: "POST" });
   }
 
   async listFiles(agentId: string): Promise<Array<{ path: string; sizeBytes: number; updatedAt: string }>> {
     return this.call(`/api/agents/${encodeURIComponent(agentId)}/files`);
   }
 
-  async filePreview(_agentId: string, _path: string): Promise<string> {
-    throw new ApiUnavailableError("workspace file access is not configured on this deployment");
+  async filePreview(agentId: string, path: string): Promise<string> {
+    const result = await this.call<{ preview: string }>(`/api/agents/${encodeURIComponent(agentId)}/files/preview`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    return result.preview;
   }
 
   async runTerminalCommand(agentId: string, command: string): Promise<{ output: string }> {
