@@ -139,6 +139,63 @@ export function MoxLogo({ className = "mox-brand-logo" }: { className?: string }
   );
 }
 
+/**
+ * Safe UI-Studio shortcuts for the three surfaces. They never mint auth
+ * cookies, never touch PostgreSQL, and only reach isolated in-memory Studio
+ * fixtures behind the /__ui security gate (dev build + explicit opt-in +
+ * localhost). The explicit `page`/`state`/`role` params open the POPULATED
+ * dashboard fixture for each surface so the shortcut is immediately useful
+ * for UI work.
+ */
+export const DEV_DIRECT_ACCESS_SHORTCUTS: readonly { surface: SurfaceKind; href: string; title: string; icon: string; text: string }[] = [
+  {
+    surface: "customer",
+    href: "/__ui?surface=customer&page=/dashboard&state=populated",
+    title: "Access User / Customer Dashboard",
+    icon: "⬡",
+    text: "User Dashboard",
+  },
+  {
+    surface: "admin",
+    href: "/__ui?surface=admin&page=dashboard&state=populated&role=superadmin",
+    title: "Access Mox Admin Dashboard",
+    icon: "🛡",
+    text: "Admin Dashboard",
+  },
+  {
+    surface: "support",
+    href: "/__ui?surface=support&page=overview&state=populated&role=support_manager",
+    title: "Access Mox Support Dashboard",
+    icon: "🎧",
+    text: "Support Dashboard",
+  },
+];
+
+/**
+ * Renders the development-only direct-access pills. Production renders
+ * nothing: AuthLayout only mounts this behind `import.meta.env.DEV`, and the
+ * /__ui route itself stays gated by the Studio security policy in every build.
+ */
+export function DevDirectAccess({ isDev = import.meta.env.DEV }: { isDev?: boolean }): ReactNode {
+  if (!isDev) return null;
+  return (
+    <div className="mastra-dev-access" role="region" aria-label="Development Shortcuts">
+      <div className="mastra-dev-header">
+        <span className="mastra-dev-dot" aria-hidden>●</span>
+        <span className="mastra-dev-title">DEV MODE DIRECT ACCESS</span>
+      </div>
+      <div className="mastra-dev-buttons">
+        {DEV_DIRECT_ACCESS_SHORTCUTS.map((shortcut) => (
+          <a key={shortcut.surface} href={shortcut.href} className={`mastra-dev-pill ${shortcut.surface}`} title={shortcut.title}>
+            <span className="mastra-dev-icon">{shortcut.icon}</span>
+            <span className="mastra-dev-text">{shortcut.text}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function AuthLayout({ surface, children }: { surface: SurfaceKind; children: ReactNode }) {
   return (
     <div className="mastra-auth-shell" data-surface={surface}>
@@ -161,40 +218,7 @@ export function AuthLayout({ surface, children }: { surface: SurfaceKind; childr
             {children}
 
             {/* Development Mode Direct Access (Customer, Admin, Support) */}
-            {import.meta.env.DEV ? (
-              <div className="mastra-dev-access" role="region" aria-label="Development Shortcuts">
-                <div className="mastra-dev-header">
-                  <span className="mastra-dev-dot" aria-hidden>●</span>
-                  <span className="mastra-dev-title">DEV MODE DIRECT ACCESS</span>
-                </div>
-                <div className="mastra-dev-buttons">
-                  <a
-                    href="/__ui?surface=customer"
-                    className="mastra-dev-pill customer"
-                    title="Access User / Customer Dashboard"
-                  >
-                    <span className="mastra-dev-icon">⬡</span>
-                    <span className="mastra-dev-text">User Dashboard</span>
-                  </a>
-                  <a
-                    href="/__ui?surface=admin"
-                    className="mastra-dev-pill admin"
-                    title="Access Mox Admin Dashboard"
-                  >
-                    <span className="mastra-dev-icon">🛡</span>
-                    <span className="mastra-dev-text">Admin Dashboard</span>
-                  </a>
-                  <a
-                    href="/__ui?surface=support"
-                    className="mastra-dev-pill support"
-                    title="Access Mox Support Dashboard"
-                  >
-                    <span className="mastra-dev-icon">🎧</span>
-                    <span className="mastra-dev-text">Support Dashboard</span>
-                  </a>
-                </div>
-              </div>
-            ) : null}
+            {import.meta.env.DEV ? <DevDirectAccess /> : null}
           </div>
         </div>
 

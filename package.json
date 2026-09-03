@@ -9,6 +9,7 @@
   },
   "scripts": {
     "ui:studio": "pnpm --filter @mox/web run ui:studio",
+    "mox:bootstrap-admin": "node packages/database/scripts/bootstrap-admin.mjs",
     "build": "pnpm -r --filter @mox/* run build",
     "typecheck": "pnpm -r --filter @mox/* run typecheck",
     "lint": "oxlint packages apps services runtime infra",

@@ -1,6 +1,13 @@
 # MOX — PHASE 01
 # DEV DIRECT ACCESS + FIRST SUPERADMIN BOOTSTRAP
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_01_ADMIN_BOOTSTRAP_DEV_ACCESS.md`.
+> Local commit: `feat(platform): add secure first-admin bootstrap and preserve dev access`.
+> Dev direct access now opens populated Studio fixtures; first-superadmin
+> bootstrap CLI added as `pnpm mox:bootstrap-admin` (existing-account only,
+> idempotent, audited, fail-closed). Nothing pushed.
+
 Use **Gemini 3.1 Pro High**.
 
 ## REPOSITORY

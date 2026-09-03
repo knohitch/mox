@@ -155,6 +155,18 @@ try {
         Pop-Location
     }
 
+    # 3b. First-admin bootstrap suite runs SEPARATELY: it requires a
+    #     no-active-superadmin precondition, which the parallel staff suites
+    #     above would violate.
+    Write-Host "`n== first-admin bootstrap suite =="
+    Push-Location services/control-plane
+    try {
+        npx vitest run tests/bootstrap-admin.test.ts
+        if ($LASTEXITCODE -ne 0) { throw "bootstrap-admin suite failed" }
+    } finally {
+        Pop-Location
+    }
+
     # 4. Upgrade drill: pre-0006 schema + legacy rows -> apply 0006+0007 ->
     #    history preserved. Implemented as a script for precise SQL control.
     Write-Host "`n== pre-0006 -> current upgrade drill =="
