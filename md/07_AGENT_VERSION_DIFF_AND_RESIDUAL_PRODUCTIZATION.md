@@ -1,6 +1,9 @@
 # MOX — PHASE 07
 # PRODUCTIZE AGENT VERSION DIFF + CLOSE RESIDUAL HIDDEN/BLOCKED FEATURES
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_07_RESIDUAL_MATRIX.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Preserve onboarding, DEV direct access, themes and all prior phases. Do not push.

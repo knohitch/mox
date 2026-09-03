@@ -1345,6 +1345,7 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
   const [browser, setBrowser] = useState(d.computer.enabled);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diffTarget, setDiffTarget] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
 
   // Extended capability states (Phase 04 §E/§F)
@@ -1570,14 +1571,26 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
               { key: "changelog", label: "Changelog", render: (v) => v.changelog ?? "—" },
               { key: "createdBy", label: "By", render: (v) => <span className="mono">{v.createdBy}</span> },
               { key: "createdAt", label: "At", render: (v) => <span className="muted">{new Date(v.createdAt).toLocaleString()}</span> },
-              { key: "actions", label: "", render: (v) => v.revision !== summary.currentVersion ? (
-                <Button size="sm" disabled={busy} onClick={() => void rollback(v.revision)}>Rollback</Button>
-              ) : (
-                <span className="muted">live</span>
+              { key: "actions", label: "", render: (v) => (
+                <div style={{ display: "flex", gap: 6 }}>
+                  {v.revision !== summary.currentVersion ? (
+                    <Button size="sm" disabled={busy} onClick={() => void rollback(v.revision)}>Rollback</Button>
+                  ) : (
+                    <span className="muted">live</span>
+                  )}
+                  {versions.length > 1 && (
+                    <Button size="sm" kind="ghost" onClick={() => setDiffTarget(v.revision)}>
+                      {diffTarget === v.revision ? "Hide diff" : "Compare"}
+                    </Button>
+                  )}
+                </div>
               ) }
             ]}
             rows={[...versions].reverse()}
           />
+        )}
+        {diffTarget !== null && versions.length > 1 && (
+          <VersionDiffPanel agentId={summary.agentId} targetRevision={diffTarget} currentRevision={summary.currentVersion} versions={versions} api={mox.api} />
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 12 }}>
           <input
@@ -2027,9 +2040,47 @@ function SettingsTab({ summary }: { summary: AgentSummary }) {
   );
 }
 
+/** Version diff panel (Phase 07): shows structured changes between two revisions. */
+function VersionDiffPanel({ agentId, targetRevision, currentRevision, versions, api }: { agentId: string; targetRevision: number; currentRevision: number | undefined; versions: AgentVersionRow[]; api: import("../api/types.js").MoxApi }) {
+  const [changes, setChanges] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [compareWith, setCompareWith] = useState<number>(currentRevision ?? (versions[0]?.revision ?? 1));
 
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    const from = Math.min(compareWith, targetRevision);
+    const to = Math.max(compareWith, targetRevision);
+    void api.diffAgentVersions(agentId, from, to)
+      .then((r) => { setChanges(r.changes); setLoading(false); })
+      .catch((e) => { setError(e instanceof Error ? e.message : String(e)); setLoading(false); });
+  }, [api, agentId, targetRevision, compareWith]);
 
-
+  return (
+    <div style={{ marginTop: 12, padding: 12, border: "1px solid var(--line)", borderRadius: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+        <strong>Compare v{targetRevision} with:</strong>
+        <select value={compareWith} onChange={(e) => setCompareWith(Number(e.target.value))}>
+          {versions.filter((v) => v.revision !== targetRevision).map((v) => (
+            <option key={v.revision} value={v.revision}>v{v.revision}{v.revision === currentRevision ? " (live)" : ""}</option>
+          ))}
+        </select>
+        <Badge tone="neutral">v{Math.min(compareWith, targetRevision)} → v{Math.max(compareWith, targetRevision)}</Badge>
+      </div>
+      {loading ? <div className="muted">Loading diff…</div> : null}
+      {error ? <ErrorState message={error} /> : null}
+      {!loading && !error && changes.length === 0 ? <div className="muted">No differences found.</div> : null}
+      {changes.length > 0 && (
+        <ul style={{ margin: 0, paddingLeft: 20 }}>
+          {changes.map((c, i) => (
+            <li key={i} style={{ marginBottom: 4 }}>{c}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 
 
