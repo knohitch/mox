@@ -1,6 +1,9 @@
 # MOX — PHASE 06
 # COMPLETE SUPPORT ESCALATION + UNIFY PLATFORM STAFF ROLE AUTHORITY
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_06_SUPPORT_ESCALATION_STAFF_ROLES.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Preserve onboarding, DEV direct access and server-authoritative least-privilege staff isolation. Do not push.

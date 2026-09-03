@@ -589,6 +589,13 @@ export class DemoMoxApi implements MoxApi {
   async supportCustomers() { return this.adminUnavailable(); }
   async supportCustomer() { return this.adminUnavailable(); }
   async supportAddNote() { return this.adminUnavailable(); }
+  async supportListEscalations() { return []; }
+  async supportCreateEscalation(input: { orgId: string; severity: string; category: string; title: string; description: string }) {
+    return { id: `esc_${randomUUID().slice(0, 8)}`, orgId: input.orgId, createdByUserId: "u_staff", assignedUserId: null, severity: input.severity, category: input.category, title: input.title, description: input.description, status: "open", resolutionNote: null, resolvedAt: null, createdAt: now(), updatedAt: now() };
+  }
+  async supportUpdateEscalation(id: string, input: { status?: string; assignedUserId?: string; resolutionNote?: string }) {
+    return { id, orgId: "org_demo", createdByUserId: "u_staff", assignedUserId: input.assignedUserId ?? null, severity: "medium", category: "general", title: "Updated", description: "", status: input.status ?? "open", resolutionNote: input.resolutionNote ?? null, resolvedAt: null, createdAt: now(), updatedAt: now() };
+  }
 
   // ---- Roster ----
 

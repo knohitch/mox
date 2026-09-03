@@ -512,6 +512,19 @@ export function createMockMoxStore(
       return found ? createSupportCustomerDetailFixture(found.orgId) : supportCustomerDetail;
     },
     supportAddNote: noopPromise,
+    supportListEscalations: async () => [],
+    supportCreateEscalation: async (input) => ({
+      id: `esc_${Date.now()}`, orgId: input.orgId, createdByUserId: "u_staff", assignedUserId: null,
+      severity: input.severity, category: input.category, title: input.title, description: input.description,
+      status: "open", resolutionNote: null, resolvedAt: null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }),
+    supportUpdateEscalation: async (_id, input) => ({
+      id: _id, orgId: "org_acme_prod", createdByUserId: "u_staff", assignedUserId: input.assignedUserId ?? null,
+      severity: "medium", category: "general", title: "Updated", description: "",
+      status: input.status ?? "open", resolutionNote: input.resolutionNote ?? null, resolvedAt: null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }),
     computerSnapshot: async () =>
       isEmpty
         ? undefined

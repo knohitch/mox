@@ -72,6 +72,7 @@ import {
   verifiedWebhookEvents,
   workspaceInvitations,
   sshKeys,
+  supportEscalations,
 } from "@mox/database";
 import { sanitizeForPersistence } from "@mox/security";
 import {
@@ -1530,6 +1531,134 @@ export function buildApiRouter(deps: ApiDeps): Router {
       after: { note },
     });
     return { ok: true };
+  });
+
+  // ---- Support escalations (Phase 06) -----------------------------------------
+
+  router.get("/api/support/escalations", async (ctx) => {
+    const support = await requireSupportCapability(ctx, "support.escalate");
+    const orgIdFilter = ctx.query.get("orgId") as string | undefined;
+    let query = db()
+      .select({
+        id: supportEscalations.id,
+        orgId: supportEscalations.orgId,
+        orgName: organizations.displayName,
+        createdByUserId: supportEscalations.createdByUserId,
+        assignedUserId: supportEscalations.assignedUserId,
+        severity: supportEscalations.severity,
+        category: supportEscalations.category,
+        title: supportEscalations.title,
+        description: supportEscalations.description,
+        status: supportEscalations.status,
+        resolutionNote: supportEscalations.resolutionNote,
+        resolvedAt: supportEscalations.resolvedAt,
+        createdAt: supportEscalations.createdAt,
+        updatedAt: supportEscalations.updatedAt,
+      })
+      .from(supportEscalations)
+      .leftJoin(organizations, eq(supportEscalations.orgId, organizations.id))
+      .orderBy(desc(supportEscalations.createdAt))
+      .limit(200);
+    void support;
+    const rows = orgIdFilter
+      ? await db()
+          .select({
+            id: supportEscalations.id,
+            orgId: supportEscalations.orgId,
+            orgName: organizations.displayName,
+            createdByUserId: supportEscalations.createdByUserId,
+            assignedUserId: supportEscalations.assignedUserId,
+            severity: supportEscalations.severity,
+            category: supportEscalations.category,
+            title: supportEscalations.title,
+            description: supportEscalations.description,
+            status: supportEscalations.status,
+            resolutionNote: supportEscalations.resolutionNote,
+            resolvedAt: supportEscalations.resolvedAt,
+            createdAt: supportEscalations.createdAt,
+            updatedAt: supportEscalations.updatedAt,
+          })
+          .from(supportEscalations)
+          .leftJoin(organizations, eq(supportEscalations.orgId, organizations.id))
+          .where(eq(supportEscalations.orgId, orgIdFilter))
+          .orderBy(desc(supportEscalations.createdAt))
+          .limit(200)
+      : await query;
+    return rows.map((r) => ({
+      ...r,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
+      updatedAt: r.updatedAt instanceof Date ? r.updatedAt.toISOString() : r.updatedAt,
+      resolvedAt: r.resolvedAt instanceof Date ? r.resolvedAt.toISOString() : r.resolvedAt,
+    }));
+  });
+
+  router.post("/api/support/escalations", async (ctx) => {
+    const support = await requireSupportCapability(ctx, "support.escalate");
+    const body = ctx.body as { orgId?: string; severity?: string; category?: string; title?: string; description?: string } | undefined;
+    if (!body?.orgId) throw httpError("orgId is required", 400);
+    if (!body?.title?.trim()) throw httpError("title is required", 400);
+    const orgRows = await db().select().from(organizations).where(eq(organizations.id, body.orgId)).limit(1);
+    if (!orgRows[0]) throw httpError("organization not found", 404);
+    const inserted = await db()
+      .insert(supportEscalations)
+      .values({
+        orgId: body.orgId,
+        createdByUserId: support.userId,
+        severity: body.severity ?? "medium",
+        category: body.category ?? "general",
+        title: body.title.trim(),
+        description: body.description?.trim() ?? "",
+      })
+      .returning();
+    const row = inserted[0]!;
+    await appendSupportAudit(support, {
+      action: "support.escalation.created",
+      resourceType: "escalation",
+      resourceId: row.id,
+      targetOrgId: body.orgId,
+      after: { title: row.title, severity: row.severity, status: row.status },
+    });
+    return {
+      ...row,
+      orgName: orgRows[0]!.displayName,
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+      resolvedAt: null,
+    };
+  });
+
+  router.post("/api/support/escalations/:escalationId", async (ctx) => {
+    const support = await requireSupportCapability(ctx, "support.escalate");
+    const escalationId = ctx.params.escalationId!;
+    const body = ctx.body as { status?: string; assignedUserId?: string; resolutionNote?: string } | undefined;
+    const existing = (await db().select().from(supportEscalations).where(eq(supportEscalations.id, escalationId)).limit(1))[0];
+    if (!existing) throw httpError("escalation not found", 404);
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (body?.status) updates.status = body.status;
+    if (body?.assignedUserId !== undefined) updates.assignedUserId = body.assignedUserId;
+    if (body?.resolutionNote !== undefined) updates.resolutionNote = body.resolutionNote;
+    if (body?.status === "resolved" || body?.status === "closed") {
+      updates.resolvedAt = new Date();
+    }
+    const updated = await db()
+      .update(supportEscalations)
+      .set(updates)
+      .where(eq(supportEscalations.id, escalationId))
+      .returning();
+    const row = updated[0]!;
+    await appendSupportAudit(support, {
+      action: "support.escalation.updated",
+      resourceType: "escalation",
+      resourceId: escalationId,
+      targetOrgId: row.orgId,
+      after: { status: row.status, assignedUserId: row.assignedUserId },
+    });
+    return {
+      ...row,
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+      resolvedAt: row.resolvedAt instanceof Date ? row.resolvedAt.toISOString() : row.resolvedAt,
+    };
   });
 
   // ---- Agents ---------------------------------------------------------------

@@ -610,6 +610,23 @@ export interface SupportNotificationFailure {
   at: string;
 }
 
+export interface SupportEscalation {
+  id: string;
+  orgId: string;
+  orgName?: string;
+  createdByUserId: string;
+  assignedUserId: string | null;
+  severity: string;
+  category: string;
+  title: string;
+  description: string;
+  status: string;
+  resolutionNote: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ComputerSnapshot {
   sessionId: string;
   state: "pending" | "active" | "paused" | "closed";
@@ -1031,6 +1048,11 @@ export interface MoxApi {
   supportCustomers(query?: string): Promise<SupportCustomer[]>;
   supportCustomer(orgId: string): Promise<SupportCustomerDetail>;
   supportAddNote(orgId: string, note: string): Promise<void>;
+
+  // Support escalations (Phase 06)
+  supportListEscalations(orgId?: string): Promise<SupportEscalation[]>;
+  supportCreateEscalation(input: { orgId: string; severity: string; category: string; title: string; description: string }): Promise<SupportEscalation>;
+  supportUpdateEscalation(escalationId: string, input: { status?: string; assignedUserId?: string; resolutionNote?: string }): Promise<SupportEscalation>;
 
   // Computer (through the Mox Computer Gateway contractually)
   computerSnapshot(agentId: string): Promise<ComputerSnapshot | undefined>;

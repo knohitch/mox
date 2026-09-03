@@ -1,4 +1,4 @@
-import { Component, useEffect, useState } from "react";
+import { Component, useCallback, useEffect, useState } from "react";
 import type { ErrorInfo, FormEvent, ReactNode } from "react";
 import { MoxProvider, useMox } from "./api/store.js";
 import { resolveParams, useRoute } from "./router.js";
@@ -621,9 +621,7 @@ export function SupportConsole() {
                     </Card>
                   ) : null}
                   {section === "escalation" ? (
-                    <Card title="Escalation">
-                      <EmptyState>Escalation capability is present. No audited escalation action is configured in this domain yet.</EmptyState>
-                    </Card>
+                    <EscalationPanel orgId={selectedId} api={api} />
                   ) : null}
                 </>
               )}
@@ -632,6 +630,95 @@ export function SupportConsole() {
         </section>
       )}
     </div>
+  );
+}
+
+/** Support escalation panel (Phase 06): create, list, update escalations. */
+function EscalationPanel({ orgId, api }: { orgId: string | null; api: import("./api/types.js").MoxApi }) {
+  const [escalations, setEscalations] = useState<import("./api/types.js").SupportEscalation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+  const [form, setForm] = useState({ severity: "medium", category: "general", title: "", description: "" });
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    void api.supportListEscalations(orgId ?? undefined)
+      .then((e) => { setEscalations(e); setLoading(false); })
+      .catch((err) => { setError(err instanceof Error ? err.message : String(err)); setLoading(false); });
+  }, [api, orgId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const create = async () => {
+    if (!form.title.trim() || !orgId) return;
+    setBusy(true);
+    try {
+      await api.supportCreateEscalation({ orgId, ...form });
+      setForm({ severity: "medium", category: "general", title: "", description: "" });
+      setShowCreate(false);
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const updateStatus = async (id: string, status: string) => {
+    setBusy(true);
+    try {
+      await api.supportUpdateEscalation(id, { status });
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card title="Escalations" actions={orgId ? <button onClick={() => setShowCreate((v) => !v)}>{showCreate ? "Cancel" : "+ New Escalation"}</button> : undefined}>
+      {error ? <div className="admin-alert" role="alert">{error}</div> : null}
+      {showCreate && orgId && (
+        <div style={{ marginBottom: 12, display: "flex", flexDirection: "column", gap: 8, padding: 12, border: "1px solid var(--line)", borderRadius: 8 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <select value={form.severity} onChange={(e) => setForm((f) => ({ ...f, severity: e.target.value }))}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+            <select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
+              <option value="general">General</option>
+              <option value="billing">Billing</option>
+              <option value="technical">Technical</option>
+              <option value="security">Security</option>
+              <option value="compliance">Compliance</option>
+            </select>
+          </div>
+          <input value={form.title} placeholder="Escalation title" onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} />
+          <textarea value={form.description} placeholder="Description" onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} rows={3} />
+          <button disabled={busy || !form.title.trim()} onClick={() => void create()}>{busy ? "Creating…" : "Create Escalation"}</button>
+        </div>
+      )}
+      {loading ? <div className="muted">Loading…</div> : null}
+      {escalations.length === 0 && !loading ? <EmptyState>No escalations for this customer.</EmptyState> : null}
+      {escalations.map((esc) => (
+        <div key={esc.id} style={{ padding: 10, border: "1px solid var(--line)", borderRadius: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong>{esc.title}</strong>
+            <span className={`badge badge--${esc.status === "open" ? "warn" : esc.status === "resolved" || esc.status === "closed" ? "good" : "neutral"}`}>{esc.status}</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12.5 }}>
+            {esc.severity} · {esc.category} · {new Date(esc.createdAt).toLocaleDateString()}
+          </div>
+          {esc.description ? <p style={{ margin: "6px 0" }}>{esc.description}</p> : null}
+          {esc.resolutionNote ? <p className="muted" style={{ margin: "4px 0", fontSize: 12.5 }}>Resolution: {esc.resolutionNote}</p> : null}
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            {esc.status === "open" && <button disabled={busy} onClick={() => void updateStatus(esc.id, "acknowledged")}>Acknowledge</button>}
+            {esc.status === "acknowledged" && <button disabled={busy} onClick={() => void updateStatus(esc.id, "investigating")}>Investigating</button>}
+            {(esc.status === "open" || esc.status === "acknowledged" || esc.status === "investigating") && <button disabled={busy} onClick={() => void updateStatus(esc.id, "resolved")}>Resolve</button>}
+            {esc.status === "resolved" && <button disabled={busy} onClick={() => void updateStatus(esc.id, "closed")}>Close</button>}
+          </div>
+        </div>
+      ))}
+    </Card>
   );
 }
 

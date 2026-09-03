@@ -1126,6 +1126,19 @@ export class HttpMoxApi implements MoxApi {
     }).then(() => undefined);
   }
 
+  async supportListEscalations(orgId?: string): Promise<import("./types.js").SupportEscalation[]> {
+    const qs = orgId ? `?orgId=${encodeURIComponent(orgId)}` : "";
+    return this.call(`/api/support/escalations${qs}`);
+  }
+
+  async supportCreateEscalation(input: { orgId: string; severity: string; category: string; title: string; description: string }): Promise<import("./types.js").SupportEscalation> {
+    return this.call("/api/support/escalations", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  async supportUpdateEscalation(escalationId: string, input: { status?: string; assignedUserId?: string; resolutionNote?: string }): Promise<import("./types.js").SupportEscalation> {
+    return this.call(`/api/support/escalations/${encodeURIComponent(escalationId)}`, { method: "POST", body: JSON.stringify(input) });
+  }
+
   // ---- Computer + files/logs -----------------------------------------------------------
 
   async computerSnapshot(agentId: string): Promise<ComputerSnapshot | undefined> {

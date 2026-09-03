@@ -8,7 +8,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import { users } from "./identity-users.js";
+import { organizations, users } from "./identity-users.js";
 
 /**
  * Platform-staff identity surface (Prompt 01: authentication, auth URLs and
@@ -102,5 +102,42 @@ export const passwordResets = pgTable(
   (t) => [
     uniqueIndex("password_resets_token_hash_key").on(t.tokenHash),
     index("password_resets_user_idx").on(t.userId),
+  ],
+);
+
+/** Support escalation statuses. */
+export const escalationStatus = pgEnum("escalation_status", [
+  "open",
+  "acknowledged",
+  "investigating",
+  "resolved",
+  "closed",
+]);
+
+/** Durable support escalations (Phase 06). */
+export const supportEscalations = pgTable(
+  "support_escalations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    assignedUserId: uuid("assigned_user_id").references(() => users.id, { onDelete: "set null" }),
+    severity: text("severity").notNull().default("medium"),
+    category: text("category").notNull().default("general"),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    status: escalationStatus("status").notNull().default("open"),
+    resolutionNote: text("resolution_note"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("support_escalations_org_idx").on(t.orgId),
+    index("support_escalations_status_idx").on(t.status),
   ],
 );
