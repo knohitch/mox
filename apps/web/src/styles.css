@@ -2225,7 +2225,7 @@ small {
 /* KPI cards */
 .kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 20px; }
 .kpi {
-  background: var(--bg-rock); border: none; border-radius: var(--r-lg);
+  background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--r-lg);
   padding: 16px 18px; display: flex; flex-direction: column; gap: 4px;
 }
 .kpi-label { font-size: 12px; color: var(--text); font-weight: 600; text-transform: uppercase; letter-spacing: .6px; }
@@ -2234,7 +2234,7 @@ small {
 .kpi-value.tone-warn, .kpi-warn .kpi-value { color: var(--warn); }
 .kpi-value.tone-bad, .kpi-bad .kpi-value { color: var(--bad); }
 .kpi-value.tone-accent, .kpi-accent .kpi-value { color: var(--info); }
-.kpi-hint { font-size: 12.5px; color: var(--text); }
+.kpi-hint { font-size: 12.5px; color: var(--text-dim); }
 
 /* Table */
 .table-wrap { width: 100%; overflow-x: auto; border-radius: var(--r-md); }
@@ -3690,6 +3690,7 @@ input[type="checkbox"]:focus-visible {
 [data-theme="light"] .card,
 [data-theme="light"] .kpi,
 [data-theme="light"] .metric-card {
+  border-color: transparent;
   box-shadow: var(--shadow-md);
 }
 [data-theme="light"] .inbox { box-shadow: var(--shadow-lg); }
