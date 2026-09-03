@@ -7,31 +7,13 @@ import { Link, useRoute } from "../router.js";
 import { CUSTOMER_NAV } from "../concepts/nav.js";
 import { NotificationBell } from "../views/NotificationCenter.js";
 import { SidebarToggleIcon } from "../ui/primitives.js";
+import { MoxLogo } from "../ui/MoxLogo.js";
 
 /**
  * Customer app shell (Prompt 02): grouped sidebar + useful top bar using real
  * state. NEVER exposes staff surfaces — the nav IA is the customer-only
  * CUSTOMER_NAV, and the backend authorization remains mandatory regardless.
  */
-
-function Brand({ showText = true }: { showText?: boolean }) {
-  const { me } = useMox();
-  return (
-    <div className="brand" aria-label="Mox">
-      <div className="brand-logo-pill" aria-hidden>
-        <span className="brand-logo-glyph">M</span>
-      </div>
-      {showText ? (
-        <div className="brand-text-col">
-          <span className="brand-title">Mox <em>cloud</em></span>
-          <span className="brand-subtitle">
-            {me?.orgDisplayName ? `${me.orgDisplayName.toLowerCase().replace(/[^a-z0-9]/g, "")}.studio` : "mox.studio"}
-          </span>
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 function SidebarContent({
   active,
@@ -44,12 +26,18 @@ function SidebarContent({
   onToggleCollapse?: () => void;
   onNavigate: () => void;
 }) {
-  const { me, agents } = useMox();
-  const { navigate } = useRoute();
+  const { agents } = useMox();
 
   return (
     <>
       <div className="sidebar-head">
+        <div className="sidebar-brand">
+          {collapsed ? (
+            <MoxLogo variant="mark" className="mox-sidebar-logo" />
+          ) : (
+            <MoxLogo variant="full" className="mox-sidebar-logo" />
+          )}
+        </div>
         {onToggleCollapse ? (
           <button
             type="button"
@@ -60,11 +48,6 @@ function SidebarContent({
           >
             <SidebarToggleIcon collapsed={collapsed} size={16} />
           </button>
-        ) : null}
-        {!collapsed && me ? (
-          <div className="sidebar-org-wrap">
-            <OrgSwitcher me={me} />
-          </div>
         ) : null}
       </div>
       <nav className="nav-scroll" aria-label="Main navigation">
@@ -121,65 +104,15 @@ function SidebarContent({
     );
 }
 
-function OrgSwitcher({ me }: { me: MeResponse }) {
-  const { switchOrg } = useMox();
-  const [open, setOpen] = useState(false);
-  const memberships = me.orgs ?? [];
-  const multiple = memberships.length > 0;
-
-  if (!multiple) {
-    return (
-      <div className="org-swatch" title={me.orgDisplayName}>
-        <span className="org-avatar" aria-hidden>
-          {me.orgDisplayName.slice(0, 1).toUpperCase()}
-        </span>
-        <span className="org-name">{me.orgDisplayName}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="org-switcher">
-      <button
-        type="button"
-        className="org-swatch"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="org-avatar" aria-hidden>{me.orgDisplayName.slice(0, 1).toUpperCase()}</span>
-        <span className="org-name">{me.orgDisplayName}</span>
-        <span className="org-caret" aria-hidden>▾</span>
-      </button>
-      {open ? (
-        <ul className="org-menu" role="listbox" aria-label="Switch workspace">
-          {memberships.map((o) => (
-            <li key={o.orgId} role="option" aria-selected={o.orgId === me.orgId}>
-              <button
-                type="button"
-                className="org-option"
-                onClick={() => {
-                  setOpen(false);
-                  void switchOrg(o.orgId).catch(() => undefined);
-                }}
-              >
-                <span className="org-name">{o.displayName}</span>
-                <span className="muted">{o.role}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
 function ProfileMenu() {
-  const { me, signOut } = useMox();
+  const { me, signOut, switchOrg } = useMox();
   const { theme, setTheme } = useTheme();
   const { navigate } = useRoute();
   const [open, setOpen] = useState(false);
   if (!me) return null;
+
+  const memberships = me.orgs ?? [];
+  const multipleWorkspaces = memberships.length > 1;
 
   return (
     <div className="profile-menu-wrap">
@@ -201,6 +134,31 @@ function ProfileMenu() {
             <strong>{me.displayName}</strong>
             <span className="muted">{me.email}</span>
           </li>
+          {multipleWorkspaces ? (
+            <>
+              <li className="menu-divider" aria-hidden></li>
+              <li className="menu-workspace-section">
+                <span className="menu-label">Workspace</span>
+                <div className="menu-workspace-list">
+                  {memberships.map((o) => (
+                    <button
+                      key={o.orgId}
+                      type="button"
+                      className={`menu-item workspace-option${o.orgId === me.orgId ? " active" : ""}`}
+                      onClick={() => {
+                        setOpen(false);
+                        if (o.orgId !== me.orgId) void switchOrg(o.orgId).catch(() => undefined);
+                      }}
+                    >
+                      <span className="org-name">{o.displayName}</span>
+                      {o.orgId === me.orgId ? <span className="muted">current</span> : <span className="muted">{o.role}</span>}
+                    </button>
+                  ))}
+                </div>
+              </li>
+            </>
+          ) : null}
+          <li className="menu-divider" aria-hidden></li>
           <li>
             <button
               type="button"

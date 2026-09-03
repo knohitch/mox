@@ -205,21 +205,26 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
 
 /* Sidebar Header & Brand matching reference */
 .sidebar-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
   align-items: center;
-  justify-content: space-between;
-  padding: 2px 4px 14px;
   gap: 8px;
+  padding: 2px 4px 14px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 12px;
 }
-.sidebar-org-wrap {
-  flex: 1;
-  min-width: 0;
-  max-width: calc(100% - 44px);
+.sidebar-brand {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
   overflow: hidden;
+}
+.mox-sidebar-logo {
+  color: var(--text);
+  height: 28px;
+  width: auto;
+  display: block;
+  flex-shrink: 0;
 }
 .sidebar-head .brand {
   display: flex;
@@ -438,13 +443,18 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
 .app.sidebar-collapsed .sidebar-desktop .nav-item { justify-content: center; padding: 8px; }
 .app.sidebar-collapsed .sidebar-desktop .section-label, .app.sidebar-collapsed .sidebar-desktop .nav-label { display: none; }
 .app.sidebar-collapsed .sidebar-head {
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
+  grid-template-columns: 1fr;
+  justify-items: center;
   padding: 4px 0 14px;
   gap: 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 10px;
+}
+.app.sidebar-collapsed .sidebar-brand {
+  justify-content: center;
+}
+.app.sidebar-collapsed .mox-sidebar-logo {
+  height: 24px;
 }
 .app.sidebar-collapsed .sidebar-collapse-toggle-top {
   width: 28px;
@@ -3732,6 +3742,34 @@ input[type="checkbox"]:focus-visible {
   background: var(--surface-overlay);
   color: var(--text);
   box-shadow: var(--shadow-sm);
+}
+.menu-workspace-section {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.menu-workspace-section .menu-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+.menu-workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.workspace-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.workspace-option.active {
+  background: var(--bg-hover);
 }
 
 
