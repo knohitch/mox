@@ -216,8 +216,10 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
 .sidebar-org-wrap {
   flex: 1;
   min-width: 0;
+  max-width: calc(100% - 44px);
   display: flex;
   justify-content: flex-end;
+  overflow: hidden;
 }
 .sidebar-head .brand {
   display: flex;
@@ -653,7 +655,7 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  max-width: 130px;
 }
 .org-avatar, .profile-avatar {
   width: 22px;
