@@ -84,7 +84,7 @@ export function WorkspaceSetupCard() {
       : { key: "token", label: "API token", status: "optional", detail: "For CLI and programmatic access", action: { label: "Create a token", to: "/settings" } },
   ];
 
-  const remaining = items.filter((item) => item.status !== "done").length;
+  const remaining = items.filter((item) => item.status === "todo").length;
   if (remaining === 0) return null;
 
   return (
