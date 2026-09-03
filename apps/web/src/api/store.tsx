@@ -120,6 +120,8 @@ function failingApi(message: string): MoxApi {
     getEvents: fail,
     listRooms: fail,
     createRoom: fail,
+    getRoomMessages: fail,
+    sendRoomMessage: fail,
     listServers: fail,
     serverAction: fail,
     listDeployments: fail,

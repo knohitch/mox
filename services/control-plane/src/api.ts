@@ -54,6 +54,7 @@ import {
   providerAccounts,
   providerPayments,
   roomMembers,
+  roomThreads,
   serverOperations,
   serverOrders,
   sessionEvents,
@@ -2211,6 +2212,190 @@ export function buildApiRouter(deps: ApiDeps): Router {
       title: row.name,
       description: row.description,
       memberAgentIds: validatedMembers.map((a) => a.id),
+    };
+  });
+
+  // ---- Room shared conversations (Phase 03) -----------------------------------
+
+  /** Ensure a room has a backing thread; returns the thread id. */
+  async function ensureRoomThread(identity: SessionIdentity, roomId: string): Promise<string> {
+    // Check room exists and belongs to org
+    const roomRows = await db()
+      .select()
+      .from(agentRooms)
+      .where(and(eq(agentRooms.id, roomId), eq(agentRooms.orgId, identity.orgId)))
+      .limit(1);
+    if (!roomRows[0]) throw httpError("room not found or not owned by your org", 404);
+
+    // Check if thread already exists for this room
+    const existing = await db()
+      .select()
+      .from(roomThreads)
+      .where(and(eq(roomThreads.roomId, roomId), eq(roomThreads.orgId, identity.orgId)))
+      .limit(1);
+    if (existing[0]) return existing[0].threadId;
+
+    // Find first member agent to satisfy threads.agentId NOT NULL
+    const members = await db()
+      .select()
+      .from(roomMembers)
+      .where(and(eq(roomMembers.roomId, roomId), eq(roomMembers.orgId, identity.orgId)));
+    const firstAgent = members.find((m) => m.agentId);
+    if (!firstAgent?.agentId) {
+      throw httpError("room has no member agents — add at least one agent before chatting", 400, { code: "room_has_no_agents" });
+    }
+
+    // Create thread + link to room in a transaction
+    return db().transaction(async (tx) => {
+      const inserted = await tx
+        .insert(threads)
+        .values({
+          orgId: identity.orgId,
+          agentId: firstAgent.agentId,
+          title: `Room: ${roomRows[0]!.name}`,
+        })
+        .returning();
+      const thread = inserted[0]!;
+      await tx.insert(roomThreads).values({
+        orgId: identity.orgId,
+        roomId,
+        threadId: thread.id,
+      });
+      return thread.id;
+    });
+  }
+
+  /** List messages in a room's shared conversation. */
+  router.get("/api/rooms/:roomId/messages", async (ctx) => {
+    const identity = await requireAuth(ctx, "threads");
+    const roomId = ctx.params.roomId!;
+
+    // Verify room ownership
+    const roomRows = await db()
+      .select()
+      .from(agentRooms)
+      .where(and(eq(agentRooms.id, roomId), eq(agentRooms.orgId, identity.orgId)))
+      .limit(1);
+    if (!roomRows[0]) throw httpError("room not found", 404);
+
+    // Find room thread
+    const rt = await db()
+      .select()
+      .from(roomThreads)
+      .where(and(eq(roomThreads.roomId, roomId), eq(roomThreads.orgId, identity.orgId)))
+      .limit(1);
+    if (!rt[0]) return []; // No messages yet
+
+    const records = await services.messages.list(identity, rt[0].threadId);
+
+    // Resolve agent names for agent-authored messages
+    const agentIds = [...new Set(records.filter((m) => m.authorKind === "agent").map((m) => m.authorId))];
+    const agentNames = new Map<string, string>();
+    if (agentIds.length) {
+      const agentRows = await db()
+        .select({ id: agents.id, name: agents.name })
+        .from(agents)
+        .where(and(eq(agents.orgId, identity.orgId), inArray(agents.id, agentIds)));
+      for (const a of agentRows) agentNames.set(a.id, a.name);
+    }
+
+    return records.map((m) => ({
+      messageId: m.messageId,
+      roomId,
+      authorKind: m.authorKind,
+      authorId: m.authorId,
+      authorName: m.authorKind === "agent" ? (agentNames.get(m.authorId) ?? m.authorId) : m.authorKind === "user" ? "You" : "System",
+      text: m.text,
+      at: m.createdAt,
+    }));
+  });
+
+  /** Send a message to a room. Optionally target a specific agent via targetAgentId. */
+  router.post("/api/rooms/:roomId/messages", async (ctx) => {
+    const identity = await requireAuth(ctx, "threads");
+    await requireCommercialMutation(identity, "active_concurrent_agents", { min: 1 }, "member");
+    const roomId = ctx.params.roomId!;
+    const body = ctx.body as { text?: string; targetAgentId?: string } | undefined;
+    if (!body?.text?.trim()) throw httpError("text is required", 400);
+
+    // Verify room ownership
+    const roomRows = await db()
+      .select()
+      .from(agentRooms)
+      .where(and(eq(agentRooms.id, roomId), eq(agentRooms.orgId, identity.orgId)))
+      .limit(1);
+    if (!roomRows[0]) throw httpError("room not found", 404);
+
+    // Get room members
+    const members = await db()
+      .select()
+      .from(roomMembers)
+      .where(and(eq(roomMembers.roomId, roomId), eq(roomMembers.orgId, identity.orgId)));
+    const memberAgentIds = members.filter((m) => m.agentId).map((m) => m.agentId!);
+
+    // Validate target agent if specified
+    if (body.targetAgentId && !memberAgentIds.includes(body.targetAgentId)) {
+      throw httpError("target agent is not a member of this room", 400, { code: "agent_not_in_room" });
+    }
+
+    const threadId = await ensureRoomThread(identity, roomId);
+
+    // Append user message
+    const message = await services.messages.append(identity, {
+      messageId: crypto.randomUUID(),
+      threadId,
+      authorKind: "user",
+      authorId: identity.userId,
+      text: body.text.trim(),
+    });
+
+    // Update room lastMessage
+    await db()
+      .update(agentRooms)
+      .set({ lastMessage: body.text.trim().slice(0, 200), lastMessageAt: new Date(), updatedAt: new Date() })
+      .where(eq(agentRooms.id, roomId));
+
+    // Determine which agents to invoke
+    const targetIds = body.targetAgentId ? [body.targetAgentId] : memberAgentIds;
+
+    // Launch agent turns (bounded, sequential to prevent recursive loops)
+    const turns: Array<{ agentId: string; turn: unknown }> = [];
+    if (services.runtime) {
+      for (const agentId of targetIds.slice(0, 3)) { // Max 3 agents per message
+        const agentRows = await db()
+          .select()
+          .from(agents)
+          .where(and(eq(agents.orgId, identity.orgId), eq(agents.id, agentId)))
+          .limit(1);
+        const agent = agentRows[0];
+        if (!agent) continue;
+        try {
+          const turn = await services.runtime.launch({
+            definition: agent.definition as never,
+            orgId: identity.orgId,
+            agentId,
+            threadId,
+            userInput: body.text.trim(),
+            correlationId: crypto.randomUUID(),
+          });
+          turns.push({ agentId, turn });
+        } catch {
+          // Agent runtime failure does not block other agents
+          turns.push({ agentId, turn: { error: "agent runtime unavailable" } });
+        }
+      }
+    }
+
+    return {
+      message: {
+        messageId: message.messageId,
+        roomId,
+        authorKind: message.authorKind,
+        authorId: message.authorId,
+        text: message.text,
+        at: message.createdAt,
+      },
+      turns,
     };
   });
 

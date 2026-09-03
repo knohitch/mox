@@ -28,6 +28,16 @@ export interface ChatMessage {
   error?: string;
 }
 
+export interface RoomMessage {
+  messageId: string;
+  roomId: string;
+  authorKind: "user" | "agent" | "system";
+  authorId: string;
+  authorName: string;
+  text: string;
+  at: string;
+}
+
 export interface AgentSummary {
   /**
    * Server-authoritative agent identity (the control-plane agent row id).
@@ -876,6 +886,8 @@ export interface MoxApi {
   // Rooms
   listRooms(): Promise<AgentRoom[]>;
   createRoom(input: { title: string; memberAgentIds: string[] }): Promise<AgentRoom>;
+  getRoomMessages(roomId: string): Promise<RoomMessage[]>;
+  sendRoomMessage(roomId: string, text: string, targetAgentId?: string): Promise<{ message: RoomMessage; turns: Array<{ agentId: string; turn: unknown }> }>;
 
   // Infrastructure surfaces
   listServers(): Promise<ServerSummary[]>;

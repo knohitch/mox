@@ -508,6 +508,17 @@ export class HttpMoxApi implements MoxApi {
     return this.call("/api/rooms", { method: "POST", body: JSON.stringify(input) });
   }
 
+  async getRoomMessages(roomId: string): Promise<import("./types.js").RoomMessage[]> {
+    return this.call(`/api/rooms/${encodeURIComponent(roomId)}/messages`);
+  }
+
+  async sendRoomMessage(roomId: string, text: string, targetAgentId?: string): Promise<{ message: import("./types.js").RoomMessage; turns: Array<{ agentId: string; turn: unknown }> }> {
+    return this.call(`/api/rooms/${encodeURIComponent(roomId)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ text, targetAgentId }),
+    });
+  }
+
   // ---- Infrastructure surfaces ------------------------------------------------------
 
   async listServers(): Promise<ServerSummary[]> {

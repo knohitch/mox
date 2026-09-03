@@ -797,6 +797,53 @@ export class DemoMoxApi implements MoxApi {
     return room;
   }
 
+  async getRoomMessages(roomId: string): Promise<import("./types.js").RoomMessage[]> {
+    const msgs = this.s.messages.get(`room:${roomId}`) ?? [];
+    return msgs.map((m) => ({
+      messageId: m.messageId,
+      roomId,
+      authorKind: m.role === "user" ? "user" as const : m.role === "agent" ? "agent" as const : "system" as const,
+      authorId: m.authorId,
+      authorName: m.role === "user" ? "You" : m.role === "agent" ? (this.s.agents.get(m.authorId)?.definition.identity.displayName ?? m.authorId) : "System",
+      text: m.text,
+      at: m.at,
+    }));
+  }
+
+  async sendRoomMessage(roomId: string, text: string, targetAgentId?: string): Promise<{ message: import("./types.js").RoomMessage; turns: Array<{ agentId: string; turn: unknown }> }> {
+    const room = this.s.rooms.get(roomId);
+    if (!room) throw new Error(`room ${roomId} not found`);
+    const msgId = `rm_${randomUUID()}`;
+    const at = now();
+    const userMsg: ChatMessage = { messageId: msgId, threadId: `room:${roomId}`, authorId: "u_you", role: "user", text, at };
+    const msgs = this.s.messages.get(`room:${roomId}`) ?? [];
+    msgs.push(userMsg);
+    this.s.messages.set(`room:${roomId}`, msgs);
+
+    // Simulate agent responses for targeted agents
+    const targetIds = targetAgentId ? [targetAgentId] : room.memberAgentIds.slice(0, 2);
+    const turns = targetIds.map((agentId) => {
+      const agent = this.s.agents.get(agentId);
+      const agentMsgId = `rm_${randomUUID()}`;
+      const agentMsg: ChatMessage = { messageId: agentMsgId, threadId: `room:${roomId}`, authorId: agentId, role: "agent", text: `[${agent?.definition.identity.displayName ?? agentId}] Received your message in ${room.title}.`, at: now() };
+      msgs.push(agentMsg);
+      return { agentId, turn: { status: "completed" } };
+    });
+
+    return {
+      message: {
+        messageId: msgId,
+        roomId,
+        authorKind: "user",
+        authorId: "u_you",
+        authorName: "You",
+        text,
+        at,
+      },
+      turns,
+    };
+  }
+
   // ---- Infrastructure ----
 
   async listServers(): Promise<ServerSummary[]> {

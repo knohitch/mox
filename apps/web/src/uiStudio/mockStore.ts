@@ -296,6 +296,11 @@ export function createMockMoxStore(
       memberUserIds: [],
       createdAt: new Date().toISOString(),
     }),
+    getRoomMessages: async () => [],
+    sendRoomMessage: async (_roomId, text) => ({
+      message: { messageId: `rm_${Date.now()}`, roomId: _roomId, authorKind: "user" as const, authorId: "u_you", authorName: "You", text, at: new Date().toISOString() },
+      turns: [],
+    }),
     listServers: async () => customerServers,
     serverAction: async () => ({ ok: true }),
     orderServer: async (input) => {

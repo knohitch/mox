@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTheme } from "../ui/theme.js";
 import { useMox } from "../api/store.js";
 import { useAgentRooms, useModelConnections, useEntitlements } from "../api/store.js";
@@ -23,6 +23,7 @@ import type {
   NotificationPreferencesView,
   PlanOption,
   ProvisionOptions,
+  RoomMessage,
   ServerSummary,
   StoredBackupSummary,
   SubscriptionView,
@@ -774,20 +775,103 @@ export function RoomsView() {
         </Panel>
         <Panel title={selected ? `#${selected.title}` : "Room details"}>
           {!selected ? (
-            <EmptyState>Select a room to see its members.</EmptyState>
+            <EmptyState>Select a room to see its members and conversation.</EmptyState>
           ) : (
-            <>
-              <div className="muted" style={{ marginBottom: 8 }}>
-                Members: {selected.memberAgentIds.length ? selected.memberAgentIds.map((id) => agentName(mox.agents, id)).join(", ") : "none"} + humans.
-              </div>
-              {/* Phase 02 §G: no canonical room-scoped thread authority exists —
-                  threads are per-agent, so a shared room thread is NOT fabricated
-                  with a synthetic `room:<id>` id (that would call a guaranteed
-                  failing endpoint). Render an honest unavailable state instead. */}
-              <EmptyState>Shared room chat is not yet available on this deployment.</EmptyState>
-            </>
+            <RoomChatPanel room={selected} agents={mox.agents} api={mox.api} />
           )}
         </Panel>
+      </div>
+    </div>
+  );
+}
+
+/** Room chat panel with message history, agent targeting, and composer. */
+function RoomChatPanel({ room, agents, api }: { room: AgentRoom; agents: AgentSummary[]; api: import("../api/types.js").MoxApi }) {
+  const [messages, setMessages] = useState<RoomMessage[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState("");
+  const [targetAgentId, setTargetAgentId] = useState<string | undefined>(undefined);
+  const [sending, setSending] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const load = useCallback(() => {
+    void api
+      .getRoomMessages(room.roomId)
+      .then((m) => { setMessages(m); setLoading(false); })
+      .catch((e: unknown) => { setError(e instanceof Error ? e.message : String(e)); setLoading(false); });
+  }, [api, room.roomId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [messages]);
+
+  const send = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      const result = await api.sendRoomMessage(room.roomId, trimmed, targetAgentId);
+      setMessages((prev) => [...prev, result.message]);
+      setText("");
+      // Reload to get agent responses
+      await api.getRoomMessages(room.roomId).then(setMessages);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const memberAgents = agents.filter((a) => (room.memberAgentIds as string[]).includes(a.agentId));
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: 420 }}>
+      <div className="muted" style={{ marginBottom: 6, fontSize: 12.5 }}>
+        Members: {memberAgents.map((a) => a.definition.identity.displayName).join(", ") || "none"} + humans
+      </div>
+      {error ? <ErrorState message={error} /> : null}
+      {loading ? <LoadingState /> : null}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+        {messages.length === 0 && !loading ? (
+          <div className="muted" style={{ textAlign: "center", padding: 20 }}>No messages yet. Start the conversation below.</div>
+        ) : null}
+        {messages.map((m) => (
+          <div key={m.messageId} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <Badge tone={m.authorKind === "user" ? "accent" : m.authorKind === "agent" ? "good" : "neutral"}>
+              {m.authorName}
+            </Badge>
+            <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.text}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <select
+          value={targetAgentId ?? ""}
+          onChange={(e) => setTargetAgentId(e.target.value || undefined)}
+          aria-label="Target agent"
+          style={{ minWidth: 120 }}
+        >
+          <option value="">All agents</option>
+          {memberAgents.map((a) => (
+            <option key={a.agentId} value={a.agentId}>{a.definition.identity.displayName}</option>
+          ))}
+        </select>
+        <input
+          value={text}
+          placeholder="Type a message…"
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }}
+          disabled={sending}
+          style={{ flex: 1 }}
+          aria-label="Message"
+        />
+        <Button kind="primary" disabled={sending || !text.trim()} onClick={() => void send()}>
+          {sending ? "Sending…" : "Send"}
+        </Button>
       </div>
     </div>
   );

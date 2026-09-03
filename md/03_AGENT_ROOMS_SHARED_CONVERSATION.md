@@ -1,6 +1,9 @@
 # MOX — PHASE 03
 # REAL DURABLE AGENT ROOMS SHARED CONVERSATIONS
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_03_AGENT_ROOMS_SHARED_CHAT.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Preserve onboarding, DEV direct access, auth/security, entitlements and working Agent chat. Do not push.

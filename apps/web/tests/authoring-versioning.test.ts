@@ -242,3 +242,72 @@ describe("Phase 02 §I — deployments (web demo seam)", () => {
     expect(redeployed.state).toBe("desired");
   });
 });
+
+describe("Phase 03 — room shared conversations (web demo seam)", () => {
+  it("room messages persist and reload across getRoomMessages", async () => {
+    const api = new DemoMoxApi();
+    const rooms = await api.listRooms();
+    const room = rooms[0]!;
+    const before = await api.getRoomMessages(room.roomId);
+    expect(before.length).toBe(0);
+
+    await api.sendRoomMessage(room.roomId, "Hello agents");
+    const after = await api.getRoomMessages(room.roomId);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0]!.text).toBe("Hello agents");
+    expect(after[0]!.authorKind).toBe("user");
+  });
+
+  it("targeting a specific agent only invokes that agent", async () => {
+    const api = new DemoMoxApi();
+    const rooms = await api.listRooms();
+    const room = rooms[0]!;
+    const targetAgentId = room.memberAgentIds[0]!;
+
+    await api.sendRoomMessage(room.roomId, "Targeted message", targetAgentId as string);
+    const msgs = await api.getRoomMessages(room.roomId);
+    const agentMsgs = msgs.filter((m) => m.authorKind === "agent");
+    expect(agentMsgs.length).toBe(1);
+  });
+
+  it("targeting all agents invokes multiple agents", async () => {
+    const api = new DemoMoxApi();
+    const rooms = await api.listRooms();
+    const room = rooms[0]!;
+
+    await api.sendRoomMessage(room.roomId, "Broadcast message");
+    const msgs = await api.getRoomMessages(room.roomId);
+    const agentMsgs = msgs.filter((m) => m.authorKind === "agent");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("agent messages include agent display name", async () => {
+    const api = new DemoMoxApi();
+    const rooms = await api.listRooms();
+    const room = rooms[0]!;
+
+    await api.sendRoomMessage(room.roomId, "Name check");
+    const msgs = await api.getRoomMessages(room.roomId);
+    const agentMsg = msgs.find((m) => m.authorKind === "agent");
+    expect(agentMsg).toBeDefined();
+    expect(agentMsg!.authorName).not.toBe(agentMsg!.authorId); // Should be display name, not raw id
+  });
+
+  it("sendRoomMessage returns the user message and turns", async () => {
+    const api = new DemoMoxApi();
+    const rooms = await api.listRooms();
+    const room = rooms[0]!;
+
+    const result = await api.sendRoomMessage(room.roomId, "Return check");
+    expect(result.message.text).toBe("Return check");
+    expect(result.message.authorKind).toBe("user");
+    expect(Array.isArray(result.turns)).toBe(true);
+  });
+
+  it("createRoom initializes empty message history", async () => {
+    const api = new DemoMoxApi();
+    const created = await api.createRoom({ title: "New room", memberAgentIds: [] });
+    const msgs = await api.getRoomMessages(created.roomId);
+    expect(msgs.length).toBe(0);
+  });
+});

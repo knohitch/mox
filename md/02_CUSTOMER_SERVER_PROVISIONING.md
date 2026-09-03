@@ -1,6 +1,9 @@
 # MOX — PHASE 02
 # COMPLETE CUSTOMER SERVER PROVISIONING
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_02_CUSTOMER_SERVER_PROVISIONING.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Re-scan current code. Preserve onboarding, DEV direct access, security boundaries and existing working server lifecycle. Do not push.
