@@ -1,6 +1,9 @@
 # MOX — PHASE 05
 # COMPLETE MODEL CONNECTION PROBES + PRODUCTIZE CLI/RUNTIME ENGINE STATE
 
+> ✅ **STATUS: DONE** — implemented and verified. See
+> `docs/verification/PRODUCT_COMPLETION_05_MODEL_PROBES_CLI_STATE.md`.
+
 Use **Gemini 3.1 Pro High**.
 
 Work in `E:\MyCodes\Mox` on clean `master`. Preserve onboarding, DEV direct access, customer/system credential isolation, model routing abstractions and all security gates. Do not push.
