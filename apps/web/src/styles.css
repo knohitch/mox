@@ -1282,9 +1282,9 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
 
 /* Cards & grids */
 .card {
-  background: var(--bg-rock); border: none;
+  background: var(--surface-card); border: 1px solid var(--border-default);
   border-radius: var(--r-lg); padding: 16px; margin-bottom: 16px; color: var(--text);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm);
 }
 .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; color: var(--text); }
 .card-head h3 { margin: 0; font-size: 14.5px; color: var(--text); }
