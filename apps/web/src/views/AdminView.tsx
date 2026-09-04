@@ -184,42 +184,6 @@ function StaffPanel({ staff, onRefresh }: { staff?: AdminStaff; onRefresh: () =>
   return (
     <>
       <div className="grid grid-2">
-        <Card title={`Platform staff (${staff.members.length})`}>
-          <DataTable
-            head={[
-              { key: "displayName", label: "Display name" },
-              { key: "email", label: "Email" },
-              { key: "role", label: "Role" },
-              { key: "surface", label: "Surface" },
-              { key: "status", label: "Status", render: (member) => member.revokedAt ? "revoked" : member.enabled ? "active" : "disabled" },
-              { key: "createdAt", label: "Granted at" },
-              { key: "actions", label: "", render: (member) => (
-                <div className="admin-actions-cell">
-                  {!member.revokedAt && !member.enabled && (
-                    <button type="button" onClick={() => void confirmAnd(async () => {
-                      await api.adminStaffAction(member.userId, member.role, "enable");
-                      await onRefresh();
-                    })}>Enable</button>
-                  )}
-                  {!member.revokedAt && member.enabled && (
-                    <>
-                      <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
-                        await api.adminStaffAction(member.userId, member.role, "disable", "admin_console");
-                        await onRefresh();
-                      })}>Disable</button>
-                      <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
-                        await api.adminStaffAction(member.userId, member.role, "revoke", "admin_console");
-                        await onRefresh();
-                      })}>Revoke</button>
-                    </>
-                  )}
-                </div>
-              )}
-            ]}
-            rows={staff.members}
-          />
-        </Card>
-        <div>
           <Card title="Invite staff">
             <form className="admin-form" onSubmit={(event) => {
               event.preventDefault();
@@ -281,8 +245,42 @@ function StaffPanel({ staff, onRefresh }: { staff?: AdminStaff; onRefresh: () =>
               rows={staff.invites}
             />
           </Card>
-        </div>
       </div>
+      <Card title={`Platform staff (${staff.members.length})`}>
+        <DataTable
+          head={[
+            { key: "displayName", label: "Display name" },
+            { key: "email", label: "Email" },
+            { key: "role", label: "Role" },
+            { key: "surface", label: "Surface" },
+            { key: "status", label: "Status", render: (member) => member.revokedAt ? "revoked" : member.enabled ? "active" : "disabled" },
+            { key: "createdAt", label: "Granted at" },
+            { key: "actions", label: "", render: (member) => (
+              <div className="admin-actions-cell">
+                {!member.revokedAt && !member.enabled && (
+                  <button type="button" onClick={() => void confirmAnd(async () => {
+                    await api.adminStaffAction(member.userId, member.role, "enable");
+                    await onRefresh();
+                  })}>Enable</button>
+                )}
+                {!member.revokedAt && member.enabled && (
+                  <>
+                    <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                      await api.adminStaffAction(member.userId, member.role, "disable", "admin_console");
+                      await onRefresh();
+                    })}>Disable</button>
+                    <button type="button" className="danger" onClick={() => void confirmAnd(async () => {
+                      await api.adminStaffAction(member.userId, member.role, "revoke", "admin_console");
+                      await onRefresh();
+                    })}>Revoke</button>
+                  </>
+                )}
+              </div>
+            )}
+          ]}
+          rows={staff.members}
+        />
+      </Card>
     </>
   );
 }
