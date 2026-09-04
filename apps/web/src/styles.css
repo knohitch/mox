@@ -2122,11 +2122,20 @@ small {
 .admin-form,
 .admin-inline-form {
   display: grid;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 .admin-form {
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 600px) {
+  .admin-form {
+    grid-template-columns: 1fr;
+  }
+}
+.admin-form textarea,
+.admin-form .admin-action-row {
+  grid-column: 1 / -1;
 }
 .admin-inline-form {
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
