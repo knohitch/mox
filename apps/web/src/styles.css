@@ -2149,9 +2149,9 @@ small {
 .admin-inline-form select {
   width: 100%;
   min-width: 0;
-  background: var(--bg);
+  background: var(--surface-input);
   color: var(--text);
-  border: none;
+  border: 1px solid var(--border-strong);
   border-radius: 7px;
   padding: 8px 9px;
   font: inherit;
