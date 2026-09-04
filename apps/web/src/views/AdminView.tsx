@@ -17,7 +17,7 @@ import type {
   AdminStaff,
   CreatedStaffInvite,
 } from "../api/types.js";
-import { Badge, Card, DataTable, EmptyState } from "../ui/primitives.js";
+import { Badge, Card, DataTable, EmptyState, MetricCard, PageHeader } from "../ui/primitives.js";
 import { ADMIN_TAB_LABEL, canManageStaff, hasSurfaceCapability, isAdminTabKey, visibleAdminTabs } from "../concepts/staffNav.js";
 import { useStaffSection } from "../shell/staffSection.js";
 import { formatDisplayValue, humanizeLabel } from "../domain/labels.js";
@@ -59,17 +59,8 @@ function renderAdminCell(column: string, val: unknown): ReactNode {
 
 function AdminDataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: Array<Record<string, unknown>>; empty?: string }) {
   const head = columns.map((c) => ({ key: c, label: humanizeLabel(c), render: (row: any) => renderAdminCell(c, row[c]) }));
+  if (rows.length === 0) return <div className="admin-empty-state">{empty}</div>;
   return <DataTable head={head} rows={rows} empty={empty} />;
-}
-
-function Metric({ label, value, detail }: { label: string; value: ReactNode; detail?: ReactNode }) {
-  return (
-    <div className="admin-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      {detail ? <small>{detail}</small> : null}
-    </div>
-  );
 }
 
 export function AdminView() {
@@ -168,16 +159,15 @@ export function AdminView() {
 
   return (
     <div className="admin-console">
-      <header className="admin-page-head">
-        <div>
-          <div className="admin-kicker">Mox Admin</div>
-          <h1>{ADMIN_TAB_LABEL[tab]}</h1>
-          <p className="page-sub">Platform operations for the role on this session. Secrets stay off this surface.</p>
-        </div>
-        <button type="button" onClick={() => void refresh()} disabled={busy}>
-          {busy ? "Refreshing" : "Refresh"}
-        </button>
-      </header>
+      <PageHeader
+        title={ADMIN_TAB_LABEL[tab]}
+        subtitle="Platform operations for this session. Secrets stay off this surface."
+        actions={
+          <button type="button" onClick={() => void refresh()} disabled={busy}>
+            {busy ? "Refreshing" : "Refresh"}
+          </button>
+        }
+      />
       {status ? <div className="admin-alert" role="alert">{status}</div> : null}
       {content}
     </div>
@@ -315,13 +305,13 @@ function DashboardPanel({ overview }: { overview?: AdminOverview }) {
         <div className="needs-chip"><strong>{m.providerIncidents}</strong><span>Provider incidents</span></div>
       </div>
       <div className="admin-metrics">
-        <Metric label="Customers" value={m.customers} />
-        <Metric label="Active subscriptions" value={m.activeSubscriptions} />
-        <Metric label="Active servers" value={m.activeServers} />
-        <Metric label="Runtime health" value={`${healthyAgents}/${m.runtimeAgentHealth.total}`} detail="agents healthy" />
-        <Metric label="Notification jobs" value={m.notifications} />
-        <Metric label="Abuse reports" value={m.abuse} />
-        {m.costMargin ? <Metric label="Recorded revenue" value={money(Number(m.costMargin.revenueMinor), m.costMargin.currency)} /> : null}
+        <MetricCard label="Customers" value={m.customers} />
+        <MetricCard label="Active subscriptions" value={m.activeSubscriptions} />
+        <MetricCard label="Active servers" value={m.activeServers} />
+        <MetricCard label="Runtime health" value={`${healthyAgents}/${m.runtimeAgentHealth.total}`} detail="agents healthy" />
+        <MetricCard label="Notification jobs" value={m.notifications} />
+        <MetricCard label="Abuse reports" value={m.abuse} />
+        {m.costMargin ? <MetricCard label="Recorded revenue" value={money(Number(m.costMargin.revenueMinor), m.costMargin.currency)} /> : null}
       </div>
       <div className="grid grid-3">
         <Card title="Provider incidents">

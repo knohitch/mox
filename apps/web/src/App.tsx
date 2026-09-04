@@ -6,7 +6,9 @@ import { CustomerShell } from "./shell/CustomerShell.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
 import { ForgotPasswordPage, LoginPage, ResetPasswordPage, SignupPage } from "./views/AuthPages.js";
-import { Badge, BrandLogo, Card, EmptyState, SidebarToggleIcon } from "./ui/primitives.js";
+import { Badge, Card, DataTable, EmptyState, MetricCard, SidebarToggleIcon } from "./ui/primitives.js";
+import { MoxLogo } from "./ui/MoxLogo.js";
+import { useTheme } from "./ui/theme.js";
 import { ToastProvider } from "./ui/toast.js";
 import { CommandPalette } from "./ui/CommandPalette.js";
 import { UiStudioView } from "./views/UiStudioView.js";
@@ -247,6 +249,82 @@ export function StaffShell({
   );
 }
 
+function StaffProfileMenu() {
+  const { staffSession, staffSignOut } = useMox();
+  const { theme, setTheme } = useTheme();
+  const [open, setOpen] = useState(false);
+  if (!staffSession) return null;
+
+  return (
+    <div className="profile-menu-wrap">
+      <button
+        type="button"
+        className="profile-btn"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Account menu"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="profile-avatar" aria-hidden>{(staffSession.displayName || staffSession.email || '?').slice(0, 1).toUpperCase()}</span>
+        <span className="profile-name">{staffSession.displayName || staffSession.email}</span>
+        <span className="org-caret" aria-hidden>▾</span>
+      </button>
+      {open ? (
+        <ul className="profile-menu" role="menu" aria-label="Account">
+          <li className="profile-info">
+            <strong>{staffSession.displayName || staffSession.email}</strong>
+            <span className="muted">{staffSession.email}</span>
+            <span className="muted" style={{textTransform: 'capitalize'}}>{(staffSession.role || '').replace('_', ' ')}</span>
+          </li>
+          <li className="menu-divider" aria-hidden></li>
+          <li className="menu-theme">
+            <span className="menu-label">Appearance</span>
+            <div className="menu-theme-actions">
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'system' ? 'active' : ''}`}
+                title="System Theme"
+                onClick={() => setTheme('system')}
+              >
+                Auto
+              </button>
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'light' ? 'active' : ''}`}
+                title="Light Theme"
+                onClick={() => setTheme('light')}
+              >
+                Light
+              </button>
+              <button
+                type="button"
+                className={`theme-btn ${theme === 'dark' ? 'active' : ''}`}
+                title="Dark Theme"
+                onClick={() => setTheme('dark')}
+              >
+                Dark
+              </button>
+            </div>
+          </li>
+          <li className="menu-divider" aria-hidden></li>
+          <li>
+            <button
+              type="button"
+              className="menu-item danger"
+              onClick={() => {
+                setOpen(false);
+                void staffSignOut();
+              }}
+            >
+              Sign out
+            </button>
+          </li>
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 function StaffShellFrame({
   surface,
   children,
@@ -294,7 +372,14 @@ function StaffShellFrame({
   const sidebarBody = (
     <>
       <div className="sidebar-head">
-        <BrandLogo surface={surface} collapsed={collapsed} />
+        <div className="sidebar-brand">
+          <MoxLogo variant={collapsed ? "mark" : "full"} className="mox-sidebar-logo" />
+          {!collapsed && (
+            <small className={`brand-surface-badge brand-${surface}`}>
+              {surface === "admin" ? "Admin" : "Support"}
+            </small>
+          )}
+        </div>
         <button
           type="button"
           className="sidebar-collapse-toggle-top"
@@ -375,14 +460,7 @@ function StaffShellFrame({
             </span>
           </div>
           <div className="topbar-right">
-            {staffSession ? (
-              <div className="staff-topbar-info">
-                <span className="staff-name">{staffSession.displayName}</span>
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void staffSignOut()}>
-                  Sign out
-                </button>
-              </div>
-            ) : null}
+            {staffSession ? <StaffProfileMenu /> : null}
           </div>
         </header>
         <main className="main">{children}</main>
@@ -554,48 +632,48 @@ export function SupportConsole() {
               ) : (
                 <>
                   <Card title={selected.displayName} actions={<Badge tone="accent">{selected.slug}</Badge>}>
-                    <DataTable
+                    <SupportDataTable
                       columns={["orgId", "workspaceName", "createdAt"]}
                       rows={[{ orgId: selected.orgId, workspaceName: selected.workspaceName, createdAt: selected.createdAt }]}
                     />
                     <div className="admin-metrics">
-                      <Metric label="Subscription alerts" value={selected.diagnostics.subscriptionsRequiringAttention} />
-                      <Metric label="Server errors" value={selected.diagnostics.serversInError} />
-                      <Metric label="Node stale/missing" value={selected.diagnostics.nodesStaleOrMissing} />
-                      <Metric label="Agent alerts" value={selected.diagnostics.agentsDegraded} />
-                      <Metric label="Connections" value={`${selected.diagnostics.connectionsConfigured}/${selected.diagnostics.connectionsTotal}`} />
-                      <Metric label="Notification failures" value={selected.diagnostics.recentNotificationFailures} />
+                      <MetricCard label="Subscription alerts" value={selected.diagnostics.subscriptionsRequiringAttention} />
+                      <MetricCard label="Server errors" value={selected.diagnostics.serversInError} />
+                      <MetricCard label="Node stale/missing" value={selected.diagnostics.nodesStaleOrMissing} />
+                      <MetricCard label="Agent alerts" value={selected.diagnostics.agentsDegraded} />
+                      <MetricCard label="Connections" value={`${selected.diagnostics.connectionsConfigured}/${selected.diagnostics.connectionsTotal}`} />
+                      <MetricCard label="Notification failures" value={selected.diagnostics.recentNotificationFailures} />
                     </div>
                   </Card>
                   {section === "lookup" ? (
                     <>
                       <Card title="Users">
-                        <DataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
+                        <SupportDataTable columns={["email", "displayName", "role", "disabledAt"]} rows={selected.users} />
                       </Card>
                       <Card title="Subscriptions (lifecycle only)">
-                        <DataTable columns={["subscriptionId", "state", "plan", "tier", "currentPeriodEnd", "failedRenewals", "suspensionReason", "reconciliationRequired"]} rows={selected.subscriptions} />
+                        <SupportDataTable columns={["subscriptionId", "state", "plan", "tier", "currentPeriodEnd", "failedRenewals", "suspensionReason", "reconciliationRequired"]} rows={selected.subscriptions} />
                       </Card>
                     </>
                   ) : null}
                   {section === "diagnostics" ? (
                     <>
                       <Card title="Servers (safe lifecycle state)">
-                        <DataTable columns={["id", "computeClassCode", "state", "providerName", "regionCode", "lifecycle", "nodeHealth", "createdAt"]} rows={selected.servers} />
+                        <SupportDataTable columns={["id", "computeClassCode", "state", "providerName", "regionCode", "lifecycle", "nodeHealth", "createdAt"]} rows={selected.servers} />
                       </Card>
                       <Card title="Agents and deployments">
-                        <DataTable columns={["agentId", "displayName", "status", "currentVersion", "deploymentKind", "deploymentState", "desiredRevision", "runtimeHealth"]} rows={selected.agents} />
+                        <SupportDataTable columns={["agentId", "displayName", "status", "currentVersion", "deploymentKind", "deploymentState", "desiredRevision", "runtimeHealth"]} rows={selected.agents} />
                       </Card>
                       <Card title="Model connections">
-                        <DataTable columns={["providerId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.models} />
+                        <SupportDataTable columns={["providerId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.models} />
                       </Card>
                       <Card title="Integration connections">
-                        <DataTable columns={["integrationId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.integrations} />
+                        <SupportDataTable columns={["integrationId", "displayName", "kind", "status", "credentialConfigured", "connected"]} rows={selected.connections.integrations} />
                       </Card>
                       <Card title="Channel connections">
-                        <DataTable columns={["channelId", "displayName", "kind", "status", "credentialConfigured", "connected", "boundAgentName"]} rows={selected.connections.channels} />
+                        <SupportDataTable columns={["channelId", "displayName", "kind", "status", "credentialConfigured", "connected", "boundAgentName"]} rows={selected.connections.channels} />
                       </Card>
                       <Card title="Recent notification failures">
-                        <DataTable columns={["at", "eventType", "route", "deliveryState", "attempts", "errorSummary"]} rows={selected.notificationFailures} />
+                        <SupportDataTable columns={["at", "eventType", "route", "deliveryState", "attempts", "errorSummary"]} rows={selected.notificationFailures} />
                       </Card>
                     </>
                   ) : null}
@@ -612,12 +690,12 @@ export function SupportConsole() {
                           </div>
                         </form>
                       ) : null}
-                      <DataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
+                      <SupportDataTable columns={["at", "actorId", "note"]} rows={selected.supportNotes} />
                     </Card>
                   ) : null}
                   {section === "activity" ? (
                     <Card title="Recent activity (safe audit metadata)">
-                      <DataTable columns={["at", "action", "actorType", "resourceType"]} rows={selected.recentActivity} />
+                      <SupportDataTable columns={["at", "action", "actorType", "resourceType"]} rows={selected.recentActivity} />
                     </Card>
                   ) : null}
                   {section === "escalation" ? (
@@ -722,16 +800,6 @@ function EscalationPanel({ orgId, api }: { orgId: string | null; api: import("./
   );
 }
 
-/** Minimal column/row table reused by the staff surfaces. */
-function Metric({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="admin-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 function staffCellTone(value: string): "neutral" | "good" | "warn" | "bad" | "accent" {
   const v = value.toLowerCase();
   if (["active", "running", "healthy", "completed", "current", "enabled", "available", "provisioned", "online", "live"].some((x) => v.includes(x))) return "good";
@@ -740,7 +808,7 @@ function staffCellTone(value: string): "neutral" | "good" | "warn" | "bad" | "ac
   return "neutral";
 }
 
-function DataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: object[]; empty?: string }) {
+function SupportDataTable({ columns, rows, empty = "No records." }: { columns: string[]; rows: any[]; empty?: string }) {
   const asString = (value: unknown): string => {
     if (value === null || value === undefined) return "";
     if (value instanceof Date) return value.toISOString();
@@ -758,21 +826,12 @@ function DataTable({ columns, rows, empty = "No records." }: { columns: string[]
     }
     return str;
   };
-  if (rows.length === 0) return <EmptyState>{empty}</EmptyState>;
-  return (
-    <div className="admin-table-wrap">
-      <table className="admin-table">
-        <thead><tr>{columns.map((column) => <th key={column}>{humanizeLabel(column)}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={asString((row as Record<string, unknown>).id ?? (row as Record<string, unknown>).orgId ?? (row as Record<string, unknown>).subscriptionId ?? (row as Record<string, unknown>).agentId ?? index)}>
-              {columns.map((column) => <td key={column}>{renderCell(column, (row as Record<string, unknown>)[column])}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+  const head = columns.map(c => ({
+    key: c,
+    label: humanizeLabel(c),
+    render: (row: any) => renderCell(c, row[c])
+  }));
+  return <DataTable head={head} rows={rows} empty={empty} />;
 }
 
 function StaffSurface({ kind }: { kind: "admin" | "support" }) {

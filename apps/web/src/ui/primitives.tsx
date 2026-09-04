@@ -143,31 +143,6 @@ export function SurfaceTag({ surface }: { surface: "customer" | "admin" | "suppo
   );
 }
 
-/** Unified Brand Lockup with surface indicator. */
-export function BrandLogo({
-  surface = "customer",
-  collapsed = false,
-}: {
-  surface?: "customer" | "admin" | "support";
-  collapsed?: boolean;
-}) {
-  return (
-    <div className="brand" aria-label={`Mox ${surface !== "customer" ? surface : ""}`}>
-      {collapsed ? (
-        <span>M</span>
-      ) : (
-        <>
-          M<span>ox</span>
-          {surface !== "customer" ? (
-            <small className={`brand-surface-badge brand-${surface}`}>
-              {surface === "admin" ? "Admin" : "Support"}
-            </small>
-          ) : null}
-        </>
-      )}
-    </div>
-  );
-}
 
 /** Collapsible sidebar toggle icon. */
 export function SidebarToggleIcon({ collapsed = false, size = 18 }: { collapsed?: boolean; size?: number }) {
