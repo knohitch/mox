@@ -1,5 +1,6 @@
 :root,
 [data-theme="dark"] {
+  color-scheme: dark;
   /* Premium Charcoal Surface System */
   --bg: #09090b;
   --bg-sidebar: #09090b;
@@ -74,7 +75,7 @@
   --border-terminal: #2a2c31;
   --text-terminal: #fafafa;
 
-  --sidebar-w: 248px;
+  --sidebar-w: 280px;
   --sidebar-w-collapsed: 64px;
   --topbar-h: 56px;
   --content-max: 1440px;
@@ -94,9 +95,17 @@
   --mox-tag-bg: #18181b;
   --mox-tag-border: #27272a;
 
+  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.28);
+
+  --nav-item-bg: #101014;
+  --nav-item-border: rgba(255, 255, 255, 0.035);
+  --nav-item-hover-bg: #17171c;
+  --nav-item-hover-border: rgba(255, 255, 255, 0.06);
 }
 
 [data-theme="light"] {
+  color-scheme: light;
   --bg: #FFFFFF;
   --bg-sidebar: #FFFFFF;
   --bg-rail: #FFFFFF;
@@ -157,6 +166,14 @@
   --auth-divider: rgba(15, 23, 42, 0.12);
   --mox-tag-bg: #e2e8f0;
   --mox-tag-border: #cbd5e1;
+
+  --scrollbar-thumb: rgba(15, 23, 42, 0.16);
+  --scrollbar-thumb-hover: rgba(15, 23, 42, 0.28);
+
+  --nav-item-bg: #f8fafc;
+  --nav-item-border: rgba(15, 23, 42, 0.035);
+  --nav-item-hover-bg: #f1f5f9;
+  --nav-item-hover-border: rgba(15, 23, 42, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -192,16 +209,12 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
   box-shadow: var(--shadow-sm);
   display: flex; flex-direction: column;
   padding: 16px 12px 12px;
-  overflow-y: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  overflow: hidden;
   transition: min-width 160ms ease, width 160ms ease;
   color: var(--text);
   height: calc(100vh - 32px);
 }
-.sidebar::-webkit-scrollbar {
-  display: none;
-}
+
 
 /* Sidebar Header & Brand matching reference */
 .sidebar-head {
@@ -301,31 +314,60 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
   color: var(--text);
 }
 
-.nav-scroll { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.nav-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.nav-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.nav-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.nav-scroll::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+}
+.nav-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
 .nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
 .sidebar .nav-item {
   display: flex; align-items: center; gap: 12px;
   padding: 8px 12px; border-radius: var(--r-md);
   color: var(--text-dim); font-weight: 500; font-size: 14.5px; white-space: nowrap;
-  border: 1px solid transparent;
-  background: transparent;
+  border: 1px solid var(--nav-item-border);
+  background: var(--nav-item-bg);
   width: 100%;
+  min-height: 38px;
   text-align: left;
   font-family: inherit;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
 }
-.sidebar .nav-item:hover { background: var(--bg-hover); color: var(--text); text-decoration: none; }
+.sidebar .nav-item:hover {
+  background: var(--nav-item-hover-bg);
+  border-color: var(--nav-item-hover-border);
+  color: var(--text);
+  text-decoration: none;
+}
 .sidebar .nav-item.active {
-  background: var(--bg-active);
+  background: var(--surface-active);
   color: var(--text);
   font-weight: 600;
-  border-color: var(--line-soft);
+  border-color: var(--border-strong);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
 }
 .sidebar .nav-item.active .nav-icon { color: var(--text); }
 .nav-icon { width: 18px; text-align: center; color: var(--text-dim); flex-shrink: 0; font-size: 15px; }
-.nav-label { flex: 1; }
+.nav-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .nav-badge {
   font-size: 10.5px;
   font-weight: 700;
@@ -334,6 +376,7 @@ h3 { font-size: 14.5px; margin: 0; letter-spacing: -0.01em; color: var(--text); 
   background: var(--line);
   color: var(--text);
   line-height: 1.4;
+  flex-shrink: 0;
 }
 .sidebar .section-label {
   font-size: 12.5px;
@@ -3676,6 +3719,10 @@ select:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--focus-ring);
+}
+select option {
+  background: var(--surface-input);
+  color: var(--text);
 }
 input::placeholder, textarea::placeholder { color: var(--text-faint); }
 input:disabled, textarea:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
