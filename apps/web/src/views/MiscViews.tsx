@@ -1063,7 +1063,7 @@ function ProvisionServerModal({ onClose, onDone }: { onClose: () => void; onDone
       footer={
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           {step !== "class" && <Button onClick={back} disabled={busy}>Back</Button>}
-          <Button onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button kind="danger" onClick={onClose} disabled={busy}>Cancel</Button>
           {step !== "confirm" ? (
             <Button kind="primary" disabled={!canNext} onClick={next}>Next</Button>
           ) : (
@@ -1185,7 +1185,7 @@ function ProvisionServerModal({ onClose, onDone }: { onClose: () => void; onDone
                 <Button size="sm" kind="primary" disabled={busy || !newSshLabel.trim() || !newSshPublicKey.trim()} onClick={() => void addKey()}>
                   {busy ? "Adding…" : "Add key"}
                 </Button>
-                <Button size="sm" onClick={() => { setAddingKey(false); setNewSshLabel(""); setNewSshPublicKey(""); }}>Cancel</Button>
+                <Button kind="danger" size="sm" onClick={() => { setAddingKey(false); setNewSshLabel(""); setNewSshPublicKey(""); }}>Cancel</Button>
               </div>
             </div>
           ) : opts.sshKeys.length > 0 ? (
@@ -1432,7 +1432,7 @@ function DeployModal({ onClose, onDone }: { onClose: () => void; onDone: () => P
         <>
           <span className="muted" style={{ fontSize: 12.5 }}>Deploying sets the desired state; the orchestrator reconciles it.</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <Button onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button kind="danger" onClick={onClose} disabled={busy}>Cancel</Button>
             <Button kind="primary" disabled={busy || typeof revision !== "number" || !agentId} onClick={() => void deploy()}>
               {busy ? "Deploying…" : "Deploy"}
             </Button>
@@ -1621,7 +1621,7 @@ export function ModelsView() {
           title={mode === "connect" ? `Connect ${active.displayName}` : `Rotate API key — ${active.displayName}`}
           footer={
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-              <Button onClick={() => { setActive(null); setMode(null); }} disabled={busy}>Cancel</Button>
+              <Button kind="danger" onClick={() => { setActive(null); setMode(null); }} disabled={busy}>Cancel</Button>
               <Button kind="primary" disabled={busy || (mode === "rotate" && !apiKey.trim())} onClick={() => void submit()}>
                 {busy ? "Working…" : mode === "connect" ? "Connect" : "Rotate"}
               </Button>
@@ -1823,7 +1823,7 @@ export function IntegrationsView() {
             <>
               <span className="muted" style={{ fontSize: 12.5 }}>Secrets are encrypted at rest and never shown back to you.</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <Button onClick={() => { setConnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
+                <Button kind="danger" onClick={() => { setConnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
                 <Button kind="primary" onClick={() => void connect()} disabled={busy}>{busy ? "Working…" : "Connect"}</Button>
               </div>
             </>
@@ -1985,7 +1985,7 @@ export function ChannelsView() {
             <>
               <span className="muted" style={{ fontSize: 12.5 }}>Secrets are encrypted at rest and never shown back to you.</span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <Button onClick={() => { setConnectFor(null); setAgentId(""); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
+                <Button kind="danger" onClick={() => { setConnectFor(null); setAgentId(""); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
                 <Button kind="primary" disabled={busy || !agentId} onClick={() => void connect()}>{busy ? "Working…" : "Connect"}</Button>
               </div>
             </>
@@ -2017,7 +2017,7 @@ export function ChannelsView() {
           title={`Reconnect ${reconnectFor.displayName}`}
           footer={
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-              <Button onClick={() => { setReconnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
+              <Button kind="danger" onClick={() => { setReconnectFor(null); setSecretsInput({}); }} disabled={busy}>Cancel</Button>
               <Button kind="primary" onClick={() => void reconnect(reconnectFor)} disabled={busy}>{busy ? "Working…" : "Reconnect"}</Button>
             </div>
           }
@@ -2300,7 +2300,7 @@ export function BillingView() {
           footer={
             !createdSession ? (
               <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-                <Button onClick={() => { setCheckoutFor(null); setCreatedSession(null); }} disabled={busy}>Cancel</Button>
+                <Button kind="danger" onClick={() => { setCheckoutFor(null); setCreatedSession(null); }} disabled={busy}>Cancel</Button>
                 <Button kind="primary" disabled={busy || !providerName || !regionCode} onClick={() => void startCheckout()}>
                   {busy ? "Starting…" : "Start checkout"}
                 </Button>

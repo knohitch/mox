@@ -1446,7 +1446,8 @@ button {
   transition: all var(--anim-fast);
 }
 button:hover { background: var(--surface-hover); border-color: var(--border-strong); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+button.primary, button[type="submit"] { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+button.primary:hover, button[type="submit"]:hover { background: var(--accent-ink); border-color: var(--accent-ink); }
 button.danger { background: rgba(242,112,112,.15); border-color: var(--bad); color: var(--bad); }
 button:disabled { opacity: .45; cursor: not-allowed; }
 

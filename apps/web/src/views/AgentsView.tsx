@@ -583,7 +583,7 @@ function NewAgentModal({ onDone, onClose }: { onDone: (agentId?: string) => void
         <>
           <span className="muted" style={{ fontSize: 12.5 }}>Drafts are compiled but stay unpublished until you click Publish.</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-            <Button onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button kind="danger" onClick={onClose} disabled={busy}>Cancel</Button>
             <Button kind="primary" onClick={() => void submit()} disabled={busy}>{busy ? "Saving…" : "Create draft"}</Button>
           </div>
         </>
