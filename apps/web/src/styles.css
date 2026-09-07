@@ -2607,6 +2607,11 @@ small {
   color: var(--text);
 }
 
+.card .metric-card,
+.panel .metric-card {
+  background: var(--surface-recessed);
+}
+
 .metric-card:hover {
   background: var(--surface-hover);
   border-color: var(--border-strong);
