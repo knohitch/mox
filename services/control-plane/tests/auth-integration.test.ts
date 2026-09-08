@@ -172,17 +172,75 @@ describe.skipIf(!databaseUrl)("control plane auth + security over PostgreSQL", (
     expect((me.body as { email: string }).email).toBe(email);
   });
 
-  it("CLI engine catalogue fails honestly instead of returning a silent empty list", async () => {
+  it("CLI engine catalogue returns truthful derived model engine status", async () => {
     const signup = await call("/api/auth/signup", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email: `${randomUUID()}@mox.test`, password: "cli-engine-password" }),
     });
     expect(signup.status).toBe(200);
+    const cookie = cookieFrom(signup.headers);
 
-    const engines = await call("/api/cli-engines", { headers: { cookie: cookieFrom(signup.headers) } });
-    expect(engines.status).toBe(501);
-    expect(engines.body).toMatchObject({ code: "not_configured" });
+    const engines = await call("/api/cli-engines", { headers: { cookie } });
+    expect(engines.status).toBe(200);
+    const body = engines.body as {
+      engines: Array<{
+        engineId: string;
+        status: string;
+        providerId: string;
+        connectionStatus: string;
+      }>;
+      note: string;
+    };
+    expect(Array.isArray(body.engines)).toBe(true);
+    expect(body.engines).toHaveLength(0);
+    expect(body.note).toContain("derived from model connections");
+    expect(body.note).toContain("/api/models");
+
+    // Ensure no secrets or credentials leaked
+    const rawBody = JSON.stringify(body);
+    expect(rawBody).not.toMatch(/secret|credential|password|token/i);
+
+    // Verify with a real configured connection
+    const me = await call("/api/me", { headers: { cookie } });
+    const meBody = me.body as { orgId: string };
+    const { credentialRefs, modelProviders, modelConnections } = await import("@mox/database");
+
+    const [cred] = await server.services.db.insert(credentialRefs).values({
+      orgId: meBody.orgId,
+      scope: "model",
+      externalId: `cli:model:${randomUUID()}`,
+      label: "cli-engine-cred",
+    }).returning({ id: credentialRefs.id });
+
+    const [provider] = await server.services.db.insert(modelProviders).values({
+      orgId: meBody.orgId,
+      slug: `cli-provider-${randomUUID().slice(0, 6)}`,
+      displayName: "CLI Test Provider",
+      kind: "api",
+      capabilities: { authMethods: ["api_key"] },
+    }).returning({ id: modelProviders.id });
+
+    await server.services.db.insert(modelConnections).values({
+      orgId: meBody.orgId,
+      providerId: provider!.id,
+      credentialRefId: cred!.id,
+      connectionStatus: "configured",
+    });
+
+    const enginesWithConn = await call("/api/cli-engines", { headers: { cookie } });
+    expect(enginesWithConn.status).toBe(200);
+    const configuredBody = enginesWithConn.body as typeof body;
+    expect(configuredBody.engines).toHaveLength(1);
+    expect(configuredBody.engines[0]).toEqual({
+      engineId: provider!.id,
+      status: "available",
+      providerId: provider!.id,
+      connectionStatus: "configured",
+    });
+    // Ensure no secrets/credentials or unexposed fields
+    expect(configuredBody.engines[0]).not.toHaveProperty("credentialRefId");
+    expect(configuredBody.engines[0]).not.toHaveProperty("secret");
   });
 
   it("logout revokes the session; expired sessions fail (§I)", async () => {

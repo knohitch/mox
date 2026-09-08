@@ -414,12 +414,6 @@ function StaffShellFrame({
         ))}
       </nav>
       <div className="sidebar-footer">
-        {staffSession && !collapsed ? (
-          <div className="staff-identity muted">
-            <strong>{staffSession.displayName}</strong>
-            <small>{staffSession.email}</small>
-          </div>
-        ) : null}
         <button type="button" className="nav-item signout" onClick={() => void staffSignOut()}>
           <span className="nav-icon" aria-hidden>⎋</span>
           <span className="nav-label">{collapsed ? "" : "Sign out"}</span>
