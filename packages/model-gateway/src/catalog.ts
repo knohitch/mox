@@ -80,7 +80,7 @@ export interface CatalogDefaults {
   transport?: import("./providers.js").HttpTransport;
 }
 
-/** providerId → binding for every Prompt 07 API provider. */
+/** providerId → binding for every supported API provider. */
 export function defaultProviderCatalog(defaults: CatalogDefaults = {}): Map<string, AdapterBinding> {
   const b = defaults.baseUrls ?? {};
   const catalog = new Map<string, AdapterBinding>();
@@ -89,15 +89,18 @@ export function defaultProviderCatalog(defaults: CatalogDefaults = {}): Map<stri
   catalog.set("p_anthropic", anthropicBinding());
   catalog.set("p_google", geminiBinding());
 
-  // OpenAI-compatible family (one adapter, per-vendor endpoints):
+  // OpenAI-compatible family (one adapter, per-vendor endpoints). Every URL can
+  // be overridden so regional/workspace-specific endpoints remain supported.
   const compatible: Array<[string, string]> = [
     ["p_openai", "https://api.openai.com/v1"],
     ["p_openrouter", "https://openrouter.ai/api/v1"],
     ["p_deepseek", "https://api.deepseek.com/v1"],
-    ["p_qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1"],
+    ["p_qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"],
     ["p_glm", "https://api.z.ai/api/paas/v4"],
-    ["p_kimi", "https://api.moonshot.cn/v1"],
-    ["p_mimo", "https://api.open.xiaomi.com/v1"],
+    ["p_kimi", "https://api.moonshot.ai/v1"],
+    ["p_mimo", "https://api.xiaomimimo.com/v1"],
+    ["p_minimax", "https://api.minimax.io/v1"],
+    ["p_meta", "https://api.meta.ai/v1"],
     ["p_nvidia", "https://integrate.api.nvidia.com/v1"],
     ["p_xai", "https://api.x.ai/v1"],
     ["p_generic", "https://generic.example.invalid/v1"], // explicit placeholder until configured
