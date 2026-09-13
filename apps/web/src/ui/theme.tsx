@@ -1,4 +1,4 @@
-﻿import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 export type ThemePreference = "light" | "dark" | "system";
 export type ResolvedTheme = "light" | "dark";
@@ -15,10 +15,22 @@ const ThemeContext = createContext<ThemeContextValue>({
   setTheme: () => {},
 });
 
+function getStorage(): Storage | null {
+  try {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage;
+    }
+    if (typeof localStorage !== "undefined") {
+      return localStorage;
+    }
+  } catch (e) {}
+  return null;
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<ThemePreference>(() => {
     try {
-      const saved = (window as any)['local' + 'Storage']?.getItem("mox.theme");
+      const saved = getStorage()?.getItem("mox.theme");
       if (saved === "light" || saved === "dark" || saved === "system") {
         return saved;
       }
@@ -60,7 +72,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   const setTheme = (newTheme: ThemePreference) => {
     try {
-      (window as any)['local' + 'Storage']?.setItem("mox.theme", newTheme);
+      getStorage()?.setItem("mox.theme", newTheme);
     } catch (e) {}
     setThemeState(newTheme);
   };

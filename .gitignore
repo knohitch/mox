@@ -1,6 +1,7 @@
 node_modules
 dist
 *.tsbuildinfo
+test-results/
 
 # Imported upstream source trees (vendored; not part of the Mox git history
 # until the consolidation plan decides otherwise — see

@@ -1,4 +1,4 @@
-﻿import React from 'react';
+import React from 'react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { ThemeProvider, useTheme } from '../src/ui/theme.js';
@@ -29,7 +29,7 @@ describe('Theme resolution and persistence', () => {
 
   const TestConsumer = () => {
     const { theme, resolvedTheme } = useTheme();
-    return <div data-testid="theme-info">{theme}:{resolvedTheme}</div>;
+    return <div data-testid="theme-info">{`${theme}:${resolvedTheme}`}</div>;
   };
 
   it('no stored preference defaults to system', () => {

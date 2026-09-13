@@ -89,7 +89,7 @@ function commitStudioState(next: StudioUrlState, mode: "push" | "replace"): void
 export function UiStudioView() {
   const [studio, setStudio] = useState<StudioUrlState>(readStudioLocation);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const { setTheme } = useTheme();
+  const { theme: activeTheme, resolvedTheme, setTheme } = useTheme();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -244,7 +244,7 @@ export function UiStudioView() {
   };
 
   return (
-    <div className="ui-studio-shell">
+    <div className="ui-studio-shell" data-theme={resolvedTheme}>
       <header className="ui-studio-bar">
         <div className="ui-studio-brand">
           <span className="ui-studio-glyph" aria-hidden>⬡</span>
@@ -313,8 +313,12 @@ export function UiStudioView() {
             <span className="ui-studio-group-label">Theme</span>
             <select
               className="ui-studio-select"
-              value={studio.theme || "system"}
-              onChange={(e) => updateStudio({ ...studio, theme: e.target.value })}
+              value={studio.theme || activeTheme || "system"}
+              onChange={(e) => {
+                const nextTheme = e.target.value as "light" | "dark" | "system";
+                updateStudio({ ...studio, theme: nextTheme });
+                setTheme(nextTheme);
+              }}
               aria-label="Studio Theme"
             >
               <option value="system">System</option>
