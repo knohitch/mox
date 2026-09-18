@@ -1,14 +1,15 @@
+import { isPublicDemoEnabled } from "../config.js";
+
 /**
  * UI Studio security controls (Part C / Critical Security Requirements).
  *
  * The UI Studio is strictly for visual component development.
  * It is impossible to use as a production auth bypass because:
- * 1. Available ONLY when import.meta.env.DEV === true (dead-code eliminated in prod).
- * 2. Explicit opt-in required via VITE_MOX_UI_STUDIO=1.
- * 3. Local browser host only: localhost, 127.0.0.1, [::1].
- * 4. Production build: route resolves as normal Not Found.
- * 5. Uses deterministic, isolated in-memory fixture factories.
- * 6. Never touches cookies, storage tokens, backend APIs, or PostgreSQL.
+ * Local development requires import.meta.env.DEV + VITE_MOX_UI_STUDIO=1 +
+ * localhost. A hosted showcase can also explicitly enable MOX_PUBLIC_DEMO=1
+ * through the web runtime config; that path still uses only deterministic,
+ * isolated in-memory fixtures and never touches cookies, backend APIs, or
+ * PostgreSQL.
  */
 
 export const ALLOWED_LOCAL_HOSTNAMES = new Set([
@@ -42,11 +43,13 @@ export interface UiStudioContext {
   isDev?: boolean;
   envStudioFlag?: string | boolean;
   hostname?: string;
+  publicDemo?: boolean;
 }
 
 export function isUiStudioAllowed(ctx?: UiStudioContext | string): boolean {
   let isDev = isUiStudioDevMode();
   let optIn = isUiStudioOptedIn();
+  let publicDemo = isPublicDemoEnabled();
   let host = typeof window !== "undefined" ? window.location.hostname : "localhost";
 
   if (typeof ctx === "string") {
@@ -57,8 +60,10 @@ export function isUiStudioAllowed(ctx?: UiStudioContext | string): boolean {
       optIn = ctx.envStudioFlag === "1" || ctx.envStudioFlag === "true" || ctx.envStudioFlag === true;
     }
     if (ctx.hostname !== undefined) host = ctx.hostname;
+    if (ctx.publicDemo !== undefined) publicDemo = ctx.publicDemo;
   }
 
+  if (publicDemo) return true;
   if (!isDev) return false;
   if (!optIn) return false;
   if (!isLocalHostname(host)) return false;
