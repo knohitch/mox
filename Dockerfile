@@ -1,6 +1,10 @@
 # CapRover / production image: control plane + built web SPA on one process.
 # Build context is the repository root (captain-definition dockerfilePath).
-FROM node:24-bookworm-slim AS build
+#
+# Pull Node from Amazon ECR Public, not Docker Hub. CapRover BuildKit
+# sessions commonly die on registry-1.docker.io metadata ("no active
+# session" / "context deadline exceeded").
+FROM public.ecr.aws/docker/library/node:24-bookworm-slim AS build
 
 WORKDIR /app
 RUN corepack enable
@@ -20,7 +24,7 @@ ENV VITE_MOX_API_URL=$VITE_MOX_API_URL
 RUN pnpm install --frozen-lockfile
 RUN pnpm --filter @mox/control-plane... --filter @mox/web... run build
 
-FROM node:24-bookworm-slim AS runtime
+FROM public.ecr.aws/docker/library/node:24-bookworm-slim AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production

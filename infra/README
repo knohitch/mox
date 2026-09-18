@@ -9,7 +9,9 @@ all external side effects must be idempotent and audited via
 
 CapRover git deploys look for `captain-definition` at the **repository
 root** (not under `infra/`). That file points at `./Dockerfile`, which
-builds the web SPA and runs the control plane on port 80.
+builds the web SPA and runs the control plane on port 80. The Node base
+image is pulled from Amazon ECR Public (`public.ecr.aws/docker/library/node`)
+so CapRover BuildKit does not have to reach Docker Hub.
 
 Required app environment variables:
 

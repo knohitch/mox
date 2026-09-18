@@ -13,4 +13,15 @@ describe("CapRover captain-definition", () => {
     expect(definition.schemaVersion).toBe(2);
     expect(definition.dockerfilePath).toBe("./Dockerfile");
   });
+
+  it("does not pull the Node base image from Docker Hub", () => {
+    const dockerfile = readFileSync(join(ROOT, "Dockerfile"), "utf8");
+    const fromLines = dockerfile.split(/\r?\n/).filter((line) => /^FROM\s+/i.test(line));
+    expect(fromLines.length).toBeGreaterThan(0);
+    for (const line of fromLines) {
+      expect(line).toMatch(/public\.ecr\.aws\/docker\/library\/node:/);
+      expect(line).not.toMatch(/^(FROM\s+)(docker\.io\/)?library\/node:/i);
+      expect(line).not.toMatch(/^(FROM\s+)node:/i);
+    }
+  });
 });
