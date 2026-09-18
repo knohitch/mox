@@ -146,3 +146,47 @@ describe("UI Studio onboarding preview URL state (dev-only)", () => {
     expect(parseStudioSearch("/__ui?surface=customer&page=/onboarding&onboarding=bogus").onboarding).toBeUndefined();
   });
 });
+
+describe("direct demo onboarding access in development", () => {
+  it("allows direct access to /onboarding without auth in dev mode", async () => {
+    const React = await import("react");
+    const { renderToString } = await import("react-dom/server");
+    const { vi } = await import("vitest");
+    vi.stubGlobal("window", {
+      location: { pathname: "/onboarding", search: "", origin: "http://localhost:5173" },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => {},
+      history: { pushState: () => {}, replaceState: () => {} },
+    });
+    const { CustomerSurface } = await import("../src/App.js");
+    const { MoxPreviewProvider } = await import("../src/api/store.js");
+    const { NavAdapterProvider } = await import("../src/router.js");
+    const { createMockMoxStore } = await import("../src/uiStudio/mockStore.js");
+
+    // Unauthenticated store (needsAuth = true) simulating someone typing /onboarding directly into URL
+    const store = createMockMoxStore("customer", "populated", "superadmin");
+    const unauthStore = { ...store, needsAuth: true, onboarding: null };
+
+    const adapter = {
+      path: "/onboarding",
+      navigate: () => {},
+      hrefFor: (to: string) => to,
+    };
+
+    const html = renderToString(
+      React.createElement(NavAdapterProvider, {
+        adapter,
+        children: React.createElement(MoxPreviewProvider, {
+          value: unauthStore,
+          children: React.createElement(CustomerSurface),
+        }),
+      }),
+    );
+
+    // In dev mode, it must render the onboarding wizard directly rather than redirecting to login
+    expect(html).toContain("onboarding-shell");
+    expect(html).toContain("onboarding-card");
+  });
+});
+

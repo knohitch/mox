@@ -1612,7 +1612,7 @@ small {
 
 .mastra-form-wrapper {
   width: 100%;
-  max-width: 390px;
+  max-width: 440px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1698,14 +1698,14 @@ small {
   font-family: 'Inter', sans-serif;
   font-size: 13px;
   font-weight: 600;
-  color: #e4e4e7;
+  color: var(--text);
   letter-spacing: -0.01em;
 }
 
 .mastra-hint {
   font-family: 'Inter', sans-serif;
   font-size: 11.5px;
-  color: #a1a1aa;
+  color: var(--text-dim);
   font-weight: 500;
 }
 
@@ -1714,65 +1714,120 @@ small {
   display: flex;
   align-items: center;
   width: 100%;
-  background: #14151d;
-  border: none;
+  background: var(--surface-input);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 0 14px;
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   box-sizing: border-box;
   height: 46px;
-  box-shadow: inset 0 1px 0 var(--line-soft), var(--shadow-sm);
+  box-shadow: var(--shadow-sm);
 }
 
 .mastra-input-box:hover {
   border-color: var(--auth-input-border-focus);
-  background: #1a1b24;
 }
 
 .mastra-input-box:focus-within {
-  border-color: var(--text);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--auth-input-ring);
+}
+
+[data-theme="light"] .mastra-input-box {
+  background: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+}
+
+[data-theme="light"] .mastra-input-box:hover {
+  border-color: #94a3b8 !important;
+  background: #ffffff !important;
+}
+
+[data-theme="light"] .mastra-input-box:focus-within {
+  border-color: var(--accent) !important;
+  background: #ffffff !important;
+  box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.18) !important;
+}
+
+[data-theme="dark"] .mastra-input-box {
+  background: #14151d;
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 var(--line-soft), var(--shadow-sm);
+}
+
+[data-theme="dark"] .mastra-input-box:hover {
+  background: #1a1b24;
+  border-color: var(--auth-input-border-focus);
+}
+
+[data-theme="dark"] .mastra-input-box:focus-within {
   background: #1c1d28;
-  box-shadow:
-    0 0 0 2px var(--auth-input-ring),
-    0 0 20px var(--line-hover);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--auth-input-ring), 0 0 20px var(--line-hover);
 }
 
 .mastra-input-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #94a3b8;
+  color: var(--text-dim);
   margin-right: 12px;
   flex-shrink: 0;
   transition: color 0.2s ease;
 }
 
 .mastra-input-box:focus-within .mastra-input-icon {
-  color: var(--text);
+  color: var(--accent);
 }
 
+/* Ensure inner inputs never inherit background, border, or padding from global styles */
+.mastra-input-box input.mastra-input,
+.mastra-input-box input[type="text"],
+.mastra-input-box input[type="email"],
+.mastra-input-box input[type="password"],
 .mastra-input {
   flex: 1;
-  background: transparent;
-  border: none;
-  outline: none;
-  padding: 10px 0;
-  color: var(--text);
+  background: transparent !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  padding: 10px 0 !important;
+  color: var(--text) !important;
   font-size: 14.5px;
   font-family: 'Inter', sans-serif;
   font-weight: 500;
   width: 100%;
 }
 
+.mastra-input-box input:-webkit-autofill,
+.mastra-input-box input:-webkit-autofill:hover, 
+.mastra-input-box input:-webkit-autofill:focus, 
+.mastra-input-box input:-webkit-autofill:active,
+.mastra-input:-webkit-autofill,
+.mastra-input:-webkit-autofill:hover, 
+.mastra-input:-webkit-autofill:focus, 
+.mastra-input:-webkit-autofill:active {
+  transition: background-color 5000s ease-in-out 0s !important;
+  -webkit-text-fill-color: var(--text) !important;
+}
+
+.mastra-input-box input::placeholder,
 .mastra-input::placeholder {
-  color: #94a3b8;
+  color: var(--text-faint) !important;
   font-weight: 400;
 }
 
+[data-theme="light"] .mastra-input-box input::placeholder,
+[data-theme="light"] .mastra-input::placeholder {
+  color: #94a3b8 !important;
+}
+
 .mastra-pwd-toggle {
-  background: transparent;
-  border: none;
-  color: #94a3b8;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-dim);
   cursor: pointer;
   padding: 6px;
   display: flex;
@@ -1785,14 +1840,15 @@ small {
 
 .mastra-pwd-toggle:hover {
   color: var(--text);
-  background: var(--line-hover);
+  background: var(--line-hover) !important;
 }
 
 /* Primary CTA Button */
-.mastra-btn-primary {
+.mastra-btn-primary,
+button[type="submit"].mastra-btn-primary {
   font-family: 'Inter', sans-serif;
-  background: var(--text);
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: #ffffff;
   border: none;
   border-radius: 10px;
   height: 46px;
@@ -1806,23 +1862,26 @@ small {
   justify-content: center;
   width: 100%;
   margin-top: 4px;
-  box-shadow:
-    var(--shadow-sm), inset 0 1px 0 var(--auth-btn-inset);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.mastra-btn-primary:hover:not(:disabled) {
-  background: #f4f4f5;
+.mastra-btn-primary:hover:not(:disabled),
+button[type="submit"].mastra-btn-primary:hover:not(:disabled) {
+  background: var(--accent-ink);
+  color: #ffffff;
   transform: translateY(-1px);
-  box-shadow: 0 6px 22px var(--auth-btn-glow);
+  box-shadow: 0 4px 14px rgba(0, 102, 255, 0.3);
 }
 
-.mastra-btn-primary:active:not(:disabled) {
+.mastra-btn-primary:active:not(:disabled),
+button[type="submit"].mastra-btn-primary:active:not(:disabled) {
   transform: translateY(0);
-  box-shadow: 0 2px 8px var(--line-hover);
+  box-shadow: 0 1px 3px rgba(0, 102, 255, 0.2);
 }
 
-.mastra-btn-primary:disabled {
+.mastra-btn-primary:disabled,
+button[type="submit"].mastra-btn-primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
   transform: none;
@@ -1834,7 +1893,7 @@ small {
   align-items: center;
   text-align: center;
   margin: 4px 0;
-  color: var(--text);
+  color: var(--text-dim);
   font-family: 'Inter', sans-serif;
   font-size: 12px;
 }
@@ -1850,7 +1909,7 @@ small {
   padding: 0 12px;
   font-weight: 500;
   letter-spacing: 0.02em;
-  color: var(--text);
+  color: var(--text-dim);
 }
 
 /* Google SSO Button */
@@ -1860,8 +1919,8 @@ small {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  background: #14151d;
-  border: none;
+  background: var(--surface-input);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   color: var(--text);
   height: 46px;
@@ -1876,15 +1935,39 @@ small {
 }
 
 .mastra-btn-google:hover {
-  background: #1a1b24;
-  border-color: var(--auth-divider);
-  color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
   transform: translateY(-1px);
   box-shadow: var(--shadow-md);
 }
 
 .mastra-btn-google:active {
   transform: translateY(0);
+}
+
+[data-theme="light"] .mastra-btn-google {
+  background: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #1e293b !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04) !important;
+}
+
+[data-theme="light"] .mastra-btn-google:hover {
+  background: #f8fafc !important;
+  border-color: #94a3b8 !important;
+  color: #0f172a !important;
+}
+
+[data-theme="dark"] .mastra-btn-google {
+  background: #14151d;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #fafafa;
+}
+
+[data-theme="dark"] .mastra-btn-google:hover {
+  background: #1a1b24;
+  border-color: var(--auth-divider);
+  color: #ffffff;
 }
 
 /* Footer links */
@@ -3008,13 +3091,15 @@ small {
 /* Dev Mode Quick Access on Auth Page */
 .mastra-dev-access {
   margin-top: 22px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   background: var(--surface-recessed);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   display: flex;
   flex-direction: column;
   gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 [data-theme="light"] .mastra-dev-access {
@@ -3055,8 +3140,10 @@ small {
 
 .mastra-dev-buttons {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 @media (max-width: 640px) {
@@ -3069,8 +3156,8 @@ small {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 5px;
+  padding: 8px 6px;
   border-radius: 8px;
   font-size: 11.5px;
   font-weight: 600;
@@ -3080,6 +3167,8 @@ small {
   color: var(--text);
   transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   text-align: center;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .mastra-dev-pill:hover {
@@ -3124,10 +3213,14 @@ small {
 
 .mastra-dev-icon {
   font-size: 13px;
+  flex-shrink: 0;
 }
 
 .mastra-dev-text {
   white-space: nowrap;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .ui-studio-auth-link {

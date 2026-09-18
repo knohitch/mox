@@ -1,7 +1,9 @@
-import { Component, useCallback, useEffect, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useState } from "react";
 import type { ErrorInfo, FormEvent, ReactNode } from "react";
-import { MoxProvider, useMox } from "./api/store.js";
-import { resolveParams, useRoute } from "./router.js";
+import { MoxPreviewProvider, MoxProvider, useMox } from "./api/store.js";
+import { NavAdapterProvider, resolveParams, useRoute, type NavAdapter } from "./router.js";
+import { createMockMoxStore } from "./uiStudio/mockStore.js";
+import type { StudioOnboardingState } from "./uiStudio/previewNavigation.js";
 import { CustomerShell } from "./shell/CustomerShell.js";
 import { AgentsView, WorkTab } from "./views/AgentsView.js";
 import { AdminView } from "./views/AdminView.js";
@@ -90,6 +92,7 @@ function safeCustomerReturn(raw: string | null): string {
 }
 
 function currentReturnTo(): string | null {
+  if (typeof window === "undefined") return null;
   return new URLSearchParams(window.location.search).get("returnTo");
 }
 
@@ -167,6 +170,51 @@ function Connecting() {
   return <div className="backend-error">Connecting to the Mox control plane…</div>;
 }
 
+function DemoOnboardingView() {
+  const { navigate: rootNavigate } = useRoute();
+  const searchParam = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("step") : null;
+  const initialStep: StudioOnboardingState =
+    searchParam === "2"
+      ? "step2"
+      : searchParam === "3"
+        ? "step3"
+        : searchParam === "4"
+          ? "step4"
+          : searchParam === "5"
+            ? "step5"
+            : searchParam === "6"
+              ? "step6"
+              : "step1";
+
+  const mockStore = useMemo(
+    () => createMockMoxStore("customer", "populated", "superadmin", initialStep),
+    [initialStep],
+  );
+
+  const adapter: NavAdapter = useMemo(
+    () => ({
+      path: "/onboarding",
+      navigate: (to: string) => {
+        if (to === "/dashboard") {
+          rootNavigate("/__ui?surface=customer&page=/dashboard&state=populated");
+          return;
+        }
+        rootNavigate(to);
+      },
+      hrefFor: (to: string) => (to === "/dashboard" ? "/__ui?surface=customer&page=/dashboard&state=populated" : to),
+    }),
+    [rootNavigate],
+  );
+
+  return (
+    <NavAdapterProvider adapter={adapter}>
+      <MoxPreviewProvider value={mockStore}>
+        <OnboardingView />
+      </MoxPreviewProvider>
+    </NavAdapterProvider>
+  );
+}
+
 // ----------------------------------------------------------------------------
 // Customer surface
 // ----------------------------------------------------------------------------
@@ -177,6 +225,18 @@ export function CustomerSurface() {
   const authMatch = resolveParams(CUSTOMER_PUBLIC, path);
 
   if (authMatch) return <CustomerPublicAuth pattern={authMatch.pattern} />;
+
+  // Demo onboarding: allow direct access to /onboarding in development/demo mode
+  // so developers and stakeholders can demo the onboarding flow without having
+  // to register a new account every time.
+  // In live production mode (!import.meta.env.DEV), onboarding is strictly protected
+  // and only seen once upon first signup.
+  const isOnboardingPath = path === "/onboarding" || path.startsWith("/onboarding/");
+  if (import.meta.env.DEV && isOnboardingPath) {
+    if (needsAuth || !onboarding || onboarding.status === "completed") {
+      return <DemoOnboardingView />;
+    }
+  }
 
   // Protected customer route.
   if (needsAuth) return <Redirect to={`/login${returnQuery(path)}`} />;

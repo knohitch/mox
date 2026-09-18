@@ -32,6 +32,7 @@ function routeBasename(config: RouterConfig = {}): string {
 }
 
 function currentPath(): string {
+  if (typeof window === "undefined") return "/";
   const raw = window.location.pathname.replace(routeBasename(), "") || "/";
   return raw.startsWith("/") ? raw : `/${raw}`;
 }

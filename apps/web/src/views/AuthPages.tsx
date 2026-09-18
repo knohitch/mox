@@ -199,6 +199,15 @@ export function DevDirectAccess({
           </a>
         ))}
       </div>
+      <div style={{ textAlign: "center", marginTop: "4px" }}>
+        <a
+          href="/onboarding"
+          className="ui-studio-auth-link"
+          style={{ fontSize: "11.5px", color: "var(--text-dim)", textDecoration: "none" }}
+        >
+          Demo Customer Onboarding Flow →
+        </a>
+      </div>
     </div>
   );
 }
@@ -234,7 +243,7 @@ export function AuthLayout({ surface, children }: { surface: SurfaceKind; childr
           <div className="mastra-showcase-frame">
             <img
               className="mastra-showcase-img"
-              src="/assets/auth/mox-showcase-panel.png"
+              src="/assets/auth/mox-showcase-panel.jpg"
               alt="Mox Platform Overview"
             />
           </div>
