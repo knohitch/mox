@@ -143,8 +143,8 @@ export function MoxLogo({ className = "mox-brand-logo" }: { className?: string }
 /**
  * Safe UI-Studio shortcuts for the three surfaces. They never mint auth
  * cookies, never touch PostgreSQL, and only reach isolated in-memory Studio
- * fixtures behind the /__ui security gate (dev build + explicit opt-in +
- * localhost). The explicit `page`/`state`/`role` params open the POPULATED
+ * fixtures behind the /__ui security gate (local dev, or an explicitly
+ * enabled hosted showcase). The explicit `page`/`state`/`role` params open the POPULATED
  * dashboard fixture for each surface so the shortcut is immediately useful
  * for UI work.
  */
