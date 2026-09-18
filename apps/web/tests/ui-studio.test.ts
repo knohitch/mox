@@ -58,14 +58,24 @@ describe("UI Studio Security Module", () => {
     ).toBe(true);
   });
 
-  it("strictly blocks UI Studio in production builds", () => {
+  it("strictly blocks UI Studio in production builds unless hosted demo is explicitly enabled", () => {
     expect(
       isUiStudioAllowed({
         isDev: false,
         envStudioFlag: "1",
         hostname: "localhost",
+        publicDemo: false,
       }),
     ).toBe(false);
+
+    expect(
+      isUiStudioAllowed({
+        isDev: false,
+        envStudioFlag: undefined,
+        hostname: "mox.edfil.site",
+        publicDemo: true,
+      }),
+    ).toBe(true);
   });
 
   it("strictly blocks UI Studio on external or LAN hostnames", () => {
