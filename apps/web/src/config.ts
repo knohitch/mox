@@ -24,13 +24,28 @@ export interface WebConfig {
 
 type MoxRuntimeConfig = {
   apiBaseUrl?: string;
+  /**
+   * Presentation-only hosted showcase mode. This never switches the API seam
+   * to demo data; it only exposes isolated UI Studio fixtures and demo chrome.
+   */
+  publicDemo?: boolean;
 };
 
+function runtimeConfig(): MoxRuntimeConfig {
+  return (
+    (globalThis as typeof globalThis & { __MOX_RUNTIME_CONFIG__?: MoxRuntimeConfig })
+      .__MOX_RUNTIME_CONFIG__ ?? {}
+  );
+}
+
 function runtimeApiBaseUrl(): string | undefined {
-  const runtime = (globalThis as typeof globalThis & { __MOX_RUNTIME_CONFIG__?: MoxRuntimeConfig })
-    .__MOX_RUNTIME_CONFIG__;
-  const value = runtime?.apiBaseUrl?.trim();
+  const value = runtimeConfig().apiBaseUrl?.trim();
   return value || undefined;
+}
+
+/** True only when the web container explicitly enables hosted showcase mode. */
+export function isPublicDemoEnabled(): boolean {
+  return runtimeConfig().publicDemo === true;
 }
 
 export function resolveWebConfig(env: ImportMeta["env"]): WebConfig {
