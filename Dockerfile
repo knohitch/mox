@@ -1,5 +1,9 @@
-# CapRover / production image: control plane + built web SPA on one process.
-# Build context is the repository root (captain-definition dockerfilePath).
+# CapRover image shared by the Mox API and web apps.
+# Both CapRover apps can build the same repository/branch; MOX_PROCESS_TYPE
+# selects which process starts at runtime:
+#   web      -> static SPA server (no database required)
+#   api      -> control plane + migrations
+#   combined -> control plane + migrations + built SPA fallback
 #
 # Pull Node from Amazon ECR Public, not Docker Hub. CapRover BuildKit
 # sessions commonly die on registry-1.docker.io metadata ("no active
@@ -17,7 +21,8 @@ COPY runtime ./runtime
 COPY infra ./infra
 COPY scripts ./scripts
 
-# Same-origin API when unset. Pass a public https URL to split web/API hosts.
+# Optional build-time fallback. Split-host CapRover deployments normally
+# inject VITE_MOX_API_URL at runtime through scripts/serve-web.mjs.
 ARG VITE_MOX_API_URL=
 ENV VITE_MOX_API_URL=$VITE_MOX_API_URL
 
@@ -29,6 +34,7 @@ FROM public.ecr.aws/docker/library/node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=80
+ENV MOX_PROCESS_TYPE=combined
 ENV MOX_WEB_DIST_DIR=/app/apps/web/dist
 
 RUN corepack enable
@@ -36,5 +42,5 @@ COPY --from=build /app /app
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
-EXPOSE 80
+EXPOSE 80 8080
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
