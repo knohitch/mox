@@ -116,7 +116,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (publicDemo && requestUrl.pathname === "/") {
+    if (publicDemo && (req.method === "GET" || req.method === "HEAD") && requestUrl.pathname === "/") {
       commonHeaders(res);
       res.statusCode = 302;
       res.setHeader("location", "/login");
