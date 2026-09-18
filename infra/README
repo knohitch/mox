@@ -1,6 +1,22 @@
 # infra/
 
 Mox-owned infrastructure definitions (deployment, desired-state reconcilers,
-server provisioning). Intentionally empty in Prompt 01. The customer VPS is
-untrusted (Architecture Rule 3); all external side effects must be idempotent
-and audited via `DesiredState`/`OperationRecord`.
+server provisioning). The customer VPS is untrusted (Architecture Rule 3);
+all external side effects must be idempotent and audited via
+`DesiredState`/`OperationRecord`.
+
+## CapRover
+
+CapRover git deploys look for `captain-definition` at the **repository
+root** (not under `infra/`). That file points at `./Dockerfile`, which
+builds the web SPA and runs the control plane on port 80.
+
+Required app environment variables:
+
+- `DATABASE_URL` — PostgreSQL
+- `MOX_PUBLIC_URL` — public `https://` URL of this app
+- `MOX_RUNTIME_MODE=full`
+- `MOX_RUNTIME_COMMAND` — production Mox Runtime launch command
+
+Optional: `MOX_SETUP_TOKEN`, `MOX_CORS_ORIGINS`, `MOX_SKIP_MIGRATIONS=1`.
+`PORT` and `MOX_WEB_DIST_DIR` are set by the image.

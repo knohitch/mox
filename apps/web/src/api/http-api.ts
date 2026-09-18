@@ -110,7 +110,8 @@ export const CSRF_HEADER = "x-mox-csrf";
  * Prompt 00C §C: cross-origin is determined by comparing REAL origins —
  * never by host-name heuristics like "is localhost".
  */
-function detectCrossOrigin(baseUrl: string, injectedOrigin?: string): boolean {
+export function detectCrossOrigin(baseUrl: string, injectedOrigin?: string): boolean {
+  if (!baseUrl) return false;
   const target = new URL(baseUrl).origin;
   if (injectedOrigin !== undefined) return new URL(injectedOrigin).origin !== target;
   if (typeof location !== "undefined" && location.origin) return location.origin !== target;

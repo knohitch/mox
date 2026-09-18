@@ -2,9 +2,10 @@
  * Web client configuration (Prompt 00 §A / 00B §A).
  *
  * Fail-closed rules:
- * - Production builds ALWAYS talk to the real control plane; the API URL is
- *   validated configuration and its absence aborts startup with an honest
- *   error. There is NO silent fallback to demo data.
+ * - Production builds ALWAYS talk to the real control plane. An explicit
+ *   `VITE_MOX_API_URL` is used when the API is on another host; when it is
+ *   omitted the client uses same-origin `/api` (the control plane serves
+ *   the SPA). There is NO silent fallback to demo data.
  * - Demo mode exists for local development only and must be requested
  *   explicitly via VITE_DEMO_MODE=1 in a dev build.
  *
@@ -35,6 +36,11 @@ export function resolveWebConfig(env: ImportMeta["env"]): WebConfig {
 
   const raw = env.VITE_MOX_API_URL;
   if (!raw || raw.trim() === "") {
+    if (env.PROD) {
+      // Combined production deploy: the control plane serves the SPA from
+      // the same origin, so relative `/api` URLs are the real backend.
+      return { mode: "production-api", apiBaseUrl: "" };
+    }
     throw new WebConfigError(
       "missing VITE_MOX_API_URL: the web client requires the Mox Control Plane API URL. " +
         "Set it explicitly (e.g. VITE_MOX_API_URL=https://api.mox.example) — there is no demo fallback.",

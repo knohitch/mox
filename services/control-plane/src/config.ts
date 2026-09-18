@@ -31,6 +31,7 @@ export type SupportCapability =
   | "support.customer.lookup"
   | "support.escalate";
 
+import { statSync } from "node:fs";
 import type { SseLimits } from "./sse-admission.js";
 
 export type PlatformAdminCapability =
@@ -180,6 +181,12 @@ export interface ControlPlaneConfig {
    * test harnesses can omit it; defaults come from DEFAULT_WEBHOOK_ABUSE.
    */
   webhookAbuse?: WebhookAbuseControls;
+  /**
+   * Built web SPA directory. When set, unmatched GET/HEAD paths that are
+   * not /api, /webhooks or /healthz are served from this folder (Vite
+   * history fallback to index.html).
+   */
+  webDistDir?: string;
 }
 
 function requireValue(env: Record<string, string | undefined>, key: string, purpose: string): string {
@@ -245,6 +252,21 @@ function parsePlatformAdminRoles(raw: string | undefined): Record<string, Platfo
     out[userId] = role;
   }
   return out;
+}
+
+function parseWebDistDir(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  try {
+    const info = statSync(value);
+    if (!info.isDirectory()) {
+      throw new ConfigError(`MOX_WEB_DIST_DIR is not a directory: ${value}`);
+    }
+  } catch (error) {
+    if (error instanceof ConfigError) throw error;
+    throw new ConfigError(`MOX_WEB_DIST_DIR does not exist: ${value}`);
+  }
+  return value;
 }
 
 /** Parses and validates environment config; throws ConfigError when absent/invalid. */
@@ -344,6 +366,7 @@ export function loadControlPlaneConfig(
     // Security Repair 05A §G: generous limits keep legitimate provider
     // bursts/retries accepted while bounding abuse. The 256 KB body cap is
     // enforced in http.readRawBody BEFORE any processing.
+    webDistDir: parseWebDistDir(env["MOX_WEB_DIST_DIR"]),
     webhookAbuse: {
       perIpLimit: Number(env["MOX_WEBHOOK_PER_IP_LIMIT"] ?? DEFAULT_WEBHOOK_ABUSE.perIpLimit),
       perIpWindowMs: DEFAULT_WEBHOOK_ABUSE.perIpWindowMs,

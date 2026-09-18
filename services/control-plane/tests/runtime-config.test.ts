@@ -72,4 +72,19 @@ describe("control-plane Mox Runtime config", () => {
     expect(config.platformAdminCapabilities["admin-read"]).toEqual(["admin.read", "admin.notifications.write"]);
     expect(config.platformAdminCapabilities["admin-billing"]).toEqual(["admin.billing.write"]);
   });
+
+  it("rejects a missing MOX_WEB_DIST_DIR and accepts an existing directory", () => {
+    expect(() =>
+      loadControlPlaneConfig({
+        ...baseEnv,
+        MOX_WEB_DIST_DIR: "/definitely-not-a-mox-web-dist",
+      }),
+    ).toThrow(/MOX_WEB_DIST_DIR does not exist/);
+
+    const config = loadControlPlaneConfig({
+      ...baseEnv,
+      MOX_WEB_DIST_DIR: process.cwd(),
+    });
+    expect(config.webDistDir).toBe(process.cwd());
+  });
 });

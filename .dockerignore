@@ -1,0 +1,19 @@
+.git
+.github
+**/.git
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+test-results
+e2e
+OpenBot-main
+OpenMausBot-main
+deepseek-harness-master
+md
+docs
+*.md
+mox auth.jpg
+.playwright-cli
+coverage
+**/.DS_Store
+**/*.log

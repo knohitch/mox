@@ -14,6 +14,7 @@ import { verifyDependencies } from "./composition.js";
 import { AuthError } from "./auth.js";
 import { buildApiRouter } from "./api.js";
 import { httpError, readRawBody, requestLogLine, Router, sendJson, tryParseJson } from "./http.js";
+import { isReservedControlPlanePath, tryServeWebAsset } from "./static-web.js";
 
 export interface RunningControlPlane {
   server: Server;
@@ -138,7 +139,15 @@ export function startControlPlane(services: ControlPlaneServices): Promise<Runni
       const match = router.match(req.method ?? "GET", parsed.pathname);
 
       if (!match) {
-        // Distinguish "unknown path" from "wrong method" honestly.
+        const method = req.method ?? "GET";
+        if (
+          (method === "GET" || method === "HEAD") &&
+          services.config.webDistDir &&
+          !isReservedControlPlanePath(parsed.pathname)
+        ) {
+          const served = await tryServeWebAsset(req, res, services.config.webDistDir, parsed.pathname);
+          if (served) return;
+        }
         throw httpError(`no route for ${req.method} ${parsed.pathname}`, 404);
       }
       let rawBody: Buffer | undefined;
