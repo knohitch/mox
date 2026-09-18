@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link } from "../router.js";
+import { isPublicDemoEnabled } from "../config.js";
 
 /**
  * Standalone (no app-shell) authentication pages for the three surfaces:
@@ -172,17 +173,23 @@ export const DEV_DIRECT_ACCESS_SHORTCUTS: readonly { surface: SurfaceKind; href:
 ];
 
 /**
- * Renders the development-only direct-access pills. Production renders
- * nothing: AuthLayout only mounts this behind `import.meta.env.DEV`, and the
- * /__ui route itself stays gated by the Studio security policy in every build.
+ * Renders direct-access pills for local UI development and for the explicitly
+ * enabled hosted showcase. The hosted path still lands only in isolated
+ * in-memory UI Studio fixtures; it never authenticates against the real API.
  */
-export function DevDirectAccess({ isDev = import.meta.env.DEV }: { isDev?: boolean }): ReactNode {
-  if (!isDev) return null;
+export function DevDirectAccess({
+  isDev = import.meta.env.DEV,
+  isPublicDemo = isPublicDemoEnabled(),
+}: {
+  isDev?: boolean;
+  isPublicDemo?: boolean;
+}): ReactNode {
+  if (!isDev && !isPublicDemo) return null;
   return (
-    <div className="mastra-dev-access" role="region" aria-label="Development Shortcuts">
+    <div className="mastra-dev-access" role="region" aria-label={isPublicDemo ? "Demo Shortcuts" : "Development Shortcuts"}>
       <div className="mastra-dev-header">
         <span className="mastra-dev-dot" aria-hidden>●</span>
-        <span className="mastra-dev-title">DEV MODE DIRECT ACCESS</span>
+        <span className="mastra-dev-title">{isPublicDemo ? "DEMO DIRECT ACCESS" : "DEV MODE DIRECT ACCESS"}</span>
       </div>
       <div className="mastra-dev-buttons">
         {DEV_DIRECT_ACCESS_SHORTCUTS.map((shortcut) => (
@@ -217,8 +224,8 @@ export function AuthLayout({ surface, children }: { surface: SurfaceKind; childr
             {/* Form and Controls */}
             {children}
 
-            {/* Development Mode Direct Access (Customer, Admin, Support) */}
-            {import.meta.env.DEV ? <DevDirectAccess /> : null}
+            {/* Local-development or explicitly enabled hosted-demo direct access. */}
+            <DevDirectAccess />
           </div>
         </div>
 
