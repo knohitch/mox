@@ -2754,6 +2754,44 @@ small {
   border: 1px solid rgba(34, 197, 94, 0.35);
 }
 
+.ui-studio-demo-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  padding: 2px 4px 2px 8px;
+  border-radius: 5px;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.36);
+}
+
+.ui-studio-demo-close {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ui-studio-demo-close:hover,
+.ui-studio-demo-close:focus-visible {
+  background: rgba(239, 68, 68, 0.14);
+  outline: none;
+}
+
 .ui-studio-controls {
   display: flex;
   align-items: center;
