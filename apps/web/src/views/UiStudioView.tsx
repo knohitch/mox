@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { isUiStudioAllowed } from "../uiStudio/security.js";
+import { isPublicDemoEnabled } from "../config.js";
 import { createMockMoxStore, type UiStudioState, type UiStudioSurface } from "../uiStudio/mockStore.js";
 import { MoxPreviewProvider } from "../api/store.js";
 import { CustomerShell } from "../shell/CustomerShell.js";
@@ -90,6 +91,26 @@ export function UiStudioView() {
   const [studio, setStudio] = useState<StudioUrlState>(readStudioLocation);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const { theme: activeTheme, resolvedTheme, setTheme } = useTheme();
+  const publicDemo = isPublicDemoEnabled();
+  const [showDemoIndicator, setShowDemoIndicator] = useState(() => {
+    if (!publicDemo) return false;
+    if (typeof window === "undefined") return true;
+    try {
+      return window.sessionStorage.getItem("mox.publicDemo.indicatorDismissed") !== "1";
+    } catch {
+      return true;
+    }
+  });
+
+  const dismissDemoIndicator = () => {
+    setShowDemoIndicator(false);
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.setItem("mox.publicDemo.indicatorDismissed", "1");
+    } catch {
+      // Dismissal still applies for the current render if storage is blocked.
+    }
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -249,7 +270,24 @@ export function UiStudioView() {
         <div className="ui-studio-brand">
           <span className="ui-studio-glyph" aria-hidden>⬡</span>
           <strong>Mox</strong>
-          <span className="ui-studio-pill dev">DEV ONLY</span>
+          {publicDemo ? (
+            showDemoIndicator ? (
+              <span className="ui-studio-demo-indicator" role="status">
+                <span>DEMO</span>
+                <button
+                  type="button"
+                  className="ui-studio-demo-close"
+                  aria-label="Dismiss demo indicator"
+                  title="Dismiss demo indicator"
+                  onClick={dismissDemoIndicator}
+                >
+                  ×
+                </button>
+              </span>
+            ) : null
+          ) : (
+            <span className="ui-studio-pill dev">DEV ONLY</span>
+          )}
           <span className="ui-studio-pill safe">ISOLATED FIXTURES</span>
           <a href="/login" className="ui-studio-auth-link" title="Jump to Auth Page">
             ← Auth Page
