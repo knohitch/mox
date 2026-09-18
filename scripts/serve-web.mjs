@@ -6,6 +6,9 @@ import path from "node:path";
 const distDir = path.resolve(process.env.MOX_WEB_DIST_DIR || "/app/apps/web/dist");
 const port = Number(process.env.PORT || 80);
 const rawApiBaseUrl = (process.env.VITE_MOX_API_URL || "").trim();
+const publicDemo = ["1", "true", "yes", "on"].includes(
+  (process.env.MOX_PUBLIC_DEMO || "").trim().toLowerCase(),
+);
 
 if (!rawApiBaseUrl) {
   process.stderr.write("web startup failed: VITE_MOX_API_URL is required when MOX_PROCESS_TYPE=web\n");
@@ -107,9 +110,18 @@ const server = createServer(async (req, res) => {
       res.statusCode = 200;
       res.setHeader("content-type", "text/javascript; charset=utf-8");
       res.setHeader("cache-control", "no-store");
-      const body = `window.__MOX_RUNTIME_CONFIG__ = Object.freeze(${JSON.stringify({ apiBaseUrl })});\n`;
+      const body = `window.__MOX_RUNTIME_CONFIG__ = Object.freeze(${JSON.stringify({ apiBaseUrl, publicDemo })});\n`;
       if (req.method === "HEAD") res.end();
       else res.end(body);
+      return;
+    }
+
+    if (publicDemo && requestUrl.pathname === "/") {
+      commonHeaders(res);
+      res.statusCode = 302;
+      res.setHeader("location", "/login");
+      res.setHeader("cache-control", "no-store");
+      res.end();
       return;
     }
 
@@ -156,7 +168,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, "0.0.0.0", () => {
-  process.stdout.write(`mox web listening on :${port} (api=${apiBaseUrl})\n`);
+  process.stdout.write(`mox web listening on :${port} (api=${apiBaseUrl}, publicDemo=${publicDemo})\n`);
 });
 
 const shutdown = (signal) => {
